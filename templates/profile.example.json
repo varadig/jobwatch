@@ -1,0 +1,37 @@
+{
+  "name": "Your Name",
+  "headline": "Your headline, e.g. Project Manager | Operations Lead",
+  "contact": {
+    "phone": "",
+    "email": "you@example.com",
+    "linkedin": "",
+    "portfolio": "",
+    "location": "City, Country"
+  },
+  "summary": "A short professional summary in two or three sentences.",
+  "skills": [
+    {
+      "group": "Core skills",
+      "items": [
+        "Skill one",
+        "Skill two",
+        "Skill three"
+      ]
+    }
+  ],
+  "experience": [
+    {
+      "heading": "Company name",
+      "role": "Job title",
+      "period": "2020 – 2024",
+      "intro": "",
+      "bullets": [
+        "One achievement with a measurable result."
+      ],
+      "projects": [],
+      "links": []
+    }
+  ],
+  "languages": "English (professional working proficiency)",
+  "objective": "Looking for <role> roles, ideally <setting>."
+}

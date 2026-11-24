@@ -1,0 +1,11 @@
+# runtime data: profiles hold personal data, secrets and CVs
+profiles/
+data/
+*.db
+*.pdf
+*.png
+!fonts/*.png
+__pycache__/
+*.pyc
+.venv/
+venv/
