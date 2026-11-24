@@ -24,6 +24,21 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
   Claude-written tailoring. Only the facts in your profile are used.
 - **Tracking:** mark postings as saved, applied or hidden, and see what is new since your last visit.
 
+## Easy start (no terminal needed)
+
+1. Install **Python 3.10 or newer** from [python.org/downloads](https://www.python.org/downloads/).
+   On Windows, tick **"Add python.exe to PATH"** during installation.
+2. Download this project (green **Code** button → **Download ZIP**) and unzip it.
+3. Start it:
+   - **Mac:** double-click `start-mac.command`. The first time, right-click it and choose **Open**.
+   - **Windows:** double-click `start-windows.bat`.
+
+The first start installs what it needs (a minute or two), asks which kind of jobs you are looking for,
+and opens the app in your browser at `http://localhost:8090`. Later starts open it straight away.
+To stop it, press Ctrl+C in its window. Everything it creates stays inside the project folder.
+
+Only you can see the app: it runs on your computer, not on the internet.
+
 ## Profiles: one search per instance
 
 A **profile** is one search: its own searches, keywords, job database, CV profile and notification topic.
@@ -100,6 +115,10 @@ Notes:
 - `profile.json`, the CVs, the job database and photos are personal. The `.gitignore` excludes
   `profiles/` and `data/`. Keep it that way.
 - The source code contains no personal data. The CV renderer uses only what is in `profile.json`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Development
 
