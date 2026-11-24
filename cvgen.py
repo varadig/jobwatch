@@ -411,3 +411,80 @@ def render_letter_pdf(path, profile, cv, font_dir):
         el.append(Paragraph(_esc(para).replace("\n", "<br/>"), body))
     SimpleDocTemplate(path, pagesize=A4, leftMargin=22 * mm, rightMargin=22 * mm, topMargin=20 * mm,
                       bottomMargin=20 * mm, title="%s – Cover letter" % profile["name"]).build(el)
+
+
+# ---------------------------------------------------------------- profil a CV szovegebol
+_LINKS = {"type": "array", "items": {"type": "object", "additionalProperties": False,
+          "required": ["label", "url"], "properties": {"label": _STR, "url": _STR}}}
+PROFILE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["name", "headline", "contact", "summary", "skills", "experience", "languages", "objective"],
+    "properties": {
+        "name": _STR, "headline": _STR, "summary": _STR, "languages": _STR, "objective": _STR,
+        "contact": {"type": "object", "additionalProperties": False,
+                    "required": ["phone", "email", "linkedin", "portfolio", "location"],
+                    "properties": {k: _STR for k in ("phone", "email", "linkedin", "portfolio", "location")}},
+        "skills": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                   "required": ["group", "items"],
+                   "properties": {"group": _STR, "items": {"type": "array", "items": _STR}}}},
+        "experience": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                       "required": ["heading", "role", "period", "intro", "bullets", "projects", "links"],
+                       "properties": {
+                           "heading": _STR, "role": _STR, "period": _STR, "intro": _STR,
+                           "bullets": {"type": "array", "items": _STR},
+                           "projects": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                        "required": ["name", "role", "text", "links"],
+                                        "properties": {"name": _STR, "role": _STR, "text": _STR, "links": _LINKS}}},
+                           "links": _LINKS}}},
+    },
+}
+
+PROFILE_SYSTEM = """You convert a candidate's CV into a structured profile.
+- Use only facts stated in the CV text. Never invent employers, titles, dates, skills, projects or achievements.
+- Keep employers, roles and periods exactly as written.
+- Keep the language of the CV.
+- If the CV does not state a field, use an empty string or an empty list.
+- Put contact details only in "contact".
+- Output only the JSON object."""
+
+MAX_CV_CHARS = 60000
+
+
+def profile_from_text(api_key, text):
+    """Claude API: a CV szovegebol profil-JSON (dict). Ugyanaz a profil-szerkezet, mint a DEFAULT_PROFILE."""
+    import anthropic
+
+    text = (text or "").strip()
+    if not text:
+        raise CVError("Nincs CV-szöveg.")
+    if len(text) > MAX_CV_CHARS:
+        raise CVError("A CV szövege túl hosszú (max. %d karakter)." % MAX_CV_CHARS)
+    if not (api_key or os.environ.get("ANTHROPIC_API_KEY")):
+        raise CVError("Nincs Anthropic API-kulcs (Beállítások → Claude API).")
+    client = anthropic.Anthropic(api_key=api_key or None, timeout=300.0, max_retries=2)
+    try:
+        resp = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=12000,
+            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": PROFILE_SCHEMA}},
+            system=PROFILE_SYSTEM,
+            messages=[{"role": "user", "content": "<cv>\n%s\n</cv>" % text}],
+        )
+    except anthropic.AuthenticationError:
+        raise CVError("Érvénytelen Anthropic API-kulcs (Beállítások → Claude API).")
+    except anthropic.RateLimitError:
+        raise CVError("Claude API: túl sok kérés, próbáld újra pár perc múlva.")
+    except anthropic.APIStatusError as e:
+        raise CVError("Claude API hiba (%s): %s" % (e.status_code, e.message))
+    except anthropic.APIConnectionError:
+        raise CVError("Nem érem el a Claude API-t (hálózati hiba).")
+    if resp.stop_reason in ("refusal", "max_tokens"):
+        raise CVError("A profil nem készült el (%s). Próbáld rövidebb szöveggel." % resp.stop_reason)
+    raw = "".join(b.text for b in resp.content if b.type == "text")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise CVError("A modell válasza nem érvényes JSON.")
+    if not data.get("name") or not data.get("experience"):
+        raise CVError("Nem sikerült kinyerni a nevet vagy a munkatapasztalatot a CV-ből.")
+    return data

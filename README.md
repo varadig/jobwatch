@@ -62,6 +62,11 @@ Templates live in `templates/`:
 | `unity-game` | Unity / game development roles |
 | `project-manager` | project, programme and product roles (an example to adapt) |
 
+**Creating the CV profile from your existing CV:** on the CV-profil page, upload a PDF or paste the text.
+Claude turns it into the profile structure and shows the result in the editor. Check it, fix what is wrong,
+then press Mentés. Your full CV text, contact details included, is sent to the Anthropic API for this step.
+A scanned PDF with no text layer cannot be read; paste the text instead. The API key is set in Settings.
+
 To change what a profile searches for, edit the Settings page, or the `linkedin_searches`,
 `remotive_queries` and keyword lists in its `config.json`.
 

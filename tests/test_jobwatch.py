@@ -164,3 +164,61 @@ class PasswordProtection(unittest.TestCase):
             app.AUTH_PASSWORD = old
             srv.shutdown()
             srv.server_close()
+
+
+class CvImport(unittest.TestCase):
+    def _pdf(self, lines):
+        import io
+        from reportlab.pdfgen import canvas
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf)
+        y = 800
+        for line in lines:
+            c.drawString(72, y, line)
+            y -= 20
+        c.save()
+        return buf.getvalue()
+
+    def test_multipart_pdf_is_extracted(self):
+        pdf = self._pdf(["Jane Doe", "Senior Engineer at Acme"])
+        ctype = "multipart/form-data; boundary=XYZ"
+        body = (b"--XYZ\r\nContent-Disposition: form-data; name=\"pdf\"; filename=\"cv.pdf\"\r\n"
+                b"Content-Type: application/pdf\r\n\r\n" + pdf + b"\r\n--XYZ--\r\n")
+        self.assertEqual(app.pdf_from_multipart(ctype, body), pdf)
+
+    def test_multipart_without_pdf_field_is_empty(self):
+        body = b"--XYZ\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--XYZ--\r\n"
+        self.assertEqual(app.pdf_from_multipart("multipart/form-data; boundary=XYZ", body), b"")
+
+    def test_pdf_text_reads_the_text_layer(self):
+        text = app.pdf_text(self._pdf(["Jane Doe", "Senior Engineer at Acme"]))
+        self.assertIn("Jane Doe", text)
+        self.assertIn("Acme", text)
+
+    def test_scanned_pdf_without_text_gives_a_clear_error(self):
+        import io
+        from pypdf import PdfWriter
+        buf = io.BytesIO()
+        w = PdfWriter()
+        w.add_blank_page(width=200, height=200)
+        w.write(buf)
+        with self.assertRaises(ValueError):
+            app.pdf_text(buf.getvalue())
+
+    def test_profile_from_cv_text_uses_the_model_result(self):
+        import cvgen
+        fake = {"name": "Jane Doe", "headline": "", "contact": {}, "summary": "", "skills": [],
+                "experience": [{"heading": "Acme", "role": "Engineer", "period": "2020", "intro": "",
+                                "bullets": [], "projects": [], "links": []}],
+                "languages": "", "objective": ""}
+        old = cvgen.profile_from_text
+        cvgen.profile_from_text = lambda key, text: fake
+        try:
+            out = json.loads(app.profile_from_cv_text("Jane Doe, Engineer at Acme"))
+        finally:
+            cvgen.profile_from_text = old
+        self.assertEqual(out["name"], "Jane Doe")
+
+    def test_schema_requires_the_fields_the_profile_needs(self):
+        import cvgen
+        self.assertTrue({"name", "experience", "contact"} <= set(cvgen.PROFILE_SCHEMA["required"]))

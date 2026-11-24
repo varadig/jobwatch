@@ -1212,6 +1212,46 @@ def save_settings(f):
 
 
 # ---------------------------------------------------------------- CV
+MAX_PDF_BYTES = 10 * 1024 * 1024
+
+
+def pdf_from_multipart(content_type, body):
+    """Kiszedi a "pdf" mezo fajlt a multipart/form-data torzsebol. Ures bytes, ha nincs."""
+    from email.parser import BytesParser
+    from email.policy import default
+    if not content_type or "multipart/form-data" not in content_type:
+        return b""
+    msg = BytesParser(policy=default).parsebytes(b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + body)
+    for part in msg.iter_parts():
+        if part.get_param("name", header="content-disposition") == "pdf":
+            return part.get_payload(decode=True) or b""
+    return b""
+
+
+def pdf_text(data):
+    """PDF szoveganak kiolvasasa (pypdf). Szkennelt, kepkent mentett PDF-bol nincs szoveg."""
+    import io
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    if not text:
+        raise ValueError("A PDF-ből nem olvasható ki szöveg (valószínűleg szkennelt kép). Másold be a szöveget.")
+    return text
+
+
+def profile_from_cv_text(text):
+    """Claude API-val profil-JSON a CV szovegebol. Hibanal ValueError a felhasznaloi uzenettel."""
+    import cvgen
+    with CFG_LOCK:
+        cfg = load_config()
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    try:
+        prof = cvgen.profile_from_text(key, text)
+    except cvgen.CVError as ex:
+        raise ValueError(str(ex))
+    return json.dumps(prof, ensure_ascii=False, indent=2)
+
+
 def load_profile():
     import cvgen
     if os.path.exists(PROFILE_PATH):
@@ -1443,13 +1483,23 @@ def docs_page():
     return page("Dokumentumok", intro + ("".join(blocks) or '<div class="card muted">Még nincs generált dokumentum.</div>'))
 
 
-def profile_page(flash=""):
+def profile_page(flash="", prefill=None):
+    current = prefill if prefill is not None else json.dumps(load_profile(), ensure_ascii=False, indent=2)
     body = """<div class="card"><h2>CV-profil (tényanyag)</h2><p class="muted">Ebből dolgozik a Claude. Csak ami itt szerepel, az kerülhet a CV-be.
 A <code>contact</code> rész nem megy el az API-nak, csak a PDF fejlécébe kerül. Telefonszámot itt adhatsz meg.</p>
 <p><a href="/base-cv.pdf?photo=1" target="_blank"><button class="primary">⬇️ Alap CV fotóval (PDF)</button></a>
-<a href="/base-cv.pdf?photo=0" target="_blank"><button>⬇️ Alap CV fotó nélkül (USA)</button></a></p>
+<a href="/base-cv.pdf?photo=0" target="_blank"><button>⬇️ Alap CV fotó nélkül (USA)</button></a></p></div>
+<div class="card"><h2>Profil készítése a meglévő CV-ből</h2>
+<p class="muted">A CV teljes szövege (beleértve az elérhetőségeidet is) elmegy az Anthropic API-nak, a Claude feldolgozza.
+Az eredmény csak előnézet: az alábbi szerkesztőben ellenőrizd és javítsd, mentés csak a Mentés gombbal történik.
+Kell hozzá az API-kulcs (Beállítások → Claude API).</p>
+<form method="post" action="/profile/import-pdf" enctype="multipart/form-data" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<input type="file" name="pdf" accept="application/pdf"><button class="primary">PDF feldolgozása</button></form>
+<form method="post" action="/profile/import" style="margin-top:10px">
+<textarea name="cv_text" style="min-height:140px" placeholder="…vagy másold be a CV szövegét ide"></textarea><button class="primary">Szöveg feldolgozása</button></form></div>
+<div class="card"><h2>Szerkesztő</h2>
 <form method="post" action="/profile"><textarea name="profile" style="min-height:600px">%s</textarea><button class="primary">Mentés</button></form></div>""" % (
-        e(json.dumps(load_profile(), ensure_ascii=False, indent=2)))
+        e(current))
     return page("CV-profil", body, flash)
 
 
@@ -1598,13 +1648,44 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("GET hiba")
             self.send_html(page("Hiba", "<p class=err>%s</p>" % e(ex)), 500)
 
+    def profile_import_result(self, text_source, flash_ok):
+        try:
+            prefill = profile_from_cv_text(text_source())
+            return self.send_html(profile_page(flash_ok, prefill=prefill))
+        except ValueError as ex:
+            return self.send_html(profile_page("Nem sikerült: %s" % ex))
+
+    def profile_import_text(self, text):
+        return self.profile_import_result(lambda: text, "Ellenőrizd az előnézetet, majd mentsd.")
+
+    def profile_import_pdf(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_PDF_BYTES + 4096:
+            return self.send_html(profile_page("A fájl túl nagy (max. 10 MB)."))
+        body = self.rfile.read(length)
+        data = pdf_from_multipart(self.headers.get("Content-Type", ""), body)
+        if not data:
+            return self.send_html(profile_page("Nem érkezett PDF-fájl."))
+        if len(data) > MAX_PDF_BYTES:
+            return self.send_html(profile_page("A fájl túl nagy (max. 10 MB)."))
+        def source():
+            try:
+                return pdf_text(data)
+            except Exception as ex:
+                raise ValueError("PDF olvasási hiba: %s" % ex)
+        return self.profile_import_result(source, "Ellenőrizd az előnézetet, majd mentsd.")
+
     def do_POST(self):
         if not self.require_login():
             return
         u = urllib.parse.urlparse(self.path)
         REQ.path = u.path
         try:
+            if u.path == "/profile/import-pdf":
+                return self.profile_import_pdf()
             f = self.form()
+            if u.path == "/profile/import":
+                return self.profile_import_text(f.get("cv_text", ""))
             if u.path == "/run":
                 threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
                 time.sleep(0.3)
