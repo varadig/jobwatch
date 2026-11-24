@@ -78,7 +78,7 @@ DEFAULT_CONFIG = {
 
 CFG_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
-STATE = {"running": False, "last_run": None, "next_run": None}
+STATE = {"running": False, "last_run": None, "next_run": None, "progress": None, "enrich": None}
 REQ = threading.local()  # current request path (active menu item)
 
 
@@ -647,7 +647,9 @@ def enrich_pending_linkedin(cfg, limit=60):
                      for r in rows]
             if not items:
                 return
+            STATE["enrich"] = {"total": len(items), "done": 0}
             enrich_linkedin(con, items, limit=limit)
+            STATE["enrich"]["done"] = sum(1 for it in items if it.get("description"))
         with db() as con:
             for it in items:
                 if not it.get("description"):
@@ -660,6 +662,7 @@ def enrich_pending_linkedin(cfg, limit=60):
     except Exception:
         log.exception("LinkedIn background enrichment failed")
     finally:
+        STATE["enrich"] = None
         ENRICH_LOCK.release()
 
 
@@ -678,19 +681,24 @@ def run_all(force=False):
                 if cfg["sources"].get(name) and source_due(con, cfg, name, force):
                     st = con.execute("SELECT seeded FROM source_state WHERE source=?", (name,)).fetchone()
                     due.append((name, fn, bool(st and st["seeded"])))
-        results = {}
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        STATE["progress"] = {"total": len(due), "done": 0, "sources": {n: "fetching" for n, _, _ in due}}
+        completed = iter(())
         if due:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=len(due)) as pool:
-                futures = {name: pool.submit(fn, cfg) for name, fn, _ in due}
-                for name, _, _ in due:
-                    try:
-                        results[name] = (futures[name].result(), None)
-                    except Exception as ex:
-                        log.exception("Source error: %s", name)
-                        results[name] = ([], "%s: %s" % (type(ex).__name__, ex))
-        for name, _, seeded in due:
-            items, err = results[name]
+            pool = ThreadPoolExecutor(max_workers=len(due))
+            futs = {pool.submit(fn, cfg): (name, seeded) for name, fn, seeded in due}
+            pool.shutdown(wait=False)
+            completed = as_completed(futs)
+        for fut in completed:
+            name, seeded = futs[fut]
+            try:
+                items, err = fut.result(), None
+            except Exception as ex:
+                log.exception("Source error: %s", name)
+                items, err = [], "%s: %s" % (type(ex).__name__, ex)
+            prog = STATE["progress"]
+            prog["done"] += 1
+            prog["sources"][name] = ("error" if err else "done") + " (%d)" % len(items)
             ts = now_iso()
             new = 0
             with db() as con:
@@ -749,6 +757,7 @@ def run_all(force=False):
     finally:
         STATE["running"] = False
         STATE["last_run"] = now_iso()
+        STATE["progress"] = None
         RUN_LOCK.release()
 
 
@@ -949,9 +958,36 @@ def bucket_of(n):
     return BUCKETS[-1][1]
 
 
+def progress_html():
+    """Live status bar: per-source progress of a refresh and the background description fetch."""
+    prog = STATE.get("progress")
+    enr = STATE.get("enrich")
+    if not prog and not enr:
+        return ""
+    parts = []
+    if prog:
+        pct = int(100 * prog["done"] / prog["total"]) if prog["total"] else 100
+        icons = {"fetching": "⏳", "done": "✅", "error": "❌"}
+        rows = "".join('<span class="chip">%s %s: %s</span>' % (
+            icons.get(str(s).split(" ")[0], "•"), e(n), e(s)) for n, s in prog["sources"].items())
+        parts.append('<div class="card"><b>Refreshing sources… %d of %d done</b>'
+                     '<progress class="progress progress-primary w-full mt-2" value="%d" max="100"></progress>'
+                     '<div class="chips" style="margin-top:8px">%s</div></div>' % (prog["done"], prog["total"], pct, rows))
+    if enr and enr.get("total"):
+        parts.append('<div class="card muted">LinkedIn descriptions: %d of %d fetched in the background '
+                     '(work mode and score update as they arrive).</div>' % (enr.get("done", 0), enr["total"]))
+    return "".join(parts)
+
+
 def jobs_page(q):
     with CFG_LOCK:
         cfg = load_config()
+    # first load of an empty instance: start the first refresh now instead of showing nothing
+    with db() as con:
+        empty = con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+    if empty and not STATE["running"] and not STATE.get("progress"):
+        threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
+        time.sleep(0.3)
     status = q.get("status", "active")
     src = q.get("source", "")
     try:
@@ -1123,7 +1159,8 @@ def jobs_page(q):
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
         cards.append('<div class="card muted">No postings match the filters. Try loosening them, or press “Refresh”.</div>')
-    return page("Jobs", stats + filt + head + "".join(cards))
+    busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
+    return page("Jobs", progress_html() + stats + filt + head + "".join(cards), refresh=3 if busy else 0)
 
 
 def sources_page():
