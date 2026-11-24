@@ -1453,9 +1453,42 @@ A <code>contact</code> rész nem megy el az API-nak, csak a PDF fejlécébe ker�
     return page("CV-profil", body, flash)
 
 
+AUTH_PASSWORD = os.environ.get("JOBWATCH_PASSWORD", "")
+AUTH_PUBLIC_PATHS = ("/health",)  # the platform's health check must get through without a password
+
+
+def auth_ok(header, password):
+    """True if no password is set, or the Basic auth header carries it (the user name is ignored)."""
+    if not password:
+        return True
+    import base64
+    if not header or not header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header[len("Basic "):]).decode("utf-8")
+    except Exception:
+        return False
+    given = decoded.partition(":")[2]
+    return secrets.compare_digest(given.encode("utf-8"), password.encode("utf-8"))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
+
+    def require_login(self):
+        """Sends 401 and returns False unless the request is allowed."""
+        path = urllib.parse.urlparse(self.path).path
+        if path in AUTH_PUBLIC_PATHS or auth_ok(self.headers.get("Authorization"), AUTH_PASSWORD):
+            return True
+        body = "Bejelentkezés szükséges.".encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="jobwatch", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
 
     def send_html(self, s, code=200):
         b = s.encode("utf-8")
@@ -1482,6 +1515,8 @@ class Handler(BaseHTTPRequestHandler):
         return (p.path or "/") + ("?" + p.query if p.query else "")
 
     def do_GET(self):
+        if not self.require_login():
+            return
         u = urllib.parse.urlparse(self.path)
         REQ.path = u.path
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
@@ -1564,6 +1599,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(page("Hiba", "<p class=err>%s</p>" % e(ex)), 500)
 
     def do_POST(self):
+        if not self.require_login():
+            return
         u = urllib.parse.urlparse(self.path)
         REQ.path = u.path
         try:

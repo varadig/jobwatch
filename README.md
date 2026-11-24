@@ -61,8 +61,37 @@ Environment variables (all optional):
 | `JOBWATCH_DOCS` | `<data>/docs` | where the per-company document folders go |
 | `JOBWATCH_SMB_PREFIX`, `JOBWATCH_SMB_BASE` | empty | optional: show a network-share link for the document folder, for example `/srv/share` → `smb://host/share` |
 | `ANTHROPIC_API_KEY` | empty | the Claude API key, if not set in Settings |
+| `JOBWATCH_PASSWORD` | empty | if set, every page needs HTTP Basic auth with this password |
 
 The first CV generation needs an Anthropic API key. Without one the rest of the app works.
+
+## Hosting a demo instance (Docker, Fly.io)
+
+The image runs one profile. Data lives in `/data` (a volume). The first start seeds an empty volume with
+the project-manager template and a blank CV profile, so a demo never contains personal data.
+
+```sh
+docker build -t jobwatch .
+docker run -p 8080:8080 -v jobwatch-data:/data -e JOBWATCH_PASSWORD='change-me' jobwatch
+```
+
+Fly.io (see `fly.toml`; change the app name first):
+
+```sh
+fly volumes create jobwatch_data --size 1 --region ams
+fly secrets set JOBWATCH_PASSWORD='<long random password>'
+fly deploy
+```
+
+Notes:
+
+- **Password:** `JOBWATCH_PASSWORD` turns on HTTP Basic auth for every page. The user name is ignored; any
+  name with the right password gets in. Without the variable the app is open, as on a home network.
+  `/health` stays open for the platform's health check.
+- **One machine only.** The refresh scheduler runs inside the app, and the config says `auto_stop_machines = false`.
+  Do not scale to two machines on one volume.
+- **Container runs as root** on purpose: a freshly mounted Fly volume is root-owned.
+- Check the Fly pricing and free allowance before deploying; they change.
 
 ## Privacy and secrets
 
@@ -99,4 +128,5 @@ The tests cover scoring per profile, document names, the daisyUI markup helper, 
 | `tools/new_profile.py` | creates a profile folder from a template |
 | `templates/` | search and keyword templates; `profile.example.json` for a CV profile |
 | `tests/` | unit tests |
+| `Dockerfile`, `docker-entrypoint.sh`, `fly.toml` | container image and Fly.io config |
 | `fonts/` | Inter (SIL OFL 1.1) and DejaVu Sans fonts used by the PDF renderer |

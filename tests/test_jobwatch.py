@@ -123,3 +123,44 @@ class CvDefaults(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PasswordProtection(unittest.TestCase):
+    def test_auth_ok_without_password_is_always_true(self):
+        self.assertTrue(app.auth_ok(None, ""))
+
+    def test_auth_ok_accepts_only_the_right_password(self):
+        import base64
+        good = "Basic " + base64.b64encode(b"anyone:s3cret").decode()
+        bad = "Basic " + base64.b64encode(b"anyone:wrong").decode()
+        self.assertTrue(app.auth_ok(good, "s3cret"))
+        self.assertFalse(app.auth_ok(bad, "s3cret"))
+        self.assertFalse(app.auth_ok(None, "s3cret"))
+        self.assertFalse(app.auth_ok("Basic !!!not-base64", "s3cret"))
+
+    def test_server_asks_for_login_and_lets_health_through(self):
+        import threading
+        import urllib.error
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import base64
+        app.init_db()  # the front page reads the database; main() also runs the migrations
+        app.migrate_db()
+        old = app.AUTH_PASSWORD
+        app.AUTH_PASSWORD = "s3cret"
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/")
+            self.assertEqual(ctx.exception.code, 401)
+            self.assertIn("Basic", ctx.exception.headers.get("WWW-Authenticate", ""))
+            self.assertEqual(urllib.request.urlopen(base + "/health").status, 200)
+            req = urllib.request.Request(base + "/", headers={
+                "Authorization": "Basic " + base64.b64encode(b"u:s3cret").decode()})
+            self.assertEqual(urllib.request.urlopen(req).status, 200)
+        finally:
+            app.AUTH_PASSWORD = old
+            srv.shutdown()
+            srv.server_close()

@@ -1,0 +1,34 @@
+# Fly.io config for a jobwatch demo instance.
+# Before the first deploy: change `app` to a name nobody else uses, and pick a region near you.
+#   fly launch --no-deploy --copy-config   # or edit this file, then:
+#   fly volumes create jobwatch_data --size 1 --region ams
+#   fly secrets set JOBWATCH_PASSWORD='<long random password>'
+#   fly deploy
+app = "jobwatch-demo"
+primary_region = "ams"
+
+[build]
+
+[env]
+  JOBWATCH_DATA = "/data"
+  JOBWATCH_DOCS = "/data/docs"
+  JOBWATCH_PORT = "8080"
+
+[[mounts]]
+  source = "jobwatch_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # The scheduler runs inside the app: the machine must stay up or no refresh happens.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"

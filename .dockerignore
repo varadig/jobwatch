@@ -1,0 +1,6 @@
+.git
+profiles
+data
+tests
+__pycache__
+*.pyc
