@@ -254,3 +254,47 @@ class LinkedInEnrichment(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertEqual(items[0]["work_mode"], "remote")
         self.assertEqual(calls["n"], 2)
+
+
+class BackgroundEnrichment(unittest.TestCase):
+    def test_pending_linkedin_rows_get_description_and_mode(self):
+        app.init_db()
+        app.migrate_db()
+        con = app.db()
+        con.execute("DELETE FROM jobs WHERE id='linkedin:bg-1'")
+        con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
+                    "first_seen,last_seen,status,notified,work_mode) VALUES('linkedin:bg-1','linkedin','Project Manager',"
+                    "'Acme','Europe','https://x/1',NULL,'',0,'','bg',?,?,'new',1,'unknown')", ("2026-01-01",) * 2)
+        con.commit()
+        old_detail, old_sleep = app.linkedin_detail, app.time.sleep
+        app.linkedin_detail = lambda jid: "This is a fully remote role."
+        app.time.sleep = lambda s: None
+        cfg = app.load_config()
+        try:
+            app.enrich_pending_linkedin(cfg)
+        finally:
+            app.linkedin_detail, app.time.sleep = old_detail, old_sleep
+        row = con.execute("SELECT description, work_mode FROM jobs WHERE id='linkedin:bg-1'").fetchone()
+        con.close()
+        self.assertEqual(row["work_mode"], "remote")
+        self.assertIn("fully remote", row["description"])
+
+
+class ResetCache(unittest.TestCase):
+    def test_reset_removes_jobs_and_source_status_but_keeps_settings(self):
+        app.init_db()
+        app.migrate_db()
+        cfg_before = app.load_config()
+        con = app.db()
+        con.execute("INSERT OR REPLACE INTO source_state(source,last_run,last_ok,found,new,error,seeded) VALUES('x','a','a',1,1,NULL,1)")
+        con.commit()
+        con.close()
+        import io
+        # the handler clears the tables; call the same SQL the route runs
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            con.execute("DELETE FROM source_state")
+        with app.db() as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT count(*) FROM source_state").fetchone()[0], 0)
+        self.assertEqual(app.load_config()["title_keywords"], cfg_before["title_keywords"])

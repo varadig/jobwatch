@@ -630,6 +630,39 @@ def source_due(con, cfg, name, force):
     return (datetime.now(timezone.utc) - last).total_seconds() >= interval * 60 - 30
 
 
+ENRICH_LOCK = threading.Lock()
+
+
+def enrich_pending_linkedin(cfg, limit=60):
+    """Background job: fetches the description of LinkedIn postings that still have none,
+    then updates their work mode and score in the database. Never blocks a refresh."""
+    if not ENRICH_LOCK.acquire(blocking=False):
+        return
+    try:
+        with db() as con:
+            rows = con.execute("SELECT id, title, location FROM jobs WHERE source='linkedin' "
+                               "AND (description IS NULL OR description='') ORDER BY first_seen DESC LIMIT ?",
+                               (limit,)).fetchall()
+            items = [{"ext_id": r["id"][len("linkedin:"):], "title": r["title"], "location": r["location"]}
+                     for r in rows]
+            if not items:
+                return
+            enrich_linkedin(con, items, limit=limit)
+        with db() as con:
+            for it in items:
+                if not it.get("description"):
+                    continue
+                jid = "linkedin:" + it["ext_id"]
+                sc, hits = score_job(cfg, it)
+                con.execute("UPDATE jobs SET description=?, work_mode=?, score=?, matched=? WHERE id=?",
+                            (it["description"], it["work_mode"], sc, ", ".join(hits), jid))
+        log.info("LinkedIn descriptions: %d updated", sum(1 for it in items if it.get("description")))
+    except Exception:
+        log.exception("LinkedIn background enrichment failed")
+    finally:
+        ENRICH_LOCK.release()
+
+
 def run_all(force=False):
     if not RUN_LOCK.acquire(blocking=False):
         return
@@ -638,25 +671,28 @@ def run_all(force=False):
         with CFG_LOCK:
             cfg = load_config()
         to_notify = []
-        for name, fn in SOURCE_FUNCS.items():
-            if not cfg["sources"].get(name):
-                continue
-            with db() as con:
-                if not source_due(con, cfg, name, force):
-                    continue
-                st = con.execute("SELECT seeded FROM source_state WHERE source=?", (name,)).fetchone()
-                seeded = bool(st and st["seeded"])
+        # 1) decide which sources are due, 2) fetch them in parallel, 3) save them one by one in order
+        due = []
+        with db() as con:
+            for name, fn in SOURCE_FUNCS.items():
+                if cfg["sources"].get(name) and source_due(con, cfg, name, force):
+                    st = con.execute("SELECT seeded FROM source_state WHERE source=?", (name,)).fetchone()
+                    due.append((name, fn, bool(st and st["seeded"])))
+        results = {}
+        if due:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(due)) as pool:
+                futures = {name: pool.submit(fn, cfg) for name, fn, _ in due}
+                for name, _, _ in due:
+                    try:
+                        results[name] = (futures[name].result(), None)
+                    except Exception as ex:
+                        log.exception("Source error: %s", name)
+                        results[name] = ([], "%s: %s" % (type(ex).__name__, ex))
+        for name, _, seeded in due:
+            items, err = results[name]
             ts = now_iso()
-            try:
-                items = fn(cfg)
-                err = None
-            except Exception as ex:
-                log.exception("Source error: %s", name)
-                items, err = [], "%s: %s" % (type(ex).__name__, ex)
             new = 0
-            if name == "linkedin" and items:
-                with db() as con:
-                    enrich_linkedin(con, items)
             with db() as con:
                 for it in items:
                     if not it.get("title") or not it.get("url", "").startswith("http"):
@@ -707,6 +743,9 @@ def run_all(force=False):
             if ok_channels:
                 with db() as con:
                     con.executemany("UPDATE jobs SET notified=1 WHERE id=?", [(j["id"],) for j in to_notify])
+        if any(name == "linkedin" for name, _, _ in due):
+            # descriptions for LinkedIn postings come later, in the background, so the list is not held up
+            threading.Thread(target=enrich_pending_linkedin, args=(cfg,), daemon=True).start()
     finally:
         STATE["running"] = False
         STATE["last_run"] = now_iso()
@@ -1177,7 +1216,7 @@ def settings_page(flash=""):
 <div><label>Location</label><textarea name="location_keywords" style="min-height:260px">%s</textarea></div></div></div>
 <button class="primary">Save</button></form>
 <div class="card" style="margin-top:14px"><h2>Test</h2><form method="post" action="/test" style="display:flex;gap:8px">
-<button name="what" value="ntfy">Test push</button><button name="what" value="email">Test e-mail</button></form></div>""" % (
+<button name="what" value="ntfy">Test push</button><button name="what" value="email">Test e-mail</button></form><form method="post" action="/reset-jobs" style="margin-top:10px" onsubmit="return confirm('Delete all found jobs and source status? Settings, profile, CVs and documents are kept.')"><button name="reset" value="1">Reset job cache (delete found jobs)</button> <span class="muted">Settings, profile, CVs and documents are kept; the next refresh starts from scratch.</span></form></div>""" % (
         e(n["topic"]), e(n["server"]), chk(n.get("enabled")), e(n["server"]), e(n["topic"]), e(sub), e(sub),
         chk(m.get("enabled")), e(m["smtp_host"]), e(m["smtp_port"]), e(m["username"]),
         "(set ✓)" if m.get("password") else "", e(m["to"]),
@@ -1698,6 +1737,11 @@ class Handler(BaseHTTPRequestHandler):
             f = self.form()
             if u.path == "/profile/import":
                 return self.profile_import_text(f.get("cv_text", ""))
+            if u.path == "/reset-jobs":
+                with db() as con:
+                    con.execute("DELETE FROM jobs")
+                    con.execute("DELETE FROM source_state")
+                return self.redirect("/settings?msg=" + urllib.parse.quote("Job cache cleared. Press Refresh to fetch again."))
             if u.path == "/run":
                 threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
                 time.sleep(0.3)
