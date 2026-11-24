@@ -696,9 +696,6 @@ def run_all(force=False):
             except Exception as ex:
                 log.exception("Source error: %s", name)
                 items, err = [], "%s: %s" % (type(ex).__name__, ex)
-            prog = STATE["progress"]
-            prog["done"] += 1
-            prog["sources"][name] = ("error" if err else "done") + " (%d)" % len(items)
             ts = now_iso()
             new = 0
             with db() as con:
@@ -739,6 +736,9 @@ def run_all(force=False):
                     "last_ok=COALESCE(excluded.last_ok, source_state.last_ok), found=excluded.found, "
                     "new=excluded.new, error=excluded.error, seeded=MAX(source_state.seeded, excluded.seeded)",
                     (name, ts, None if err else ts, len(items), new, err, 0 if err else 1))
+            prog = STATE["progress"]
+            prog["done"] += 1
+            prog["sources"][name] = ("error" if err else "done") + " (%d)" % len(items)
             log.info("%s: %d postings, %d new%s", name, len(items), new, " ERROR: " + err if err else "")
         errs = notify_jobs(cfg, to_notify)
         if to_notify and not errs:
