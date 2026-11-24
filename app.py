@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Allasfigyelo (jobwatch) - figyeli az allashirdeteseket, pontozza a CV-hez,
-ntfy push / e-mail ertesitest kuld, es bongeszheto webes feluletet ad.
-Csak Python standard library. Futtatas: python3 app.py  (port: JOBWATCH_PORT, alap 8090)
+"""jobwatch - watches job postings, scores them against the CV,
+sends ntfy push / e-mail notifications, and serves a web interface.
+Only the Python standard library. Run: python3 app.py  (port: JOBWATCH_PORT, default 8090)
 """
 import copy, hashlib, html, json, shutil, logging, os, re, secrets, smtplib, sqlite3, ssl, threading, time
 import urllib.error, urllib.parse, urllib.request
@@ -23,8 +23,8 @@ CV_DIR = os.path.join(DATA, "cv")
 FONT_DIR = os.path.join(BASE, "fonts")
 PHOTO_PATH = os.path.join(DATA, "photo.png")
 # Generalt dokumentumok cegenkent; /mnt/media a Samba "Media" megosztas, igy a Macrol is elerheto.
-# Generalt dokumentumok (CV/level/kisereolevel) mappaja. Ha a fajlrendszer egy halozati megosztason van,
-# a JOBWATCH_SMB_PREFIX (helyi ut eleje) es JOBWATCH_SMB_BASE (smb:// cim) megadasaval a Finder-link is megy.
+# Folder for generated documents (CV / resume / cover letter). If the file system is a network share,
+# set JOBWATCH_SMB_PREFIX (local path prefix) and JOBWATCH_SMB_BASE (smb:// address) to get a Finder link too.
 DOCS_ROOT = os.environ.get("JOBWATCH_DOCS") or os.path.join(DATA, "docs")
 SMB_PREFIX = os.environ.get("JOBWATCH_SMB_PREFIX", "")
 SMB_BASE = os.environ.get("JOBWATCH_SMB_BASE", "")
@@ -40,24 +40,24 @@ SOURCES_INFO = {
     "4dayweek": ("4dayweek.io", "https://4dayweek.io/"),
     "flexa": ("Flexa", "https://flexa.careers/"),
     "remotive": ("Remotive (extra)", "https://remotive.com/"),
-    "studios": ("Cégek job boardjai", ""),
-    "rss": ("Saját RSS feedek", ""),
+    "studios": ("Company job boards", ""),
+    "rss": ("Own RSS feeds", ""),
 }
 UNSUPPORTED = [
-    ("HiringCafe", "https://hiringcafe.com/", "Cloudflare tiltja az automatikus lekérést (403)"),
-    ("JobLeads", "https://www.jobleads.com/", "Cloudflare tiltja az automatikus lekérést (403)"),
-    ("Cord", "https://cord.com/", "JavaScript-alkalmazás, böngésző nélkül nem olvasható"),
-    ("Jack & Jill", "https://app.jackandjill.ai/", "Bejelentkezés kell"),
-    ("Cégek saját karrieroldala", "", "Nincs nyilvános API: kézzel nézd, vagy add hozzá a cég board-ját a Studios listához"),
+    ("HiringCafe", "https://hiringcafe.com/", "Cloudflare blocks automated fetching (403)"),
+    ("JobLeads", "https://www.jobleads.com/", "Cloudflare blocks automated fetching (403)"),
+    ("Cord", "https://cord.com/", "JavaScript app, cannot be read without a browser"),
+    ("Jack & Jill", "https://app.jackandjill.ai/", "Login required"),
+    ("Company career pages", "", "No public API: check manually, or add the company's board to the Studios list"),
 ]
 
 DEFAULT_CONFIG = {
-    # Ez a generikus alap. A konkret munkatipus (kulcsszavak, keresesek, forrasok) a
-    # templates/ mappabol jon: tools/new_profile.py <nev> --template <sablon>.
+    # Generic defaults. The concrete job type (keywords, searches, sources) comes from
+    # templates/: tools/new_profile.py <name> --template <template>.
     "interval_minutes": 60,
-    "min_score": 4,          # ennyi pont alatt nem latszik alapbol a listaban
-    "notify_min_score": 7,   # ennyi ponttol jar ertesites
-    "notify_work_modes": ["remote", "unknown"],   # hybrid/irodai allasrol nem jon ertesites
+    "min_score": 4,          # below this score a posting is hidden from the list by default
+    "notify_min_score": 7,   # from this score on, a notification is sent
+    "notify_work_modes": ["remote", "unknown"],   # no notification for hybrid/on-site postings
     "default_work_filter": "remote_unknown",
     "public_url": "http://localhost:%d/" % PORT,
     "anthropic_api_key": "",
@@ -70,8 +70,8 @@ DEFAULT_CONFIG = {
     "remotive_queries": [],    # pl. ["project manager"]
     "rss_feeds": [],
     "studios": [],             # "rendszer | azonosito | nev", pl. "ashby | acme | Acme"
-    "title_keywords": {},      # kulcsszo: pont, a cim tartalmazza-e
-    "body_keywords": {},       # kulcsszo: pont, a leiras tartalmazza-e (max 4 pont)
+    "title_keywords": {},      # keyword: points if the title contains it
+    "body_keywords": {},       # keyword: points if the description contains it (max 4 points)
     "location_keywords": {"remote": 1, "europe": 1},
     "negative_keywords": {"junior": -6, "intern": -8, "internship": -8, "trainee": -6, "student": -5},
 }
@@ -79,7 +79,7 @@ DEFAULT_CONFIG = {
 CFG_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
 STATE = {"running": False, "last_run": None, "next_run": None}
-REQ = threading.local()  # aktualis keres utvonala (aktiv menupont)
+REQ = threading.local()  # current request path (active menu item)
 
 
 # ---------------------------------------------------------------- config / db
@@ -138,7 +138,7 @@ def migrate_db():
         con.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
         v = con.execute("SELECT v FROM meta WHERE k='mode_rules'").fetchone()
         if not v or v["v"] != "2":
-            # uj szabalyok: a LinkedIn szuro nem megbizhato -> ujraosztalyozas szovegbol
+            # new rules: the LinkedIn filter is unreliable -> re-classify from the text
             if "work_mode" in [r["name"] for r in con.execute("PRAGMA table_info(jobs)")]:
                 for r in con.execute("SELECT id, source, title, location, description FROM jobs WHERE source IN ('linkedin','4dayweek','flexa','rss')").fetchall():
                     con.execute("UPDATE jobs SET work_mode=? WHERE id=?",
@@ -184,7 +184,7 @@ def score_job(cfg, j):
         if term not in hits and term_re(term).search(body):
             body_pts += int(w)
             hits.append(term)
-    score += min(body_pts, 4)  # a leiras max 4 pontot adhat
+    score += min(body_pts, 4)  # the description can give at most 4 points
     for term, w in cfg["negative_keywords"].items():
         if term_re(term).search(title):
             score += int(w)
@@ -193,7 +193,7 @@ def score_job(cfg, j):
     for term, w in (cfg.get("location_keywords") or {}).items():
         if term_re(term).search(loc):
             if int(w) > 0 and title_pts < 4:
-                continue  # hely bonusz csak relevans poziciora
+                continue  # location bonus only for a relevant position
             score += int(w)
             hits.append("📍%s(%+d)" % (term, int(w)))
     if re.search(r",\s*[A-Z]{2}$", j.get("location") or ""):  # US allam (pl. "Louisville, CO")
@@ -207,7 +207,7 @@ def norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 Irodai", "unknown": "❔ Ismeretlen"}
+WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 On-site", "unknown": "❔ Unknown"}
 WT_LINKEDIN = {"2": "remote", "3": "hybrid", "1": "onsite"}
 
 
@@ -222,7 +222,7 @@ RE_REM_TL = re.compile(r"\bremote\b|anywhere|home office|\bwfh\b", re.I)
 
 
 def classify_mode(title="", location="", description=""):
-    """Munkavegzes modja. Cim/helyszin eros jel; a leirasban csak egyertelmu kifejezesek szamitanak."""
+    """Work mode. Title/location are strong signals; in the description only unambiguous phrases count."""
     tl = " ".join(x or "" for x in (title, location))
     if RE_HYB.search(tl):
         return "hybrid"
@@ -272,13 +272,13 @@ def src_linkedin(cfg):
         kw = parts[0]
         loc = parts[1] if len(parts) > 1 and parts[1] else "European Union"
         mode = parts[2].lower() if len(parts) > 2 else "remote"
-        wts = [""]  # a guest API a munkavegzes-szurot (f_WT) figyelmen kivul hagyja; a modot a szovegbol allapitjuk meg
+        wts = [""]  # the guest API ignores the work-type filter (f_WT); the mode is taken from the text
         for wt, start in [(w, st) for w in wts for st in (0, 25)]:
             if start and wt in done_short:
                 continue
             q = {"keywords": kw, "location": loc, "f_TPR": "r604800", "start": str(start)}
             if wt:
-                q["f_WT"] = wt  # csak keresesi szukites; a LinkedIn guest szuroje nem megbizhato
+                q["f_WT"] = wt  # only narrows the search; the LinkedIn guest filter is unreliable
             url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?" + urllib.parse.urlencode(q)
             page = None
             for wait in (0, 30, 90):
@@ -291,9 +291,9 @@ def src_linkedin(cfg):
                         raise
             if page is None:
                 if out:
-                    log.warning("LinkedIn 429, részeredménnyel folytatom (%d)", len(out))
+                    log.warning("LinkedIn 429, continuing with partial results (%d)", len(out))
                     return out
-                raise RuntimeError("LinkedIn 429 Too Many Requests (később újrapróbálja)")
+                raise RuntimeError("LinkedIn 429 Too Many Requests (will retry later)")
             cards = page.split("<li")
             got = 0
             for c in cards:
@@ -330,7 +330,7 @@ def src_meetfrank(cfg):
             continue
         m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', s, re.S)
         if not m:
-            errs.append("nincs __NEXT_DATA__ (megváltozott az oldal?)")
+            errs.append("no __NEXT_DATA__ (has the page changed?)")
             continue
         cache = json.loads(m.group(1))["props"]["pageProps"]["apollo"]["cache"]
         for key, v in cache.items():
@@ -479,12 +479,12 @@ def src_studios(cfg):
                                 "url": "https://jobs.smartrecruiters.com/%s/%s" % (slug, j["id"]),
                                 "posted": j.get("releasedDate", ""), "description": ""})
             else:
-                errs.append("%s: ismeretlen rendszer '%s'" % (name, ats))
+                errs.append("%s: unknown platform '%s'" % (name, ats))
         except Exception as ex:
             errs.append("%s: %s" % (name, ex))
         time.sleep(1)
     if errs:
-        log.warning("Stúdió hibák: %s", "; ".join(errs))
+        log.warning("Company board errors: %s", "; ".join(errs))
         if not out:
             raise RuntimeError("; ".join(errs))
     return out
@@ -500,7 +500,7 @@ def src_rss(cfg):
 
 
 def linkedin_detail(jid):
-    """Teljes hirdetesszoveg a nyilvanos jobPosting vegpontrol (None, ha nem sikerult)."""
+    """Full posting text from the public jobPosting endpoint (None if it failed)."""
     page = fetch("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/%s" % jid)
     m = re.search(r'show-more-less-html__markup[^>]*>(.*?)</div>', page, re.S)
     if not m:
@@ -508,12 +508,12 @@ def linkedin_detail(jid):
     return strip_tags(m.group(1).replace("<br>", "\n").replace("</li>", "\n").replace("</p>", "\n"))[:12000]
 
 
-LINKEDIN_RETRY_WAITS = (30, 90, 180)  # 429 (tul sok keres) eseten ennyit var, aztan ujraprobal
+LINKEDIN_RETRY_WAITS = (30, 90, 180)  # on 429 (too many requests) wait these many seconds, then retry
 
 
 def enrich_linkedin(con, items, limit=60):
-    """Uj / meg leiras nelkuli LinkedIn hirdetesekhez letolti a szoveget, es abbol dont a munkavegzes modjarol.
-    429 (tul sok keres) eseten vár és újrapróbálja, így a munkavégzés-mód nem marad ismeretlen a rate-limit miatt."""
+    """For new / description-less LinkedIn postings, download the text and decide the work mode from it.
+    On 429 (too many requests) it waits and retries, so the work mode is not left unknown because of the rate limit."""
     n = 0
     for it in items:
         row = con.execute("SELECT description FROM jobs WHERE id=?", ("linkedin:" + it["ext_id"],)).fetchone()
@@ -530,13 +530,13 @@ def enrich_linkedin(con, items, limit=60):
                 break
             except urllib.error.HTTPError as ex:
                 if ex.code == 429:
-                    log.warning("LinkedIn részletek: 429, várakozás %d s", wait)
+                    log.warning("LinkedIn details: 429, waiting %d s", wait)
                     continue
                 break
             except Exception:
                 break
         else:
-            log.warning("LinkedIn részletek: még mindig 429, a többit a következő körben")
+            log.warning("LinkedIn details: still 429, the rest on the next run")
             break
         n += 1
         if d:
@@ -567,7 +567,7 @@ def send_ntfy(cfg, title, message, click=None, priority=3):
 def send_email(cfg, subject, text, html_body=None, to=None, attachments=()):
     e = cfg["email"]
     if not (e.get("username") and e.get("password")):
-        raise RuntimeError("Az e-mail (SMTP) nincs beállítva a Beállításokban.")
+        raise RuntimeError("E-mail (SMTP) is not configured in Settings.")
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = e["username"]
@@ -592,12 +592,12 @@ def notify_jobs(cfg, jobs):
         try:
             if len(jobs) <= 5:
                 for j in jobs:
-                    send_ntfy(cfg, "Új állás (%d pont): %s" % (j["score"], j["title"]),
+                    send_ntfy(cfg, "New job (%d pts): %s" % (j["score"], j["title"]),
                               "%s · %s\n%s" % (j["company"], j["location"] or "-", j["url"]),
                               click=j["url"], priority=4 if j["score"] >= cfg["notify_min_score"] + 3 else 3)
             else:
                 lines = ["• %s – %s (%d)" % (j["title"], j["company"], j["score"]) for j in jobs[:15]]
-                send_ntfy(cfg, "%d új releváns állás" % len(jobs), "\n".join(lines),
+                send_ntfy(cfg, "%d new relevant job(s)" % len(jobs), "\n".join(lines),
                           click=cfg.get("public_url"), priority=4)
         except Exception as ex:
             errors.append("ntfy: %s" % ex)
@@ -608,13 +608,13 @@ def notify_jobs(cfg, jobs):
                     j["score"], html.escape(j["url"]), html.escape(j["title"]), html.escape(j["company"]),
                     html.escape(j["location"] or "-"), html.escape(j["source"])) for j in jobs)
             text = "\n".join("[%d] %s – %s\n%s" % (j["score"], j["title"], j["company"], j["url"]) for j in jobs)
-            send_email(cfg, "Állásfigyelő: %d új releváns állás" % len(jobs), text,
-                       '<p>Új, a CV-dhez illő hirdetések:</p><ul>%s</ul><p><a href="%s">Állásfigyelő megnyitása</a></p>'
+            send_email(cfg, "jobwatch: %d new relevant job(s)" % len(jobs), text,
+                       '<p>New postings that match your CV:</p><ul>%s</ul><p><a href="%s">Open jobwatch</a></p>'
                        % (rows, html.escape(cfg.get("public_url", ""))))
         except Exception as ex:
             errors.append("e-mail: %s" % ex)
     for e in errors:
-        log.error("Értesítési hiba: %s", e)
+        log.error("Notification error: %s", e)
     return errors
 
 
@@ -651,7 +651,7 @@ def run_all(force=False):
                 items = fn(cfg)
                 err = None
             except Exception as ex:
-                log.exception("Forrás hiba: %s", name)
+                log.exception("Source error: %s", name)
                 items, err = [], "%s: %s" % (type(ex).__name__, ex)
             new = 0
             if name == "linkedin" and items:
@@ -671,13 +671,13 @@ def run_all(force=False):
                             sc2, hits2 = score_job(cfg, it)
                             con.execute("UPDATE jobs SET last_seen=?, work_mode=?, description=?, score=?, matched=? WHERE id=?",
                                         (ts, wm, it["description"], sc2, ", ".join(hits2), jid))
-                        elif it.get("work_mode"):  # forrasbol jovo pontos ertek felulirja a becslest
+                        elif it.get("work_mode"):  # an exact value from the source overrides the estimate
                             con.execute("UPDATE jobs SET last_seen=?, work_mode=? WHERE id=?", (ts, wm, jid))
                         else:
                             con.execute("UPDATE jobs SET last_seen=? WHERE id=?", (ts, jid))
                         continue
                     if con.execute("SELECT 1 FROM jobs WHERE dupkey=?", (dup,)).fetchone():
-                        continue  # mar lattuk mas forrasbol
+                        continue  # already seen from another source
                     notified = 0 if (seeded and sc >= cfg["notify_min_score"]
                                      and wm in cfg.get("notify_work_modes", ["remote", "unknown"])) else 1
                     con.execute(
@@ -695,13 +695,13 @@ def run_all(force=False):
                     "last_ok=COALESCE(excluded.last_ok, source_state.last_ok), found=excluded.found, "
                     "new=excluded.new, error=excluded.error, seeded=MAX(source_state.seeded, excluded.seeded)",
                     (name, ts, None if err else ts, len(items), new, err, 0 if err else 1))
-            log.info("%s: %d hirdetés, %d új%s", name, len(items), new, " HIBA: " + err if err else "")
+            log.info("%s: %d postings, %d new%s", name, len(items), new, " ERROR: " + err if err else "")
         errs = notify_jobs(cfg, to_notify)
         if to_notify and not errs:
             with db() as con:
                 con.executemany("UPDATE jobs SET notified=1 WHERE id=?", [(j["id"],) for j in to_notify])
         elif to_notify:
-            # ha legalabb egy csatorna mukodott, ne kuldjuk ujra
+            # if at least one channel worked, do not send again
             ok_channels = (cfg["ntfy"].get("enabled") and not any(e.startswith("ntfy") for e in errs)) or \
                           (cfg["email"].get("enabled") and not any(e.startswith("e-mail") for e in errs))
             if ok_channels:
@@ -728,7 +728,7 @@ def scheduler():
         try:
             run_all()
         except Exception:
-            log.exception("Ütemező hiba")
+            log.exception("Scheduler error")
         time.sleep(60)
 
 
@@ -796,7 +796,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 """
 
 
-STATUS_LABEL = {"new": "új", "seen": "látott", "saved": "mentett", "applied": "jelentkeztem", "hidden": "elrejtett"}
+STATUS_LABEL = {"new": "new", "seen": "seen", "saved": "saved", "applied": "applied", "hidden": "hidden"}
 
 
 def e(s):
@@ -819,8 +819,8 @@ def fmt_dt(s):
         return s[:16]
 
 
-# Egyedi osztaly -> daisyUI komponens. A markup a regi osztalyneveket hasznalja; ez az atalakitas
-# adja a daisyUI-stilusokat. Ami nincs a listaban, az marad a sajat (CSS) stilusa.
+# Custom class -> daisyUI component. The markup uses the old class names; this mapping
+# gives the daisyUI styles. Classes not in the list keep their own (CSS) style.
 DAISY_CLASS = {
     "card": "card bg-base-100 shadow-sm",
     "card muted": "card bg-base-100 shadow-sm muted",
@@ -851,23 +851,23 @@ def daisify(html):
 
 def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
-    tabs = [("/", "Állások"), ("/docs", "Dokumentumok"), ("/sources", "Források"), ("/profile", "CV-profil"), ("/settings", "Beállítások")]
+    tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/sources", "Sources"), ("/profile", "CV profile"), ("/settings", "Settings")]
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
-    running = '<span class="badge badge-soft badge-warning">⏳ frissítés fut…</span>' if STATE["running"] else ""
+    running = '<span class="badge badge-soft badge-warning">⏳ refresh running…</span>' if STATE["running"] else ""
     return ("""<!doctype html><html lang="hu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
 <script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";</script>
-<title>%s · Állásfigyelő</title>
-<link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 Állásfigyelő</span><nav class="tabs tabs-box tabs-sm">%s</nav>
-<div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Teszt push értesítés a telefonra">🔔 Teszt push</button></form>
-<form method="post" action="/run"><button class="btn btn-primary btn-sm" title="Minden forrás lekérése most">↻ Frissítés</button></form></div></div></header>
+<title>%s · jobwatch</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
+<div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">🔔 Test push</button></form>
+<form method="post" action="/run"><button class="btn btn-primary btn-sm" title="Fetch all sources now">↻ Refresh</button></form></div></div></header>
 <main>%s%s</main></body></html>"""
             % (('<meta http-equiv="refresh" content="%d">' % refresh) if refresh else "", e(title), CSS, nav, running,
                '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body)))
 
 
 def parse_dt(s):
-    """Vegyes formatumu datum -> idozonas datetime (UTC, ha nincs megadva), vagy None."""
+    """Date in mixed formats -> timezone-aware datetime (UTC if none given), or None."""
     if not s:
         return None
     try:
@@ -883,24 +883,24 @@ def parse_dt(s):
 
 
 def days_ago(d):
-    """Hany naptari nappal ezelott (helyi ido szerint)."""
+    """How many calendar days ago (local time)."""
     return (datetime.now().astimezone().date() - d.astimezone().date()).days
 
 
 def rel_day(n):
     if n <= 0:
-        return "ma"
+        return "today"
     if n == 1:
-        return "tegnap"
+        return "yesterday"
     if n < 14:
-        return "%d napja" % n
+        return "%d days ago" % n
     if n < 60:
-        return "%d hete" % (n // 7)
-    return "%d hónapja" % (n // 30)
+        return "%d weeks ago" % (n // 7)
+    return "%d months ago" % (n // 30)
 
 
-BUCKETS = [(0, "Ma"), (1, "Tegnap"), (6, "Ezen a héten (2–6 napja)"), (13, "Múlt héten (7–13 napja)"),
-           (30, "2–4 hete"), (10 ** 6, "Régebbi, mint 30 nap – valószínűleg elavult")]
+BUCKETS = [(0, "Today"), (1, "Yesterday"), (6, "This week (2–6 days ago)"), (13, "Last week (7–13 days ago)"),
+           (30, "2–4 weeks ago"), (10 ** 6, "Older than 30 days – probably stale")]
 
 
 def bucket_of(n):
@@ -948,7 +948,7 @@ def jobs_page(q):
         wcount = {r["m"]: r["c"] for r in con.execute(
             "SELECT COALESCE(work_mode,'unknown') m, COUNT(*) c FROM jobs WHERE score>=? AND status IN ('new','seen','saved') GROUP BY m", (mn,))}
 
-    # datumok: feladas (ha a forras nem adja meg, a gyujtes napja), gyujtes
+    # dates: posted (if the source does not give it, the collection day), collected
     for r in rows:
         seen = parse_dt(r["first_seen"]) or datetime.now(timezone.utc)
         pd = parse_dt(r["posted"])
@@ -957,7 +957,7 @@ def jobs_page(q):
         r["_seen"] = seen
         r["_pdays"] = days_ago(r["_posted"])
         r["_sdays"] = days_ago(seen)
-        # teljes allaslistat ado forrasnal (studiok) ha az utolso sikeres lekeresben mar nem szerepelt -> lezarva
+        # for a source that returns the full list (studios): if it is missing from the last successful fetch -> closed
         lo = last_ok.get(r["source"])
         r["_closed"] = r["source"] == "studios" and bool(lo) and (r["last_seen"] or "") < lo
     key_days = "_sdays" if sort == "seen" else "_pdays"
@@ -989,7 +989,7 @@ def jobs_page(q):
         return '<a class="fchip%s" href="%s">%s%s</a>' % (" on" if on else "", e(link(**chg)), e(label),
                                                        ("<small>%d</small>" % cnt) if cnt is not None else "")
 
-    # osszesito csempek (aktiv allasok, a munkavegzes-szurovel egyutt)
+    # summary tiles (active postings, together with the work-mode filter)
     with db() as con:
         act_rows = [dict(r) for r in con.execute(
             "SELECT posted, first_seen, status FROM jobs WHERE score>=? AND status IN ('new','seen','saved')"
@@ -998,46 +998,46 @@ def jobs_page(q):
     fresh = sum(1 for r in act_rows if parse_dt(r["posted"]) and days_ago(parse_dt(r["posted"])) <= 2)
     today = sum(1 for r in act_rows if parse_dt(r["first_seen"]) and days_ago(parse_dt(r["first_seen"])) == 0)
     stats = """<div class="stats">
-<a class="stat" href="%s"><b>%d</b><span>🆕 friss (≤2 napos)</span></a>
-<a class="stat" href="%s"><b>%d</b><span>📥 ma begyűjtve</span></a>
-<a class="stat" href="%s"><b>%d</b><span>● új, még nem nézted</span></a>
-<a class="stat" href="%s"><b>%d</b><span>⭐ mentett</span></a>
-<a class="stat" href="%s"><b>%d</b><span>✅ jelentkeztem</span></a></div>""" % (
+<a class="stat" href="%s"><b>%d</b><span>🆕 fresh (≤2 days old)</span></a>
+<a class="stat" href="%s"><b>%d</b><span>📥 collected today</span></a>
+<a class="stat" href="%s"><b>%d</b><span>● new, not viewed yet</span></a>
+<a class="stat" href="%s"><b>%d</b><span>⭐ saved</span></a>
+<a class="stat" href="%s"><b>%d</b><span>✅ applied</span></a></div>""" % (
         e(link(age="3", sort="posted", status="active")), fresh, e(link(age="1", sort="seen", status="active")), today,
         e(link(status="new")), counts.get("new", 0), e(link(status="saved")), counts.get("saved", 0),
         e(link(status="applied")), counts.get("applied", 0))
 
-    st_chips = "".join([chip("Aktív", None, status="active"), chip("Új", counts.get("new", 0), status="new"),
-                        chip("Mentett", counts.get("saved", 0), status="saved"),
-                        chip("Jelentkeztem", counts.get("applied", 0), status="applied"),
-                        chip("Elrejtett", counts.get("hidden", 0), status="hidden"), chip("Mind", None, status="all")])
-    wm_chips = "".join([chip("🏠 Csak remote", wcount.get("remote", 0), work="remote"),
+    st_chips = "".join([chip("Active", None, status="active"), chip("New", counts.get("new", 0), status="new"),
+                        chip("Saved", counts.get("saved", 0), status="saved"),
+                        chip("Applied", counts.get("applied", 0), status="applied"),
+                        chip("Hidden", counts.get("hidden", 0), status="hidden"), chip("All", None, status="all")])
+    wm_chips = "".join([chip("🏠 Remote only", wcount.get("remote", 0), work="remote"),
                         chip("Remote + ❔", wcount.get("remote", 0) + wcount.get("unknown", 0), work="remote_unknown"),
                         chip("Remote + hybrid", None, work="remote_hybrid"),
                         chip("🏢🏠 Hybrid", wcount.get("hybrid", 0), work="hybrid"),
-                        chip("🏢 Irodai", wcount.get("onsite", 0), work="onsite"), chip("Mind", None, work="all")])
-    sort_chips = "".join([chip("📅 Feladás", None, sort="posted"), chip("📥 Begyűjtés", None, sort="seen"),
-                          chip("🎯 Pontszám", None, sort="score")])
-    age_chips = "".join([chip("Bármikor", None, age="all"), chip("24 óra", None, age="1"), chip("3 nap", None, age="3"),
-                         chip("7 nap", None, age="7"), chip("30 nap", None, age="30")])
-    src_items = [("", "Minden forrás")] + [(k, v[0]) for k, v in SOURCES_INFO.items()]
+                        chip("🏢 On-site", wcount.get("onsite", 0), work="onsite"), chip("All", None, work="all")])
+    sort_chips = "".join([chip("📅 Posted", None, sort="posted"), chip("📥 Collected", None, sort="seen"),
+                          chip("🎯 Score", None, sort="score")])
+    age_chips = "".join([chip("Any time", None, age="all"), chip("24 h", None, age="1"), chip("3 days", None, age="3"),
+                         chip("7 days", None, age="7"), chip("30 days", None, age="30")])
+    src_items = [("", "All sources")] + [(k, v[0]) for k, v in SOURCES_INFO.items()]
     hidden_inputs = "".join('<input type="hidden" name="%s" value="%s">' % (k, e(v))
                             for k, v in base_q.items() if k in ("status", "work", "sort", "age"))
     more_open = " open" if (src or text or mn != cfg["min_score"]) else ""
     filt = """<div class="panel">
-<div class="row-chips"><span class="lbl">Állapot</span>%s</div>
-<div class="row-chips"><span class="lbl">Munkavégzés</span>%s</div>
-<div class="row-chips"><span class="lbl">Rendezés</span>%s</div>
-<div class="row-chips"><span class="lbl">Életkor</span>%s</div>
-<details class="more"%s><summary>További szűrők (forrás, pontszám, keresés)</summary>
+<div class="row-chips"><span class="lbl">Status</span>%s</div>
+<div class="row-chips"><span class="lbl">Work mode</span>%s</div>
+<div class="row-chips"><span class="lbl">Sort</span>%s</div>
+<div class="row-chips"><span class="lbl">Age</span>%s</div>
+<details class="more"%s><summary>More filters (source, score, search)</summary>
 <form class="filters" method="get">%s<select name="source">%s</select>
-<label style="margin:0;font-weight:400">Min. pont <input type="number" name="min" value="%d" style="width:70px"></label>
-<input type="search" name="q" value="%s" placeholder="Keresés: cím, cég, hely"><button>Szűrés</button>
+<label style="margin:0;font-weight:400">Min. score <input type="number" name="min" value="%d" style="width:70px"></label>
+<input type="search" name="q" value="%s" placeholder="Search: title, company, location"><button>Filter</button>
 <a class="btn" href="/">Alaphelyzet</a></form></details></div>""" % (
         st_chips, wm_chips, sort_chips, age_chips, more_open, hidden_inputs, opts(src, src_items), mn, e(text))
-    head = """<div class="listhead"><span><b>%d</b> hirdetés%s · az életkor a <b>%s</b> dátumára vonatkozik · értesítés %d ponttól</span>
-<form method="post" action="/mark-all-seen"><button class="sm">Minden új → látott</button></form></div>""" % (
-        total, " (az első 300 látszik)" if total > 300 else "", "begyűjtés" if sort == "seen" else "feladás",
+    head = """<div class="listhead"><span><b>%d</b> posting%s · age refers to <b>%s</b> · notifications from %d pts</span>
+<form method="post" action="/mark-all-seen"><button class="sm">Mark all new → seen</button></form></div>""" % (
+        total, " (first 300 shown)" if total > 300 else "", "collected" if sort == "seen" else "posted",
         cfg["notify_min_score"])
 
     with db() as con:
@@ -1058,33 +1058,33 @@ def jobs_page(q):
         if r["location"] and r["location"].strip().lower() not in ("remote", "(remote)", "anywhere"):
             chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:60]))
         if r["_closed"]:
-            chips.append('<span class="chip closed">❌ valószínűleg lezárva</span>')
+            chips.append('<span class="chip closed">❌ probably closed</span>')
         if r["_posted_known"]:
             cls_age = "age-new" if r["_pdays"] <= 2 else ("age-old" if r["_pdays"] > 30 else "")
             chips.append('<span class="chip %s" title="Feladva: %s">📅 %s</span>' % (
                 cls_age, e(r["_posted"].astimezone().strftime("%Y-%m-%d")),
                 e(("feladva " + rel_day(r["_pdays"])) if r["_pdays"] > 2 else "🆕 " + rel_day(r["_pdays"]))))
         else:
-            chips.append('<span class="chip" title="A forrás nem adja meg a feladás dátumát">📅 feladás ismeretlen</span>')
-        chips.append('<span class="chip" title="Begyűjtve: %s">📥 %s</span>' % (e(fmt_dt(r["first_seen"])), e(rel_day(r["_sdays"]))))
+            chips.append('<span class="chip" title="The source does not give the posting date">📅 posted date unknown</span>')
+        chips.append('<span class="chip" title="Collected: %s">📥 %s</span>' % (e(fmt_dt(r["first_seen"])), e(rel_day(r["_sdays"]))))
         if r["status"] != "new":
             chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
         icon_btns = "".join('<button name="status" value="%s" title="%s">%s</button>' % (s_, t, ic) for s_, ic, t in (
-            ("saved", "⭐", "Mentés"), ("applied", "✅", "Jelentkeztem"), ("seen", "👁", "Látottnak jelöl"),
-            ("hidden", "🚫", "Elrejtés"), ("new", "↺", "Vissza újnak")) if s_ != r["status"])
-        cv_btn = ('<a class="btn" href="/cv/%s">📄 Dokumentumok ✓</a>' if r["id"] in has_cv else
+            ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Mark seen"),
+            ("hidden", "🚫", "Hide"), ("new", "↺", "Mark new again")) if s_ != r["status"])
+        cv_btn = ('<a class="btn" href="/cv/%s">📄 Documents ✓</a>' if r["id"] in has_cv else
                   '<a class="btn primary" href="/cv/%s">📄 CV + Resume</a>') % qid
-        cards.append("""<article class="job st-%s%s"><div class="score %s" title="Pontszám a CV-dhez">%d<small>pont</small></div>
+        cards.append("""<article class="job st-%s%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
 <div><div class="jt"><a href="/open/%s" target="_blank" rel="noopener noreferrer">%s</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div><div class="chips">%s</div>
-<details class="why"><summary>Miért ennyi pont?</summary>%s</details></div>
+<details class="why"><summary>Why this score?</summary>%s</details></div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
             e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", cls, sc,
             qid, e(r["title"]), e(r["company"] or "?"), e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
-        cards.append('<div class="card muted">Nincs a szűrésnek megfelelő hirdetés. Próbáld lazítani a szűrőket, vagy nyomd meg a „Frissítés” gombot.</div>')
-    return page("Állások", stats + filt + head + "".join(cards))
+        cards.append('<div class="card muted">No postings match the filters. Try loosening them, or press “Refresh”.</div>')
+    return page("Jobs", stats + filt + head + "".join(cards))
 
 
 def sources_page():
@@ -1098,7 +1098,7 @@ def sources_page():
         s = st.get(k)
         on = cfg["sources"].get(k)
         status = ('<span class="err">%s</span>' % e(s["error"])) if s and s["error"] else (
-            '<span class="ok">OK</span>' if s else '<span class="muted">még nem futott</span>')
+            '<span class="ok">OK</span>' if s else '<span class="muted">not run yet</span>')
         rows.append("<tr><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             ('<a href="%s" target="_blank" rel="noopener">%s</a>' % (e(url), e(name))) if url else e(name),
             "" if on else ' <span class="badge">kikapcsolva</span>',
@@ -1106,11 +1106,11 @@ def sources_page():
             cnt.get(k, 0), status))
     uns = "".join('<tr><td>%s</td><td class="muted">%s</td></tr>' % (
         ('<a href="%s" target="_blank" rel="noopener">%s</a>' % (e(u), e(n))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
-    body = """<div class="card"><h2>Figyelt források</h2><table><tr><th>Forrás</th><th>Utolsó futás</th><th>Lekért</th><th>Új</th><th>Összes</th><th>Állapot</th></tr>%s</table>
-<p class="muted">Frissítés %d percenként (a Remotive legfeljebb 6 óránként).</p></div>
-<div class="card"><h2>Automatikusan nem figyelhető oldalak</h2><p class="muted">Ezeket érdemes kézzel ránézni időnként.</p><table>%s</table></div>""" % (
+    body = """<div class="card"><h2>Watched sources</h2><table><tr><th>Source</th><th>Last run</th><th>Fetched</th><th>New</th><th>Total</th><th>Status</th></tr>%s</table>
+<p class="muted">Refresh every %d minutes (Remotive at most every 6 hours).</p></div>
+<div class="card"><h2>Sites that cannot be watched automatically</h2><p class="muted">Check these manually now and then.</p><table>%s</table></div>""" % (
         "".join(rows), cfg["interval_minutes"], uns)
-    return page("Források", body)
+    return page("Sources", body)
 
 
 def kv_text(d):
@@ -1137,61 +1137,61 @@ def settings_page(flash=""):
     src_boxes = "".join('<label style="font-weight:400;display:inline-block;margin-right:14px"><input type="checkbox" name="src_%s"%s> %s</label>' % (
         k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items())
     sub = "%s/%s" % (n["server"].rstrip("/"), n["topic"])
-    body = """<div class="card"><h2>🔔 Teszt értesítés</h2><form method="post" action="/test" style="display:flex;gap:8px;flex-wrap:wrap">
-<button class="primary" name="what" value="ntfy">🔔 Teszt push küldése a telefonra</button><button name="what" value="email">✉️ Teszt e-mail</button></form></div>
+    body = """<div class="card"><h2>🔔 Test notification</h2><form method="post" action="/test" style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="primary" name="what" value="ntfy">🔔 Send a test push to your phone</button><button name="what" value="email">✉️ Test e-mail</button></form></div>
 <form method="post" action="/settings">
-<div class="card"><h2>📱 Push értesítés (ntfy)</h2>
-<p class="muted">1. Telepítsd az <b>ntfy</b> appot (Android: Play Store/F-Droid, iPhone: App Store). 2. Az appban „+” → Subscribe to topic → írd be: <b>%s</b> (szerver: %s). 3. Nyomd meg lent a „Teszt push” gombot.<br>A téma neve egyben a jelszó: akinek megvan, az is látja az értesítéseket.</p>
-<label><input type="checkbox" name="ntfy_enabled"%s> Push értesítés bekapcsolva</label>
+<div class="card"><h2>📱 Push notifications (ntfy)</h2>
+<p class="muted">1. Install the <b>ntfy</b> app (Android: Play Store/F-Droid, iPhone: App Store). 2. In the app press “+” → Subscribe to topic → enter: <b>%s</b> (server: %s). 3. Press “Test push” below.<br>The topic name is also the password: anyone who has it can see the notifications.</p>
+<label><input type="checkbox" name="ntfy_enabled"%s> Push notifications enabled</label>
 <div class="row"><div><label>Szerver</label><input name="ntfy_server" value="%s" style="width:100%%"></div>
-<div><label>Téma (topic)</label><input name="ntfy_topic" value="%s" style="width:100%%"></div></div>
-<p class="muted">Feliratkozási link: <a href="%s" target="_blank" rel="noopener">%s</a></p></div>
-<div class="card"><h2>✉️ E-mail értesítés</h2>
-<p class="muted">Gmailhez <b>alkalmazásjelszó</b> kell (Google-fiók → Biztonság → Kétlépcsős azonosítás → Alkalmazásjelszavak), nem a rendes jelszavad.</p>
-<label><input type="checkbox" name="email_enabled"%s> E-mail értesítés bekapcsolva</label>
+<div><label>Topic</label><input name="ntfy_topic" value="%s" style="width:100%%"></div></div>
+<p class="muted">Subscribe link: <a href="%s" target="_blank" rel="noopener">%s</a></p></div>
+<div class="card"><h2>✉️ E-mail notifications</h2>
+<p class="muted">Gmail needs an <b>app password</b> (Google account → Security → 2-Step Verification → App passwords), not your normal password.</p>
+<label><input type="checkbox" name="email_enabled"%s> E-mail notifications enabled</label>
 <div class="row"><div><label>SMTP szerver</label><input name="smtp_host" value="%s" style="width:100%%"></div>
 <div><label>Port</label><input name="smtp_port" value="%s" style="width:100%%"></div>
-<div><label>Felhasználó (e-mail cím)</label><input name="smtp_user" value="%s" style="width:100%%"></div>
-<div><label>Jelszó %s</label><input type="password" name="smtp_pass" placeholder="(üresen hagyva marad)" style="width:100%%"></div>
-<div><label>Címzett (üres = feladó)</label><input name="email_to" value="%s" style="width:100%%"></div></div></div>
-<div class="card"><h2>🤖 Claude API (hirdetéshez igazított CV)</h2>
-<p class="muted">Kulcs: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com → API Keys</a>. Egy CV + kísérőlevél kb. 5–15 cent. A kulcs csak a Pi-n tárolódik.</p>
-<label>Anthropic API-kulcs %s</label><input type="password" name="anthropic_api_key" placeholder="(üresen hagyva marad)" style="width:100%%"></div>
-<div class="card"><h2>⚙️ Általános</h2><div class="row">
-<div><label>Frissítés (perc)</label><input type="number" name="interval" value="%d" min="15"></div>
-<div><label>Listában min. pont</label><input type="number" name="min_score" value="%d"></div>
-<div><label>Értesítés min. pont</label><input type="number" name="notify_min_score" value="%d"></div>
-<div><label>Értesítés ezekre</label>%s</div>
-<div><label>Lista alapszűrő</label><select name="default_work_filter">%s</select></div>
-<div><label>Webes cím (értesítés linkje)</label><input name="public_url" value="%s" style="width:100%%"></div></div>
-<label>Források</label>%s</div>
-<div class="card"><h2>🔎 LinkedIn keresések</h2><p class="muted">Soronként: <code>kulcsszavak | helyszín</code> (a munkavégzés módját a hirdetés szövegéből állapítja meg, mert a LinkedIn nyilvános szűrője nem működik) (az elmúlt 7 nap hirdetései).</p>
+<div><label>User (e-mail address)</label><input name="smtp_user" value="%s" style="width:100%%"></div>
+<div><label>Password %s</label><input type="password" name="smtp_pass" placeholder="(leave empty to keep)" style="width:100%%"></div>
+<div><label>Recipient (empty = sender)</label><input name="email_to" value="%s" style="width:100%%"></div></div></div>
+<div class="card"><h2>🤖 Claude API (CV tailored to a posting)</h2>
+<p class="muted">Key: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com → API Keys</a>. One CV + cover letter costs about 5–15 cents. The key is stored only on this machine.</p>
+<label>Anthropic API key %s</label><input type="password" name="anthropic_api_key" placeholder="(leave empty to keep)" style="width:100%%"></div>
+<div class="card"><h2>⚙️ General</h2><div class="row">
+<div><label>Refresh (minutes)</label><input type="number" name="interval" value="%d" min="15"></div>
+<div><label>Min. score in list</label><input type="number" name="min_score" value="%d"></div>
+<div><label>Min. score for notifications</label><input type="number" name="notify_min_score" value="%d"></div>
+<div><label>Notify for</label>%s</div>
+<div><label>Default list filter</label><select name="default_work_filter">%s</select></div>
+<div><label>Web address (link in notifications)</label><input name="public_url" value="%s" style="width:100%%"></div></div>
+<label>Sources</label>%s</div>
+<div class="card"><h2>🔎 LinkedIn searches</h2><p class="muted">One per line: <code>keywords | location</code> (the work mode is taken from the posting text, because LinkedIn's public filter does not work). Postings from the last 7 days.</p>
 <textarea name="linkedin_searches">%s</textarea>
-<label>Remote-first stúdiók (soronként: <code>ashby|lever|greenhouse|bamboohr|smartrecruiters | azonosító | név</code>)</label>
+<label>Company job boards (one per line: <code>ashby|lever|greenhouse|bamboohr|smartrecruiters | id | name</code>)</label>
 <textarea name="studios" style="min-height:140px">%s</textarea>
-<label>Saját RSS feedek (soronként egy URL)</label><textarea name="rss_feeds" style="min-height:60px">%s</textarea></div>
-<div class="card"><h2>🎯 Pontozás (a CV-d alapján)</h2><p class="muted">Soronként <code>kifejezés = pont</code>. A címben talált kifejezések számítanak a legtöbbet; a negatívak csak a címre vonatkoznak. Mentéskor minden hirdetés újrapontozódik.</p>
-<div class="row"><div><label>Cím</label><textarea name="title_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Leírás</label><textarea name="body_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Negatív (cím)</label><textarea name="negative_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Helyszín</label><textarea name="location_keywords" style="min-height:260px">%s</textarea></div></div></div>
-<button class="primary">Mentés</button></form>
-<div class="card" style="margin-top:14px"><h2>Teszt</h2><form method="post" action="/test" style="display:flex;gap:8px">
-<button name="what" value="ntfy">Teszt push</button><button name="what" value="email">Teszt e-mail</button></form></div>""" % (
+<label>Own RSS feeds (one URL per line)</label><textarea name="rss_feeds" style="min-height:60px">%s</textarea></div>
+<div class="card"><h2>🎯 Scoring (based on your CV)</h2><p class="muted">One per line: <code>term = points</code>. Terms found in the title count the most; negative terms apply only to the title. Every posting is re-scored when you save.</p>
+<div class="row"><div><label>Title</label><textarea name="title_keywords" style="min-height:260px">%s</textarea></div>
+<div><label>Description</label><textarea name="body_keywords" style="min-height:260px">%s</textarea></div>
+<div><label>Negative (title)</label><textarea name="negative_keywords" style="min-height:260px">%s</textarea></div>
+<div><label>Location</label><textarea name="location_keywords" style="min-height:260px">%s</textarea></div></div></div>
+<button class="primary">Save</button></form>
+<div class="card" style="margin-top:14px"><h2>Test</h2><form method="post" action="/test" style="display:flex;gap:8px">
+<button name="what" value="ntfy">Test push</button><button name="what" value="email">Test e-mail</button></form></div>""" % (
         e(n["topic"]), e(n["server"]), chk(n.get("enabled")), e(n["server"]), e(n["topic"]), e(sub), e(sub),
         chk(m.get("enabled")), e(m["smtp_host"]), e(m["smtp_port"]), e(m["username"]),
-        "(beállítva ✓)" if m.get("password") else "", e(m["to"]),
-        "(beállítva ✓)" if cfg.get("anthropic_api_key") else "",
+        "(set ✓)" if m.get("password") else "", e(m["to"]),
+        "(set ✓)" if cfg.get("anthropic_api_key") else "",
         cfg["interval_minutes"], cfg["min_score"], cfg["notify_min_score"],
         "".join('<label style="font-weight:400;display:inline-block;margin-right:10px"><input type="checkbox" name="nwm_%s"%s> %s</label>' % (
             k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), e(v)) for k, v in WORK_MODES.items()),
         "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
-                for k, l in (("remote", "Csak remote"), ("remote_unknown", "Remote + ismeretlen"), ("remote_hybrid", "Remote + hybrid"), ("all", "Minden"))), e(cfg.get("public_url", "")), src_boxes,
+                for k, l in (("remote", "Remote only"), ("remote_unknown", "Remote + unknown"), ("remote_hybrid", "Remote + hybrid"), ("all", "All"))), e(cfg.get("public_url", "")), src_boxes,
         e("\n".join(cfg["linkedin_searches"])), e("\n".join(cfg.get("studios") or [])),
         e("\n".join(cfg.get("rss_feeds") or [])),
         e(kv_text(cfg["title_keywords"])), e(kv_text(cfg["body_keywords"])), e(kv_text(cfg["negative_keywords"])),
         e(kv_text(cfg.get("location_keywords") or {})))
-    return page("Beállítások", body, flash)
+    return page("Settings", body, flash)
 
 
 def save_settings(f):
@@ -1228,7 +1228,7 @@ MAX_PDF_BYTES = 10 * 1024 * 1024
 
 
 def pdf_from_multipart(content_type, body):
-    """Kiszedi a "pdf" mezo fajlt a multipart/form-data torzsebol. Ures bytes, ha nincs."""
+    """Extracts the "pdf" field from a multipart/form-data body. Empty bytes if missing."""
     from email.parser import BytesParser
     from email.policy import default
     if not content_type or "multipart/form-data" not in content_type:
@@ -1241,18 +1241,18 @@ def pdf_from_multipart(content_type, body):
 
 
 def pdf_text(data):
-    """PDF szoveganak kiolvasasa (pypdf). Szkennelt, kepkent mentett PDF-bol nincs szoveg."""
+    """Reads the text of a PDF (pypdf). A scanned PDF saved as an image has no text."""
     import io
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
     if not text:
-        raise ValueError("A PDF-ből nem olvasható ki szöveg (valószínűleg szkennelt kép). Másold be a szöveget.")
+        raise ValueError("No text can be read from the PDF (probably a scanned image). Paste the text instead.")
     return text
 
 
 def profile_from_cv_text(text):
-    """Claude API-val profil-JSON a CV szovegebol. Hibanal ValueError a felhasznaloi uzenettel."""
+    """Builds the profile JSON from the CV text with the Claude API. On error raises ValueError with a user message."""
     import cvgen
     with CFG_LOCK:
         cfg = load_config()
@@ -1276,7 +1276,7 @@ import unicodedata
 
 
 def owner_prefix(prof=None):
-    """Fajlnev-eleje a profil nevebol, ASCII-ra alakitva: "Zoé Ünal" -> "Zoe_Unal"."""
+    """File-name prefix from the profile name, converted to ASCII: "Zoé Ünal" -> "Zoe_Unal"."""
     name = (prof or load_profile()).get("name") or "Candidate"
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     words = re.findall(r"[A-Za-z0-9]+", ascii_name)
@@ -1286,17 +1286,17 @@ def owner_prefix(prof=None):
 def doc_names(prof=None):
     p = owner_prefix(prof)
     return {"cv": p + "_CV.pdf", "resume": p + "_Resume.pdf", "letter": p + "_Cover_Letter.pdf"}
-DOC_LABEL = {"cv": "CV (részletes)", "resume": "Resume (1 oldal)", "letter": "Kísérőlevél"}
+DOC_LABEL = {"cv": "CV (detailed)", "resume": "Resume (1 page)", "letter": "Cover letter"}
 
 
 def safe_name(x, n=70):
     x = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", x or "").strip().strip(".")
-    return re.sub(r"\s+", " ", x)[:n].strip() or "ismeretlen"
+    return re.sub(r"\s+", " ", x)[:n].strip() or "unknown"
 
 
 def job_doc_dir(job):
     short = re.sub(r"[^A-Za-z0-9]+", "", job["id"].split(":", 1)[-1])[-10:]
-    return os.path.join(DOCS_ROOT, safe_name(job["company"] or "Ismeretlen cég"), "%s [%s]" % (safe_name(job["title"], 80), short))
+    return os.path.join(DOCS_ROOT, safe_name(job["company"] or "Unknown company"), "%s [%s]" % (safe_name(job["title"], 80), short))
 
 
 def cv_paths(jid):
@@ -1322,7 +1322,7 @@ def write_job_info(d, job, data, cvrow=None):
 
 
 def render_cv_files(jid, data, archive=False):
-    """CV + Resume + kiserolevel a ceg mappajaba. archive=True: az elozo valtozat a korabbi/<ido>/ ala kerul."""
+    """CV + Resume + cover letter into the company folder. archive=True: the previous version goes to korabbi/<time>/."""
     import cvgen
     with db() as con:
         job = dict(con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
@@ -1361,7 +1361,7 @@ def cv_generate(jid, description):
         job = dict(con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
     try:
         if not key:
-            raise cvgen.CVError("Nincs Anthropic API-kulcs (Beállítások → Claude API).")
+            raise cvgen.CVError("No Anthropic API key (Settings → Claude API).")
         data = cvgen.tailor(key, load_profile(), job, description)
         data["_photo"] = cvgen.photo_default(job)
         render_cv_files(jid, data, archive=True)
@@ -1369,21 +1369,21 @@ def cv_generate(jid, description):
             con.execute("UPDATE cvs SET status='done', error=NULL, data=?, created=? WHERE job_id=?",
                         (json.dumps(data, ensure_ascii=False), now_iso(), jid))
     except Exception as ex:
-        log.exception("CV generálás hiba")
+        log.exception("CV generation error")
         with db() as con:
             con.execute("UPDATE cvs SET status='error', error=? WHERE job_id=?", (str(ex), jid))
 
 
 def backfill_docs():
-    """Regi (dokumentumtar elotti) generalasok atrakasa a cegenkenti mappaba, Resume-mal egyutt. Nincs API-hivas."""
+    """Moves old generations (from before the document folder existed) into the per-company folder, with the Resume. No API call."""
     with db() as con:
         rows = con.execute("SELECT job_id, data FROM cvs WHERE status='done' AND (doc_dir IS NULL OR doc_dir='')").fetchall()
     for r in rows:
         try:
             d = render_cv_files(r["job_id"], json.loads(r["data"]))
-            log.info("Dokumentumok áthelyezve: %s", d)
+            log.info("Documents moved: %s", d)
         except Exception:
-            log.exception("Dokumentum-áthelyezés hiba: %s", r["job_id"])
+            log.exception("Document move error: %s", r["job_id"])
 
 
 def smb_path(d):
@@ -1397,56 +1397,56 @@ def cv_page(jid, flash=""):
     with db() as con:
         r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         if not r:
-            return page("Nincs ilyen", "<p>Nincs ilyen hirdetés.</p>")
+            return page("Not found", "<p>No such posting.</p>")
         job = dict(r)
         cv = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
     qid = e(urllib.parse.quote(jid, safe=""))
-    head = '<p><a href="/">← Vissza az állásokhoz</a></p><div class="card"><h2>📄 <a href="%s" target="_blank" rel="noopener">%s</a></h2><div class="meta">%s · %s · %s · %d pont</div></div>' % (
+    head = '<p><a href="/">← Back to jobs</a></p><div class="card"><h2>📄 <a href="%s" target="_blank" rel="noopener">%s</a></h2><div class="meta">%s · %s · %s · %d pont</div></div>' % (
         e(safe_url(job["url"])), e(job["title"]), e(job["company"]), e(job["location"] or "-"),
         e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"])
     if cv and cv["status"] == "running":
-        return page("CV készül", head + '<div class="card"><p>⏳ A Claude most készíti a hirdetéshez igazított CV-t, Resume-ot és kísérőlevelet (kb. 1–2 perc). Az oldal magától frissül.</p></div>', flash, refresh=5)
+        return page("Generating CV", head + '<div class="card"><p>⏳ Claude is now writing the CV, Resume and cover letter tailored to the posting (about 1–2 minutes). The page refreshes itself.</p></div>', flash, refresh=5)
     desc = cv["description"] if cv and cv["description"] else cvgen.fetch_description(fetch, strip_tags, job)
     gen_form = """<div class="card"><h2>%s</h2>%s<form method="post" action="/cv/%s/generate">
-<label>Hirdetés szövege (ebből dolgozik a Claude; javíthatod, kiegészítheted)</label><textarea name="description" style="min-height:220px">%s</textarea>
-<p class="muted">Csak a CV-profilod tényei kerülnek bele, a kapcsolati adataid nem mennek el az API-nak.</p>
+<label>Posting text (Claude works from this; you can fix or extend it)</label><textarea name="description" style="min-height:220px">%s</textarea>
+<p class="muted">Only facts from your CV profile go in; your contact details are not sent to the API.</p>
 <button class="primary">%s</button></form></div>""" % (
-        "Újragenerálás" if cv and cv["status"] == "done" else "Hirdetéshez igazított CV készítése",
+        "Regenerate" if cv and cv["status"] == "done" else "Create a CV tailored to this posting",
         ('<p class="err">Hiba: %s</p>' % e(cv["error"])) if cv and cv["status"] == "error" else "",
-        qid, e(desc), "🔄 Újragenerálás" if cv and cv["status"] == "done" else "✨ CV + Resume + kísérőlevél generálása (Claude)")
+        qid, e(desc), "🔄 Regenerate" if cv and cv["status"] == "done" else "✨ Generate CV + Resume + cover letter (Claude)")
     if not cv or cv["status"] != "done":
         return page("CV", head + gen_form, flash)
     data = json.loads(cv["data"])
     notes = "".join("<li>%s</li>" % e(n) for n in data.get("match_notes", []))
     emails = cvgen.find_emails(desc)
-    sent = ('<p class="ok">✅ Elküldve: %s → %s</p>' % (e(fmt_dt(cv["sent_at"])), e(cv["sent_to"]))) if cv["sent_at"] else ""
+    sent = ('<p class="ok">✅ Sent: %s → %s</p>' % (e(fmt_dt(cv["sent_at"])), e(cv["sent_to"]))) if cv["sent_at"] else ""
     paths = cv_paths(jid)
     folder = smb_path(os.path.dirname(paths["cv"])) if paths["cv"] else ""
-    body = head + """<div class="card"><h2>Dokumentumok</h2><p><a class="btn primary" href="/cv/%s/cv.pdf" target="_blank">⬇️ CV (részletes)</a>
-<a class="btn primary" href="/cv/%s/resume.pdf" target="_blank">⬇️ Resume (1 oldal)</a>
-<a class="btn" href="/cv/%s/letter.pdf" target="_blank">⬇️ Kísérőlevél</a></p>
-<p class="muted">Mappa (Macről Finder → Ugrás → Kapcsolódás szerverhez): <code>%s</code></p>
-<form method="post" action="/cv/%s/photo" style="margin:6px 0">Fotó a CV-n: <b>%s</b> &nbsp;<button name="photo" value="%s">%s</button>
-<span class="muted"> (alapból: amerikai/brit/kanadai/ausztrál helyre fotó nélkül)</span></form>
-<p><b>%s</b></p><p>%s</p><label>Megjegyzések neked</label><ul>%s</ul><p class="muted">Modell: %s · %s</p></div>
-<div class="card"><h2>✉️ Küldés e-mailben a cégnek</h2>%s
-<p class="muted">Csak akkor küld, ha megnyomod a gombot (és megerősíted). A Gmailedből megy.%s</p>
-<form method="post" action="/cv/%s/send" onsubmit="return confirm('Biztosan elküldöd a jelentkezést erre a címre: ' + this.to.value + ' ?')">
-<label>Címzett (toborzó e-mail címe)</label><input name="to" value="%s" style="width:100%%" required type="email">
-<label>Tárgy</label><input name="subject" value="%s" style="width:100%%">
-<label>Levél szövege</label><textarea name="body" style="min-height:260px;font-family:inherit;font-size:14px">%s</textarea>
-<label>Csatolmány</label>
+    body = head + """<div class="card"><h2>Documents</h2><p><a class="btn primary" href="/cv/%s/cv.pdf" target="_blank">⬇️ CV (detailed)</a>
+<a class="btn primary" href="/cv/%s/resume.pdf" target="_blank">⬇️ Resume (1 page)</a>
+<a class="btn" href="/cv/%s/letter.pdf" target="_blank">⬇️ Cover letter</a></p>
+<p class="muted">Folder (on a Mac: Finder → Go → Connect to Server): <code>%s</code></p>
+<form method="post" action="/cv/%s/photo" style="margin:6px 0">Photo on the CV: <b>%s</b> &nbsp;<button name="photo" value="%s">%s</button>
+<span class="muted"> (by default: no photo for US/UK/Canada/Australia locations)</span></form>
+<p><b>%s</b></p><p>%s</p><label>Notes for you</label><ul>%s</ul><p class="muted">Model: %s · %s</p></div>
+<div class="card"><h2>✉️ Send by e-mail to the company</h2>%s
+<p class="muted">It sends only when you press the button (and confirm). It is sent from your Gmail.%s</p>
+<form method="post" action="/cv/%s/send" onsubmit="return confirm('Really send the application to this address: ' + this.to.value + ' ?')">
+<label>Recipient (recruiter's e-mail address)</label><input name="to" value="%s" style="width:100%%" required type="email">
+<label>Subject</label><input name="subject" value="%s" style="width:100%%">
+<label>Message</label><textarea name="body" style="min-height:260px;font-family:inherit;font-size:14px">%s</textarea>
+<label>Attachment</label>
 <label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="cv" checked> CV</label>
 <label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="resume"> Resume</label>
-<label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="both"> Mindkettő</label>
-<label style="font-weight:400"><input type="checkbox" name="attach_letter"> + kísérőlevél PDF-ként is</label>
-<button class="primary">📨 Jelentkezés elküldése</button></form></div>
-<div class="card"><h2>Kézi szerkesztés</h2><p class="muted">A CV, a Resume (<code>resume</code> rész) és a kísérőlevél tartalma JSON-ban. Mentéskor a PDF-ek újrakészülnek (nincs API-hívás).</p>
-<form method="post" action="/cv/%s/save"><textarea name="data" style="min-height:300px">%s</textarea><button>💾 Mentés és PDF frissítése</button></form></div>""" % (
-        qid, qid, qid, e(folder), qid, "van" if data.get("_photo", True) else "nincs",
-        "off" if data.get("_photo", True) else "on", "Fotó levétele" if data.get("_photo", True) else "Fotó hozzáadása",
+<label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="both"> Both</label>
+<label style="font-weight:400"><input type="checkbox" name="attach_letter"> + cover letter as PDF too</label>
+<button class="primary">📨 Send application</button></form></div>
+<div class="card"><h2>Manual editing</h2><p class="muted">The CV, the Resume (<code>resume</code> section) and the cover letter content are in JSON. Saving rebuilds the PDFs (no API call).</p>
+<form method="post" action="/cv/%s/save"><textarea name="data" style="min-height:300px">%s</textarea><button>💾 Save and rebuild PDFs</button></form></div>""" % (
+        qid, qid, qid, e(folder), qid, "yes" if data.get("_photo", True) else "no",
+        "off" if data.get("_photo", True) else "on", "Remove photo" if data.get("_photo", True) else "Add photo",
         e(data["headline"]), e(data["summary"]), notes, e(data.get("_model", "")), e(fmt_dt(cv["created"])),
-        sent, (" Talált címek a hirdetésben: " + e(", ".join(emails))) if emails else " A hirdetésben nem találtam e-mail címet; a legtöbb helyen az űrlapra kell feltölteni a PDF-et.",
+        sent, (" E-mail addresses found in the posting: " + e(", ".join(emails))) if emails else " No e-mail address found in the posting; in most places you have to upload the PDF on the application form.",
         qid, e(emails[0] if emails else ""), e(data.get("email_subject", "")), e(data["cover_letter"]),
         qid, e(json.dumps({k: v for k, v in data.items() if not k.startswith("_")}, ensure_ascii=False, indent=2)))
     return page("CV", body + gen_form, flash)
@@ -1454,7 +1454,7 @@ def cv_page(jid, flash=""):
 
 def docs_page():
     if not os.path.isdir(DOCS_ROOT):
-        return page("Dokumentumok", '<div class="card muted">Még nincs generált dokumentum. Egy hirdetésnél nyomd meg a „📄 CV + Resume” gombot.</div>')
+        return page("Documents", '<div class="card muted">No documents generated yet. On a posting, press the “📄 CV + Resume” button.</div>')
     with db() as con:
         sent = {r["job_id"]: r for r in con.execute("SELECT job_id, sent_to, sent_at FROM cvs")}
     blocks = []
@@ -1478,41 +1478,41 @@ def docs_page():
                 e(urllib.parse.quote(os.path.join(rel, fn))), e(DOC_LABEL[k])) for k, fn in doc_names().items()
                 if os.path.exists(os.path.join(d, fn)))
             if os.path.exists(os.path.join(d, "hirdetes.txt")):
-                files += '<a class="btn sm" href="/docs/file?p=%s" target="_blank">Hirdetés szövege</a>' % e(urllib.parse.quote(os.path.join(rel, "hirdetes.txt")))
+                files += '<a class="btn sm" href="/docs/file?p=%s" target="_blank">Posting text</a>' % e(urllib.parse.quote(os.path.join(rel, "hirdetes.txt")))
             older = len(os.listdir(os.path.join(d, "korabbi"))) if os.path.isdir(os.path.join(d, "korabbi")) else 0
             s_ = sent.get(info.get("job_id"))
-            status = ('<span class="chip wm-remote">✅ elküldve %s → %s</span>' % (e(fmt_dt(s_["sent_at"])), e(s_["sent_to"]))) if s_ and s_["sent_at"] else ""
-            jobs_html.append("""<div class="docs-job"><div><b>%s</b> %s %s</div><div class="meta">Generálva: %s%s · <a href="%s" target="_blank" rel="noopener">hirdetés</a> · %s</div>
+            status = ('<span class="chip wm-remote">✅ sent %s → %s</span>' % (e(fmt_dt(s_["sent_at"])), e(s_["sent_to"]))) if s_ and s_["sent_at"] else ""
+            jobs_html.append("""<div class="docs-job"><div><b>%s</b> %s %s</div><div class="meta">Generated: %s%s · <a href="%s" target="_blank" rel="noopener">posting</a> · %s</div>
 <div class="files">%s</div></div>""" % (
                 e(info.get("title") or jd), status,
-                ('<a class="btn sm" href="/cv/%s">megnyitás</a>' % e(urllib.parse.quote(info["job_id"], safe=""))) if info.get("job_id") else "",
-                e(fmt_dt(info.get("generated"))), (" · %d korábbi változat" % older) if older else "",
+                ('<a class="btn sm" href="/cv/%s">open</a>' % e(urllib.parse.quote(info["job_id"], safe=""))) if info.get("job_id") else "",
+                e(fmt_dt(info.get("generated"))), (" · %d earlier version(s)" % older) if older else "",
                 e(safe_url(info.get("url", ""))), e(WORK_MODES.get(info.get("work_mode") or "unknown", "")), files))
         if jobs_html:
             blocks.append('<div class="card docs-co"><h3>🏢 %s</h3>%s</div>' % (e(co), "".join(jobs_html)))
-    intro = """<div class="card"><h2>Dokumentumok cégenként</h2><p class="muted">Minden generálás itt marad: CV, Resume, kísérőlevél, a hirdetés szövege és egy info.json.
-Újragenerálásnál a régi változat a <code>korabbi/</code> almappába kerül. A Macről is eléred: Finder → Ugrás → Kapcsolódás szerverhez → <code>%s</code></p></div>""" % e(smb_path(DOCS_ROOT))
-    return page("Dokumentumok", intro + ("".join(blocks) or '<div class="card muted">Még nincs generált dokumentum.</div>'))
+    intro = """<div class="card"><h2>Documents by company</h2><p class="muted">Every generation is kept here: CV, Resume, cover letter, the posting text and an info.json.
+When you regenerate, the old version goes to the <code>korabbi/</code> subfolder. On a Mac: Finder → Go → Connect to Server → <code>%s</code></p></div>""" % e(smb_path(DOCS_ROOT))
+    return page("Documents", intro + ("".join(blocks) or '<div class="card muted">No documents generated yet.</div>'))
 
 
 def profile_page(flash="", prefill=None):
     current = prefill if prefill is not None else json.dumps(load_profile(), ensure_ascii=False, indent=2)
-    body = """<div class="card"><h2>CV-profil (tényanyag)</h2><p class="muted">Ebből dolgozik a Claude. Csak ami itt szerepel, az kerülhet a CV-be.
-A <code>contact</code> rész nem megy el az API-nak, csak a PDF fejlécébe kerül. Telefonszámot itt adhatsz meg.</p>
-<p><a href="/base-cv.pdf?photo=1" target="_blank"><button class="primary">⬇️ Alap CV fotóval (PDF)</button></a>
-<a href="/base-cv.pdf?photo=0" target="_blank"><button>⬇️ Alap CV fotó nélkül (USA)</button></a></p></div>
-<div class="card"><h2>Profil készítése a meglévő CV-ből</h2>
-<p class="muted">A CV teljes szövege (beleértve az elérhetőségeidet is) elmegy az Anthropic API-nak, a Claude feldolgozza.
-Az eredmény csak előnézet: az alábbi szerkesztőben ellenőrizd és javítsd, mentés csak a Mentés gombbal történik.
-Kell hozzá az API-kulcs (Beállítások → Claude API).</p>
+    body = """<div class="card"><h2>CV profile (source facts)</h2><p class="muted">Claude works from this. Only what is listed here can go into the CV.
+The <code>contact</code> section is not sent to the API; it only goes into the PDF header. You can enter your phone number here.</p>
+<p><a href="/base-cv.pdf?photo=1" target="_blank"><button class="primary">⬇️ Base CV with photo (PDF)</button></a>
+<a href="/base-cv.pdf?photo=0" target="_blank"><button>⬇️ Base CV without photo (US)</button></a></p></div>
+<div class="card"><h2>Create the profile from your existing CV</h2>
+<p class="muted">The full text of your CV (including your contact details) is sent to the Anthropic API, and Claude processes it.
+The result is only a preview: check and fix it in the editor below; it is saved only with the Save button.
+It needs the API key (Settings → Claude API).</p>
 <form method="post" action="/profile/import-pdf" enctype="multipart/form-data" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input type="file" name="pdf" accept="application/pdf"><button class="primary">PDF feldolgozása</button></form>
+<input type="file" name="pdf" accept="application/pdf"><button class="primary">Process PDF</button></form>
 <form method="post" action="/profile/import" style="margin-top:10px">
-<textarea name="cv_text" style="min-height:140px" placeholder="…vagy másold be a CV szövegét ide"></textarea><button class="primary">Szöveg feldolgozása</button></form></div>
-<div class="card"><h2>Szerkesztő</h2>
-<form method="post" action="/profile"><textarea name="profile" style="min-height:600px">%s</textarea><button class="primary">Mentés</button></form></div>""" % (
+<textarea name="cv_text" style="min-height:140px" placeholder="…or paste the CV text here"></textarea><button class="primary">Process text</button></form></div>
+<div class="card"><h2>Editor</h2>
+<form method="post" action="/profile"><textarea name="profile" style="min-height:600px">%s</textarea><button class="primary">Save</button></form></div>""" % (
         e(current))
-    return page("CV-profil", body, flash)
+    return page("CV profile", body, flash)
 
 
 AUTH_PASSWORD = os.environ.get("JOBWATCH_PASSWORD", "")
@@ -1543,7 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path in AUTH_PUBLIC_PATHS or auth_ok(self.headers.get("Authorization"), AUTH_PASSWORD):
             return True
-        body = "Bejelentkezés szükséges.".encode("utf-8")
+        body = "Login required.".encode("utf-8")
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="jobwatch", charset="UTF-8"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1617,7 +1617,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/docs/file":
                 full = os.path.realpath(os.path.join(DOCS_ROOT, urllib.parse.unquote(q.get("p", ""))))
                 if not full.startswith(os.path.realpath(DOCS_ROOT) + os.sep) or not os.path.isfile(full):
-                    return self.send_html(page("Nincs", "<p>Nincs ilyen fájl.</p>"), 404)
+                    return self.send_html(page("Not found", "<p>No such file.</p>"), 404)
                 ctype = {".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8",
                          ".json": "application/json; charset=utf-8"}.get(os.path.splitext(full)[1], "application/octet-stream")
                 b = open(full, "rb").read()
@@ -1635,7 +1635,7 @@ class Handler(BaseHTTPRequestHandler):
                     job = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
                 path = cv_paths(jid)[m.group(2)]
                 if not job or not path or not os.path.exists(path):
-                    return self.send_html(page("Nincs", "<p>Még nincs PDF.</p>"), 404)
+                    return self.send_html(page("Not found", "<p>No PDF yet.</p>"), 404)
                 b = open(path, "rb").read()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/pdf")
@@ -1655,7 +1655,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.wfile.write(b)
             if u.path == "/health":
                 return self.send_html("ok")
-            self.send_html(page("Nincs ilyen", "<p>404</p>"), 404)
+            self.send_html(page("Not found", "<p>404</p>"), 404)
         except Exception as ex:
             log.exception("GET hiba")
             self.send_html(page("Hiba", "<p class=err>%s</p>" % e(ex)), 500)
@@ -1665,27 +1665,27 @@ class Handler(BaseHTTPRequestHandler):
             prefill = profile_from_cv_text(text_source())
             return self.send_html(profile_page(flash_ok, prefill=prefill))
         except ValueError as ex:
-            return self.send_html(profile_page("Nem sikerült: %s" % ex))
+            return self.send_html(profile_page("Failed: %s" % ex))
 
     def profile_import_text(self, text):
-        return self.profile_import_result(lambda: text, "Ellenőrizd az előnézetet, majd mentsd.")
+        return self.profile_import_result(lambda: text, "Check the preview, then save it.")
 
     def profile_import_pdf(self):
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_PDF_BYTES + 4096:
-            return self.send_html(profile_page("A fájl túl nagy (max. 10 MB)."))
+            return self.send_html(profile_page("The file is too large (max. 10 MB)."))
         body = self.rfile.read(length)
         data = pdf_from_multipart(self.headers.get("Content-Type", ""), body)
         if not data:
-            return self.send_html(profile_page("Nem érkezett PDF-fájl."))
+            return self.send_html(profile_page("No PDF file received."))
         if len(data) > MAX_PDF_BYTES:
-            return self.send_html(profile_page("A fájl túl nagy (max. 10 MB)."))
+            return self.send_html(profile_page("The file is too large (max. 10 MB)."))
         def source():
             try:
                 return pdf_text(data)
             except Exception as ex:
-                raise ValueError("PDF olvasási hiba: %s" % ex)
-        return self.profile_import_result(source, "Ellenőrizd az előnézetet, majd mentsd.")
+                raise ValueError("PDF reading error: %s" % ex)
+        return self.profile_import_result(source, "Check the preview, then save it.")
 
     def do_POST(self):
         if not self.require_login():
@@ -1714,11 +1714,11 @@ class Handler(BaseHTTPRequestHandler):
                     prof = json.loads(f.get("profile", ""))
                     assert isinstance(prof, dict) and prof.get("name") and prof.get("experience")
                 except Exception:
-                    return self.redirect("/profile?msg=" + urllib.parse.quote("Hibás JSON, nem mentettem."))
+                    return self.redirect("/profile?msg=" + urllib.parse.quote("Invalid JSON, nothing saved."))
                 os.makedirs(DATA, exist_ok=True)
                 with open(PROFILE_PATH, "w", encoding="utf-8") as fh:
                     json.dump(prof, fh, ensure_ascii=False, indent=2)
-                return self.redirect("/profile?msg=" + urllib.parse.quote("Mentve."))
+                return self.redirect("/profile?msg=" + urllib.parse.quote("Saved."))
             m = re.match(r"^/cv/([^/]+)/(generate|save|send|photo)$", u.path)
             if m:
                 jid, act = urllib.parse.unquote(m.group(1)), m.group(2)
@@ -1750,19 +1750,19 @@ class Handler(BaseHTTPRequestHandler):
                             assert k in data
                         with db() as con:
                             old = json.loads(con.execute("SELECT data FROM cvs WHERE job_id=?", (jid,)).fetchone()["data"])
-                        data["_model"] = old.get("_model", "").replace(" (kézzel szerkesztve)", "") + " (kézzel szerkesztve)"
+                        data["_model"] = old.get("_model", "").replace(" (edited by hand)", "") + " (edited by hand)"
                         data["_photo"] = old.get("_photo", True)
                         render_cv_files(jid, data)
                         with db() as con:
                             con.execute("UPDATE cvs SET data=? WHERE job_id=?", (json.dumps(data, ensure_ascii=False), jid))
-                        msg = "Mentve, PDF frissítve."
+                        msg = "Saved, PDF rebuilt."
                     except Exception as ex:
-                        msg = "Nem mentettem: %s" % ex
+                        msg = "Not saved: %s" % ex
                     return self.redirect(back + "?msg=" + urllib.parse.quote(msg))
                 if act == "send":
                     to = f.get("to", "").strip()
                     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to):
-                        return self.redirect(back + "?msg=" + urllib.parse.quote("Érvénytelen címzett."))
+                        return self.redirect(back + "?msg=" + urllib.parse.quote("Invalid recipient."))
                     paths = cv_paths(jid)
                     kinds = {"cv": ["cv"], "resume": ["resume"], "both": ["cv", "resume"]}.get(f.get("attach"), ["cv"])
                     if "attach_letter" in f:
@@ -1780,10 +1780,10 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             write_job_info(os.path.dirname(paths["cv"]), job, json.loads(cvrow["data"]), cvrow)
                         except Exception:
-                            log.exception("info.json frissítés")
-                        msg = "Elküldve: %s" % to
+                            log.exception("info.json update")
+                        msg = "Sent: %s" % to
                     except Exception as ex:
-                        msg = "Küldési hiba: %s" % ex
+                        msg = "Sending error: %s" % ex
                     return self.redirect(back + "?msg=" + urllib.parse.quote(msg))
             if u.path == "/mark-all-seen":
                 with db() as con:
@@ -1791,22 +1791,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.redirect(self.back())
             if u.path == "/settings":
                 save_settings(f)
-                return self.redirect("/settings?msg=" + urllib.parse.quote("Mentve, a hirdetések újrapontozva."))
+                return self.redirect("/settings?msg=" + urllib.parse.quote("Saved, postings re-scored."))
             if u.path == "/test":
                 with CFG_LOCK:
                     cfg = load_config()
                 try:
                     if f.get("what") == "email":
-                        send_email(cfg, "Állásfigyelő teszt", "Működik az e-mail értesítés.",
-                                   "<p>Működik az e-mail értesítés. ✅</p>")
+                        send_email(cfg, "jobwatch test", "E-mail notifications work.",
+                                   "<p>E-mail notifications work. ✅</p>")
                     else:
-                        send_ntfy(cfg, "Állásfigyelő teszt", "Működik a push értesítés ✅",
+                        send_ntfy(cfg, "jobwatch test", "Push notifications work ✅",
                                   click=cfg.get("public_url"))
-                    msg = "Teszt elküldve."
+                    msg = "Test sent."
                 except Exception as ex:
-                    msg = "Teszt hiba: %s" % ex
+                    msg = "Test error: %s" % ex
                 return self.redirect("/settings?msg=" + urllib.parse.quote(msg))
-            self.send_html(page("Nincs ilyen", "<p>404</p>"), 404)
+            self.send_html(page("Not found", "<p>404</p>"), 404)
         except Exception as ex:
             log.exception("POST hiba")
             self.send_html(page("Hiba", "<p class=err>%s</p>" % e(ex)), 500)
@@ -1818,7 +1818,7 @@ def main():
     threading.Thread(target=backfill_docs, daemon=True).start()
     with CFG_LOCK:
         cfg = load_config()
-    log.info("Állásfigyelő indul: port %d, ntfy topic: %s", PORT, cfg["ntfy"]["topic"])
+    log.info("jobwatch starting: port %d, ntfy topic: %s", PORT, cfg["ntfy"]["topic"])
     threading.Thread(target=scheduler, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

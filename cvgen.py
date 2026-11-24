@@ -1,16 +1,16 @@
-"""Hirdetesekhez igazitott CV + kisero level keszitese Claude API-val, PDF renderelessel (reportlab).
-Dizajn: Inter betutipus, kerek foto, kattinthato linkek."""
+"""Builds a CV + cover letter tailored to a posting with the Claude API, rendered to PDF (reportlab).
+Design: Inter typeface, round photo, clickable links."""
 import json
 import os
 import re
 
 MODEL = "claude-opus-5-5"
 
-# A CV tenyanyaga: a profil (data/profile.json). Lasd DEFAULT_PROFILE lent.
-# A "contact" resz NEM megy el a Claude API-nak, csak helyben kerul a PDF-be.
-# Alap (sablon) profil: ha a peldany data/profile.json fajlja hianyzik, ez hasznalodik.
-# A sajat adataidat a data/profile.json-ba ird (lasd README: "Profil"). Ez a fajl ne tartalmazzon
-# valodi szemelyes adatot.
+# The source material for the CV: the profile (data/profile.json). See DEFAULT_PROFILE below.
+# The "contact" section is NOT sent to the Claude API; it only goes into the PDF locally.
+# Base (template) profile: used if the instance has no data/profile.json.
+# Write your own data into data/profile.json (see README: "Profile"). This file must not contain
+# real personal data.
 DEFAULT_PROFILE = {
     "name": "Your Name",
     "headline": "Your headline, e.g. Project Manager | Operations Lead",
@@ -90,7 +90,7 @@ Ground rules:
 - Keep every experience entry, in the profile's order, with its heading, role and period copied exactly. You may rewrite, drop or merge bullets and projects that are irrelevant to this posting; keep project names exactly as in the profile.
 - List only skills the profile contains, ordered by relevance to the posting; you may regroup and rename the groups.
 - If the posting asks for something the candidate lacks (e.g. a specific engine, years of experience, shipped titles), do not claim it. Mention the gap in match_notes so the candidate can decide how to handle it.
-- Write the CV and the letter in the posting's language: Hungarian posting -> "hu", German posting -> "de", otherwise "en". Keep headings and project names as they are. match_notes are always in Hungarian, because they are for the candidate.
+- Write the CV and the letter in the posting's language: Hungarian posting -> "hu", German posting -> "de", otherwise "en". Keep headings and project names as they are. match_notes are always in English, because they are for the candidate.
 - headline: one line positioning the candidate for this role, still truthful.
 - summary: 3-4 sentences that answer "why this candidate for this role".
 - resume: a one-page version of the same tailored CV for quick screening, same facts, language and heading rules: summary at most 2 sentences; at most 4 skill groups with only the most relevant items; every experience entry kept, each with at most 3 short bullets; for the freelance entry at most 3 projects with one short line each (no bullets there).
@@ -104,11 +104,11 @@ class CVError(Exception):
 
 
 def tailor(api_key, profile, job, description):
-    """Claude API hivas: visszaadja a testreszabott CV adatait (dict, a profilhoz hasonlo szerkezet)."""
+    """Claude API call: returns the tailored CV data (dict, same structure as the profile)."""
     import anthropic
 
-    facts = {k: v for k, v in profile.items() if k != "contact"}  # kapcsolati adatok nem mennek ki
-    facts = json.loads(json.dumps(facts))  # linkek nem kellenek a modellnek, a renderer teszi vissza
+    facts = {k: v for k, v in profile.items() if k != "contact"}  # contact details are not sent out
+    facts = json.loads(json.dumps(facts))  # the model does not need links; the renderer puts them back
     for x in facts.get("experience", []):
         x.pop("links", None)
         for p in x.get("projects", []):
@@ -128,26 +128,26 @@ def tailor(api_key, profile, job, description):
             messages=[{"role": "user", "content": user}],
         )
     except anthropic.AuthenticationError:
-        raise CVError("Érvénytelen Anthropic API-kulcs (Beállítások → Claude API).")
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
     except anthropic.PermissionDeniedError:
-        raise CVError("Az API-kulcsnak nincs jogosultsága ehhez a modellhez.")
+        raise CVError("The API key has no permission for this model.")
     except anthropic.RateLimitError:
-        raise CVError("Claude API: túl sok kérés, próbáld újra pár perc múlva.")
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
     except anthropic.BadRequestError as e:
-        raise CVError("Claude API hibás kérés: %s" % e.message)
+        raise CVError("Claude API bad request: %s" % e.message)
     except anthropic.APIStatusError as e:
-        raise CVError("Claude API hiba (%s): %s" % (e.status_code, e.message))
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
     except anthropic.APIConnectionError:
-        raise CVError("Nem érem el a Claude API-t (hálózati hiba).")
+        raise CVError("Cannot reach the Claude API (network error).")
     if resp.stop_reason == "refusal":
-        raise CVError("A modell elutasította a kérést.")
+        raise CVError("The model refused the request.")
     if resp.stop_reason == "max_tokens":
-        raise CVError("A válasz túl hosszú lett, próbáld újra.")
+        raise CVError("The response was too long, try again.")
     text = "".join(b.text for b in resp.content if b.type == "text")
     try:
         data = json.loads(text)
     except ValueError:
-        raise CVError("A modell válasza nem érvényes JSON.")
+        raise CVError("The model's response is not valid JSON.")
     data["_model"] = resp.model
     return data
 
@@ -159,14 +159,14 @@ NO_PHOTO_RE = re.compile(
 
 
 def photo_default(job):
-    """Amerikai/angolszasz helyszinre foto nelkul (ott hatranyos), maskor fotoval."""
+    """No photo for US/UK-style locations (a photo is a disadvantage there), a photo elsewhere."""
     loc = job.get("location") or ""
     return not NO_PHOTO_RE.search(loc)
 
 
 # ---------------------------------------------------------------- job description
 def fetch_description(fetch, strip_tags, job):
-    """Teljes hirdetesszoveg: LinkedIn eseten a nyilvanos jobPosting vegpontrol, egyebkent a tarolt leiras."""
+    """Full posting text: for LinkedIn from the public jobPosting endpoint, otherwise the stored description."""
     if job["source"] == "linkedin":
         jid = job["id"].split(":", 1)[1]
         try:
@@ -190,7 +190,7 @@ _fonts_cache = None
 
 
 def _fonts(font_dir):
-    """(regular, bold, semibold, italic, light) betutipus-nevek; Inter, ha megvan, kulonben DejaVu/Helvetica."""
+    """Font names (regular, bold, semibold, italic, light); Inter if available, otherwise DejaVu/Helvetica."""
     global _fonts_cache
     if _fonts_cache:
         return _fonts_cache
@@ -231,7 +231,7 @@ def _links(links):
 
 
 SECTION = {"en": ("Profile", "Technical Stack & Core Competencies", "Selected References & Experience", "Key Projects:", "Languages"),
-           "hu": ("Profil", "Technológiák és kompetenciák", "Kiemelt referenciák és tapasztalat", "Fontosabb projektek:", "Nyelvek"),
+           "hu": ("Profil", "Technológiák és kompetenciák", "Kiemelt referenciák és tapasztalat", "Fontosabb projektek:", "Nyelvek"),  # Hungarian CV headings, used for Hungarian postings
            "de": ("Profil", "Technologien & Kernkompetenzen", "Ausgewählte Referenzen & Erfahrung", "Wichtige Projekte:", "Sprachen")}
 
 
@@ -248,7 +248,7 @@ def _normalize(cv):
 
 
 def _merge_links(profile, cv):
-    """A modell kimenetebe visszateszi a profilban levo linkeket (heading / projektnev alapjan)."""
+    """Puts the profile links back into the model output (matched by heading / project name)."""
     by_head = {x["heading"]: x for x in profile.get("experience", [])}
     pexp = profile.get("experience", [])
     for i, x in enumerate(cv.get("experience", [])):
@@ -261,7 +261,7 @@ def _merge_links(profile, cv):
 
 
 def render_resume_pdf(path, profile, cv, font_dir, photo_path=None):
-    """Egyoldalas resume a modell 'resume' reszebol; ha nem fer ki, kisebb merettel ujrarendereli."""
+    """One-page resume from the model's 'resume' section; if it does not fit, re-renders at a smaller size."""
     r = cv.get("resume") or {}
     data = {"language": cv.get("language", "en"), "headline": r.get("headline") or cv.get("headline"),
             "summary": r.get("summary") or cv.get("summary"), "skills": r.get("skills") or cv.get("skills"),
@@ -276,7 +276,7 @@ def render_resume_pdf(path, profile, cv, font_dir, photo_path=None):
 
 
 def render_cv_pdf(path, profile, cv, font_dir, photo_path=None, scale=1.0, compact=False):
-    """cv: profil-szerkezetu adat (a profil maga = alap CV). photo_path=None -> foto nelkul. Visszaadja az oldalszamot."""
+    """cv: data in profile structure (the profile itself = the base CV). photo_path=None -> no photo. Returns the page count."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
@@ -359,7 +359,7 @@ def render_cv_pdf(path, profile, cv, font_dir, photo_path=None, scale=1.0, compa
             head.append(Paragraph(_esc(x["intro"]), st["body"]))
         if x.get("bullets"):
             bl = [_esc(b) for b in x["bullets"]]
-            head.append(bullets(bl[:1]))  # a cim ne maradjon arvan: az elso pont vele egyutt
+            head.append(bullets(bl[:1]))  # keep the heading with the first bullet
             if bl[1:]:
                 rest.append(bullets(bl[1:]))
         if x.get("projects"):
@@ -413,7 +413,7 @@ def render_letter_pdf(path, profile, cv, font_dir):
                       bottomMargin=20 * mm, title="%s – Cover letter" % profile["name"]).build(el)
 
 
-# ---------------------------------------------------------------- profil a CV szovegebol
+# ---------------------------------------------------------------- profile from CV text
 _LINKS = {"type": "array", "items": {"type": "object", "additionalProperties": False,
           "required": ["label", "url"], "properties": {"label": _STR, "url": _STR}}}
 PROFILE_SCHEMA = {
@@ -451,16 +451,16 @@ MAX_CV_CHARS = 60000
 
 
 def profile_from_text(api_key, text):
-    """Claude API: a CV szovegebol profil-JSON (dict). Ugyanaz a profil-szerkezet, mint a DEFAULT_PROFILE."""
+    """Claude API: profile JSON (dict) from the CV text. Same structure as DEFAULT_PROFILE."""
     import anthropic
 
     text = (text or "").strip()
     if not text:
-        raise CVError("Nincs CV-szöveg.")
+        raise CVError("No CV text.")
     if len(text) > MAX_CV_CHARS:
-        raise CVError("A CV szövege túl hosszú (max. %d karakter)." % MAX_CV_CHARS)
+        raise CVError("The CV text is too long (max. %d characters)." % MAX_CV_CHARS)
     if not (api_key or os.environ.get("ANTHROPIC_API_KEY")):
-        raise CVError("Nincs Anthropic API-kulcs (Beállítások → Claude API).")
+        raise CVError("No Anthropic API key (Settings → Claude API).")
     client = anthropic.Anthropic(api_key=api_key or None, timeout=300.0, max_retries=2)
     try:
         resp = client.beta.messages.create(
@@ -471,20 +471,20 @@ def profile_from_text(api_key, text):
             messages=[{"role": "user", "content": "<cv>\n%s\n</cv>" % text}],
         )
     except anthropic.AuthenticationError:
-        raise CVError("Érvénytelen Anthropic API-kulcs (Beállítások → Claude API).")
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
     except anthropic.RateLimitError:
-        raise CVError("Claude API: túl sok kérés, próbáld újra pár perc múlva.")
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
     except anthropic.APIStatusError as e:
-        raise CVError("Claude API hiba (%s): %s" % (e.status_code, e.message))
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
     except anthropic.APIConnectionError:
-        raise CVError("Nem érem el a Claude API-t (hálózati hiba).")
+        raise CVError("Cannot reach the Claude API (network error).")
     if resp.stop_reason in ("refusal", "max_tokens"):
-        raise CVError("A profil nem készült el (%s). Próbáld rövidebb szöveggel." % resp.stop_reason)
+        raise CVError("The profile was not created (%s). Try a shorter text." % resp.stop_reason)
     raw = "".join(b.text for b in resp.content if b.type == "text")
     try:
         data = json.loads(raw)
     except ValueError:
-        raise CVError("A modell válasza nem érvényes JSON.")
+        raise CVError("The model's response is not valid JSON.")
     if not data.get("name") or not data.get("experience"):
-        raise CVError("Nem sikerült kinyerni a nevet vagy a munkatapasztalatot a CV-ből.")
+        raise CVError("Could not extract the name or work experience from the CV.")
     return data

@@ -22,8 +22,8 @@ PORT = 8090
 PYTHON_DOWNLOAD = "https://www.python.org/downloads/"
 
 TEMPLATES = {
-    "1": ("unity-game", "Unity / játékfejlesztő állások"),
-    "2": ("project-manager", "Projekt- és termékmenedzser állások"),
+    "1": ("unity-game", "Unity / game development jobs"),
+    "2": ("project-manager", "Project and product manager jobs"),
 }
 
 
@@ -39,11 +39,11 @@ def venv_python():
 
 def check_python():
     if sys.version_info < MIN_PY:
-        say("A jobwatch-hoz Python %d.%d vagy újabb kell, de ez a %d.%d." % (MIN_PY + sys.version_info[:2]))
-        say("Töltsd le innen, telepítsd, majd indítsd újra ezt a programot:")
+        say("jobwatch needs Python %d.%d or newer, but this is %d.%d." % (MIN_PY + sys.version_info[:2]))
+        say("Download it from here, install it, then start this program again:")
         say("  " + PYTHON_DOWNLOAD)
         if os.name == "nt":
-            say("Telepítéskor pipáld be: \"Add python.exe to PATH\".")
+            say("During installation tick: \"Add python.exe to PATH\".")
         sys.exit(1)
 
 
@@ -104,13 +104,13 @@ def run_with_progress(cmd, label):
 def setup_environment():
     py = venv_python()
     if not os.path.exists(py):
-        say("Első indítás: a környezet létrehozása...")
-        run_with_progress([sys.executable, "-m", "venv", VENV], "virtuális környezet")
+        say("First start: creating the environment...")
+        run_with_progress([sys.executable, "-m", "venv", VENV], "virtual environment")
     stamp = os.path.join(VENV, ".requirements-installed")
     req = os.path.join(HERE, "requirements.txt")
     if not os.path.exists(stamp) or os.path.getmtime(stamp) < os.path.getmtime(req):
-        say("Csomagok telepítése (az első alkalommal 1–2 perc)...")
-        run_with_progress([py, "-m", "pip", "install", "--disable-pip-version-check", "-r", req], "pip telepítés")
+        say("Installing packages (the first time takes 1–2 minutes)...")
+        run_with_progress([py, "-m", "pip", "install", "--disable-pip-version-check", "-r", req], "pip install")
         open(stamp, "w").close()
     return py
 
@@ -129,12 +129,12 @@ def setup_profile(py):
     if existing:
         return existing[0]
     say("")
-    say("Még nincs keresési profilod. Válassz egyet (később a böngészőben is módosíthatod):")
+    say("You have no search profile yet. Choose one (you can change it later in the browser):")
     for key, (_, label) in TEMPLATES.items():
         say("  %s) %s" % (key, label))
-    choice = ask("Melyik? [1/2, alapértelmezett: 2]: ", "2")
+    choice = ask("Which one? [1/2, default: 2]: ", "2")
     template = TEMPLATES.get(choice, TEMPLATES["2"])[0]
-    name = ask("Profil neve (betű, szám, - és _; alapértelmezett: sajat): ", "sajat")
+    name = ask("Profile name (letters, digits, - and _; default: mine): ", "mine")
     run([py, os.path.join(HERE, "tools", "new_profile.py"), name, "--template", template, "--port", str(PORT),
          "--profiles-dir", os.path.join(HERE, "profiles")])
     return name
@@ -151,7 +151,7 @@ def free_port(start):
 
 def main():
     os.chdir(HERE)
-    say("jobwatch – állásfigyelő")
+    say("jobwatch – job watcher")
     say("-" * 40)
     check_python()
     py = setup_environment()
@@ -161,20 +161,20 @@ def main():
     env = dict(os.environ, JOBWATCH_DATA=os.path.join(HERE, "profiles", name), JOBWATCH_PORT=str(port))
     say("")
     say("Indul: %s" % url)
-    say("Leállítás: Ctrl+C (vagy zárd be az ablakot).")
+    say("Stop: Ctrl+C (or close the window).")
     say("")
     threading.Timer(3, lambda: webbrowser.open(url)).start()
     try:
         subprocess.run([py, os.path.join(HERE, "app.py")], cwd=HERE, env=env)
     except KeyboardInterrupt:
-        say("\nLeállítva.")
+        say("\nStopped.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as ex:
-        say("\nHiba történt a telepítés közben (%s). Másold ki a fenti üzenetet, és kérj segítséget." % ex.cmd)
+        say("\nAn error occurred during setup (%s). Copy the message above and ask for help." % ex.cmd)
         sys.exit(1)
     except KeyboardInterrupt:
-        say("\nLeállítva.")
+        say("\nStopped.")

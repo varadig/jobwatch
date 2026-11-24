@@ -15,8 +15,8 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
   (Ashby, Greenhouse, Lever, BambooHR, SmartRecruiters), and your own RSS feeds. Each source can be
   switched off in the Settings page.
 - **Scoring:** every posting gets points from title keywords, description keywords, location and
-  negative keywords (for example "junior" or "sales"). Postings below *Listában min. pont* are hidden,
-  and postings at or above *Értesítés min. pont* trigger a notification.
+  negative keywords (for example "junior" or "sales"). Postings below *Min. score in list* are hidden,
+  and postings at or above *Min. score for notifications* trigger a notification.
 - **Work mode:** postings are classified as remote, hybrid, office or unknown from their text, with a
   filter on the list page.
 - **Notifications:** [ntfy](https://ntfy.sh) push and/or e-mail (SMTP).
@@ -64,7 +64,7 @@ Templates live in `templates/`:
 
 **Creating the CV profile from your existing CV:** on the CV-profil page, upload a PDF or paste the text.
 Claude turns it into the profile structure and shows the result in the editor. Check it, fix what is wrong,
-then press Mentés. Your full CV text, contact details included, is sent to the Anthropic API for this step.
+then press Save. Your full CV text, contact details included, is sent to the Anthropic API for this step.
 A scanned PDF with no text layer cannot be read; paste the text instead. The API key is set in Settings.
 
 To change what a profile searches for, edit the Settings page, or the `linkedin_searches`,
