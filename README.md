@@ -4,6 +4,8 @@ A self-hosted job watcher. It collects job postings from several sources, scores
 keywords, sends a push or e-mail when a strong match appears, and can generate a CV and cover letter
 tailored to a posting with the Claude API. The web interface is in Hungarian and uses daisyUI.
 
+![jobwatch screenshot: the job list with scores, filters and the English interface](docs/screenshot.png)
+
 It is built on the Python standard library. CV PDFs need `reportlab`.
 
 > **Status:** works for its author daily. Shared as-is for others who want to run it for their own
