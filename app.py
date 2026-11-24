@@ -508,8 +508,12 @@ def linkedin_detail(jid):
     return strip_tags(m.group(1).replace("<br>", "\n").replace("</li>", "\n").replace("</p>", "\n"))[:12000]
 
 
-def enrich_linkedin(con, items, limit=20):
-    """Uj / meg leiras nelkuli LinkedIn hirdetesekhez letolti a szoveget, es abbol dont a munkavegzes modjarol."""
+LINKEDIN_RETRY_WAITS = (30, 90, 180)  # 429 (tul sok keres) eseten ennyit var, aztan ujraprobal
+
+
+def enrich_linkedin(con, items, limit=60):
+    """Uj / meg leiras nelkuli LinkedIn hirdetesekhez letolti a szoveget, es abbol dont a munkavegzes modjarol.
+    429 (tul sok keres) eseten vár és újrapróbálja, így a munkavégzés-mód nem marad ismeretlen a rate-limit miatt."""
     n = 0
     for it in items:
         row = con.execute("SELECT description FROM jobs WHERE id=?", ("linkedin:" + it["ext_id"],)).fetchone()
@@ -517,15 +521,23 @@ def enrich_linkedin(con, items, limit=20):
             continue
         if n >= limit:
             break
-        try:
-            d = linkedin_detail(it["ext_id"])
-        except urllib.error.HTTPError as ex:
-            if ex.code == 429:
-                log.warning("LinkedIn részletek: 429, a többit a következő körben")
+        d = None
+        for wait in (0,) + LINKEDIN_RETRY_WAITS:
+            if wait:
+                time.sleep(wait)
+            try:
+                d = linkedin_detail(it["ext_id"])
                 break
-            continue
-        except Exception:
-            continue
+            except urllib.error.HTTPError as ex:
+                if ex.code == 429:
+                    log.warning("LinkedIn részletek: 429, várakozás %d s", wait)
+                    continue
+                break
+            except Exception:
+                break
+        else:
+            log.warning("LinkedIn részletek: még mindig 429, a többit a következő körben")
+            break
         n += 1
         if d:
             it["description"] = d

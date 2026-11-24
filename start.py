@@ -51,15 +51,66 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=HERE, check=True, **kw)
 
 
+STEP_PREFIXES = ("Collecting", "Downloading", "Installing collected", "Successfully installed")
+
+
+def run_with_progress(cmd, label):
+    """Runs a command and shows a spinner with the elapsed time, plus each install step as it happens."""
+    import itertools
+    import threading
+    import time
+    tty = sys.stdout.isatty()
+    lock = threading.Lock()
+    state = {"done": False, "start": time.time(), "shown": False}
+
+    def clear_line():
+        if tty and state["shown"]:
+            sys.stdout.write("\r" + " " * 79 + "\r")
+            state["shown"] = False
+
+    def spinner():
+        for ch in itertools.cycle("|/-\\"):
+            if state["done"]:
+                break
+            with lock:
+                if tty:
+                    sys.stdout.write("\r%s %s … %3ds" % (ch, label, time.time() - state["start"]))
+                    sys.stdout.flush()
+                    state["shown"] = True
+            time.sleep(0.2)
+
+    proc = subprocess.Popen(cmd, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    lines = []
+    if tty:
+        threading.Thread(target=spinner, daemon=True).start()
+    for line in proc.stdout:
+        lines.append(line)
+        step = line.strip()
+        if step.startswith(STEP_PREFIXES):
+            with lock:
+                clear_line()
+                say("  • " + step[:90])
+    state["done"] = True
+    proc.wait()
+    with lock:
+        clear_line()
+    if proc.returncode:
+        say("".join(lines[-30:]))
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    say("  ✓ %s (%ds)" % (label, time.time() - state["start"]))
+
+
 def setup_environment():
     py = venv_python()
     if not os.path.exists(py):
-        say("Első indítás: a szükséges csomagok telepítése (1-2 perc)...")
-        run([sys.executable, "-m", "venv", VENV])
+        say("Első indítás: a környezet létrehozása...")
+        run_with_progress([sys.executable, "-m", "venv", VENV], "virtuális környezet")
     stamp = os.path.join(VENV, ".requirements-installed")
     req = os.path.join(HERE, "requirements.txt")
     if not os.path.exists(stamp) or os.path.getmtime(stamp) < os.path.getmtime(req):
-        run([py, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", req])
+        say("Csomagok telepítése (az első alkalommal 1–2 perc)...")
+        run_with_progress([py, "-m", "pip", "install", "--disable-pip-version-check", "-r", req], "pip telepítés")
         open(stamp, "w").close()
     return py
 

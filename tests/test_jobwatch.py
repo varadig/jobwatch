@@ -222,3 +222,35 @@ class CvImport(unittest.TestCase):
     def test_schema_requires_the_fields_the_profile_needs(self):
         import cvgen
         self.assertTrue({"name", "experience", "contact"} <= set(cvgen.PROFILE_SCHEMA["required"]))
+
+
+class LinkedInEnrichment(unittest.TestCase):
+    def _con(self):
+        app.init_db()
+        app.migrate_db()
+        con = app.db()
+        return con
+
+    def test_rate_limited_detail_is_retried_then_classified(self):
+        import urllib.error
+        calls = {"n": 0}
+
+        def fake_detail(jid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError("u", 429, "Too Many", None, None)
+            return "This is a fully remote role."
+
+        old_detail, old_sleep = app.linkedin_detail, app.time.sleep
+        app.linkedin_detail = fake_detail
+        app.time.sleep = lambda s: None
+        con = self._con()
+        try:
+            items = [{"ext_id": "1", "title": "Project Manager", "location": "Europe"}]
+            n = app.enrich_linkedin(con, items)
+        finally:
+            app.linkedin_detail, app.time.sleep = old_detail, old_sleep
+            con.close()
+        self.assertEqual(n, 1)
+        self.assertEqual(items[0]["work_mode"], "remote")
+        self.assertEqual(calls["n"], 2)
