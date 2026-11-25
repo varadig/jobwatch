@@ -1051,6 +1051,28 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 @media (max-width:700px){.job{grid-template-columns:42px 1fr}.acts{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;min-width:0}
 .acts .icons{justify-content:flex-start}.score{width:42px;height:42px}.bucket{top:88px}.row-chips .lbl{width:100%}}
 /* shared page building blocks (ui-*) and the Recruiters page (rc-*) */
+.ui-section>header>div{min-width:0}.ui-desc{margin:3px 0 0;color:var(--muted);font-size:13.5px;max-width:75ch}
+.ui-h3{font-size:14px;font-weight:650;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
+.ui-body>.ui-h3:first-child{margin-top:0;padding-top:0;border-top:0}
+.ui-checks{display:flex;flex-wrap:wrap;gap:8px 18px}.ui .ui-checks label{display:inline-flex;align-items:center;gap:7px;font-weight:400;margin:0}
+.ui .ui-toggle{display:inline-flex;align-items:center;gap:10px;font-weight:600;font-size:14px;margin:0}
+.ui-steps{margin:0 0 6px;padding-left:20px;font-size:13.5px}.ui-steps li{margin:2px 0}
+.ui-mono{font-family:ui-monospace,Menlo,Consolas,monospace!important;font-size:13px!important}
+.ui-lead{margin:0 0 12px;font-size:13.5px;color:var(--muted)}
+.ui-sub{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px;background:var(--soft)}
+.ui-subhead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.ui-subhead .muted{font-size:12.5px}
+.ui-layout{display:grid;grid-template-columns:180px minmax(0,1fr);gap:22px;align-items:start}
+.ui-side{position:sticky;top:70px;display:flex;flex-direction:column;gap:2px}
+.ui-side a{padding:7px 12px;border-radius:8px;color:var(--muted);font-weight:500;font-size:14px}
+.ui-side a:hover{background:var(--soft);color:var(--fg);text-decoration:none}
+.ui-savebar{position:sticky;bottom:0;z-index:4;display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:12px 18px;margin:0 0 18px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:0 -6px 18px rgba(0,0,0,.12)}.ui-savebar .muted{font-size:13px}
+.ui-danger{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.ui-danger .help{display:block}
+section.ui-section{scroll-margin-top:70px}
+@media (max-width:860px){.ui-layout{grid-template-columns:1fr}.ui-side{position:static;flex-direction:row;flex-wrap:wrap}}
 .rc{max-width:900px;margin:0 auto}
 .ui-head{margin:4px 0 18px}.ui-head h1{font-size:22px;font-weight:700;margin:0}
 .ui-head p{margin:4px 0 0;color:var(--muted);max-width:70ch}
@@ -1468,33 +1490,37 @@ def custom_source_fields(i, src):
     src = src or {}
     opts = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if src.get("type", "vmp") == k else "", e(v))
                    for k, v in CUSTOM_TYPES.items())
-    f = lambda name, label, val, extra="": (
-        '<div><label>%s</label><input name="cs_%s_%s" value="%s" style="width:100%%"%s></div>' % (label, i, name, e(val), extra))
-    head = ('<label style="font-weight:400"><input type="checkbox" name="cs_%s_enabled"%s> enabled</label> '
-            '<label style="font-weight:400;margin-left:14px"><input type="checkbox" name="cs_%s_delete"> delete</label>'
-            % (i, " checked" if src.get("enabled", True) else "", i)) if i != "new" else "<b>➕ Add a new source</b>"
-    return ('<div style="border:1px solid #8884;border-radius:8px;padding:10px;margin:10px 0">%s'
-            '<input type="hidden" name="cs_%s_id" value="%s"><div class="row">'
-            '<div><label>Type</label><select name="cs_%s_type">%s</select></div>%s%s%s</div><div class="row">%s%s'
-            '<div><label>Password %s</label><input type="password" name="cs_%s_password" autocomplete="new-password" '
-            'placeholder="(leave empty to keep)" style="width:100%%"></div></div></div>') % (
-        head, i, e(src.get("id", "")), i, opts,
+    f = lambda name, label, val, extra="", wide=False: (
+        '<div%s><label for="cs_%s_%s">%s</label><input class="input" id="cs_%s_%s" name="cs_%s_%s" value="%s"%s></div>'
+        % (' class="wide"' if wide else "", i, name, label, i, name, i, name, e(val), extra))
+    if i == "new":
+        head = '<div class="ui-subhead"><b>Add a new source</b><span class="muted">Fill in the URL to add it; it is saved with the page.</span></div>'
+    else:
+        head = ('<div class="ui-subhead"><b>%s</b><span class="ui-checks">'
+                '<label><input type="checkbox" class="toggle toggle-sm toggle-primary" name="cs_%s_enabled"%s> Enabled</label>'
+                '<label><input type="checkbox" class="checkbox checkbox-sm checkbox-error" name="cs_%s_delete"> Delete on save</label></span></div>'
+                % (e(src.get("name") or src.get("url", "")), i, " checked" if src.get("enabled", True) else "", i))
+    return ('<div class="ui-sub">%s<input type="hidden" name="cs_%s_id" value="%s"><div class="ui-grid">'
+            '<div><label for="cs_%s_type">Type</label><select class="select" id="cs_%s_type" name="cs_%s_type">%s</select></div>%s%s%s'
+            '<div class="wide"><span class="help">Login (only if the site needs it):</span></div>%s%s'
+            '<div><label for="cs_%s_password">Password %s</label><input class="input" type="password" id="cs_%s_password" name="cs_%s_password" '
+            'autocomplete="new-password" placeholder="Leave empty to keep"></div></div></div>') % (
+        head, i, e(src.get("id", "")), i, i, i, opts,
         f("name", "Name", src.get("name", ""), ' placeholder="e.g. munka.hu"'),
-        f("url", "URL (search result page / page / feed)", src.get("url", ""), ' placeholder="https://vmp.munka.hu/allas/talalatok?kulcsszo=..."'),
+        f("url", "URL: search result page, web page or feed", src.get("url", ""),
+          ' placeholder="https://vmp.munka.hu/allas/talalatok?kulcsszo=…"', wide=True),
         f("pattern", "Link pattern (only for “any web page”)", src.get("pattern", ""), ' placeholder="/job/"'),
-        f("login_url", "Login page (empty = default for VMP)", src.get("login_url", "")),
-        f("username", "Username (only if login is needed)", src.get("username", ""), ' autocomplete="off"'),
-        "(set ✓)" if src.get("password") else "", i)
+        f("login_url", "Login page (empty = the default for VMP)", src.get("login_url", "")),
+        f("username", "Username", src.get("username", ""), ' autocomplete="off"'),
+        i, '<span class="badge badge-soft badge-success">set</span>' if src.get("password") else "", i, i)
 
 
 def custom_sources_card(cfg):
     blocks = "".join(custom_source_fields(i, s) for i, s in enumerate(cfg.get("custom_sources") or []))
-    return ('<div class="card"><h2>🧩 Own sources</h2><p class="muted">Add any job site. <b>munka.hu VMP</b>: search on '
-            '<a href="https://vmp.munka.hu/allas/egyszeru_kereses" target="_blank" rel="noopener">vmp.munka.hu</a>, then paste '
-            'the address of the result page. With your VMP username and password the employer is shown too. '
-            '<b>Any web page</b>: every link on the page whose address contains the pattern becomes a posting. '
-            'Passwords are stored only on this machine (in the settings file). “Test own sources” tries them without saving postings.</p>'
-            '%s%s<input type="hidden" name="cs_count" value="%d"></div>') % (
+    return ('<p class="ui-lead"><b>munka.hu VMP</b>: search on <a href="https://vmp.munka.hu/allas/egyszeru_kereses" target="_blank" '
+            'rel="noopener">vmp.munka.hu</a> and paste the address of the result page; with your VMP login the employer is shown too. '
+            '<b>Any web page</b>: every link whose address contains the pattern becomes a posting. Passwords stay on this machine.</p>'
+            '%s%s<input type="hidden" name="cs_count" value="%d">') % (
         blocks, custom_source_fields("new", None), len(cfg.get("custom_sources") or []))
 
 
@@ -1541,69 +1567,127 @@ def test_custom_sources(cfg):
     return " | ".join(lines) or "No own sources yet."
 
 
+def ui_field(name, label, value="", kind="text", help_="", extra="", wide=False):
+    """A labelled input for the ui-grid."""
+    return '<div%s><label for="%s">%s</label><input class="input" id="%s" name="%s" type="%s" value="%s"%s>%s</div>' % (
+        ' class="wide"' if wide else "", name, label, name, name, kind, e(value), extra,
+        ('<span class="help">%s</span>' % help_) if help_ else "")
+
+
+def ui_toggle(name, label, on, help_=""):
+    return ('<div class="wide"><label class="ui-toggle"><input type="checkbox" class="toggle toggle-primary" name="%s"%s> %s</label>%s</div>'
+            % (name, " checked" if on else "", label, ('<span class="help">%s</span>' % help_) if help_ else ""))
+
+
+def ui_sec(anchor, title, desc, inner, foot=""):
+    return ('<section class="ui-section" id="%s" aria-labelledby="%s-h"><header><div><h2 id="%s-h">%s</h2>%s</div></header>'
+            '<div class="ui-body">%s</div>%s</section>') % (
+        anchor, anchor, anchor, title, ('<p class="ui-desc">%s</p>' % desc) if desc else "", inner,
+        ('<div class="ui-foot">%s</div>' % foot) if foot else "")
+
+
+SETTINGS_NAV = (("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("scoring", "Scoring"),
+                ("claude", "Claude API"), ("general", "General"), ("danger", "Maintenance"))
+
+
 def settings_page(flash=""):
     with CFG_LOCK:
         cfg = load_config()
     n, m = cfg["ntfy"], cfg["email"]
     chk = lambda b: " checked" if b else ""
-    src_boxes = "".join('<label style="font-weight:400;display:inline-block;margin-right:14px"><input type="checkbox" name="src_%s"%s> %s</label>' % (
-        k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items())
     sub = "%s/%s" % (n["server"].rstrip("/"), n["topic"])
-    body = """<div class="card"><h2>🔔 Test notification</h2><form method="post" action="/test" style="display:flex;gap:8px;flex-wrap:wrap">
-<button class="primary" name="what" value="ntfy">🔔 Send a test push to your phone</button><button name="what" value="email">✉️ Test e-mail</button></form></div>
-<form method="post" action="/settings">
-<div class="card"><h2>📱 Push notifications (ntfy)</h2>
-<p class="muted">1. Install the <b>ntfy</b> app (Android: Play Store/F-Droid, iPhone: App Store). 2. In the app press “+” → Subscribe to topic → enter: <b>%s</b> (server: %s). 3. Press “Test push” below.<br>The topic name is also the password: anyone who has it can see the notifications.</p>
-<label><input type="checkbox" name="ntfy_enabled"%s> Push notifications enabled</label>
-<div class="row"><div><label>Szerver</label><input name="ntfy_server" value="%s" style="width:100%%"></div>
-<div><label>Topic</label><input name="ntfy_topic" value="%s" style="width:100%%"></div></div>
-<p class="muted">Subscribe link: <a href="%s" target="_blank" rel="noopener">%s</a></p></div>
-<div class="card"><h2>✉️ E-mail notifications</h2>
-<p class="muted">Gmail needs an <b>app password</b> (Google account → Security → 2-Step Verification → App passwords), not your normal password.</p>
-<label><input type="checkbox" name="email_enabled"%s> E-mail notifications enabled</label>
-<div class="row"><div><label>SMTP szerver</label><input name="smtp_host" value="%s" style="width:100%%"></div>
-<div><label>Port</label><input name="smtp_port" value="%s" style="width:100%%"></div>
-<div><label>User (e-mail address)</label><input name="smtp_user" value="%s" style="width:100%%"></div>
-<div><label>Password %s</label><input type="password" name="smtp_pass" placeholder="(leave empty to keep)" style="width:100%%"></div>
-<div><label>Recipient (empty = sender)</label><input name="email_to" value="%s" style="width:100%%"></div></div></div>
-<div class="card"><h2>🤖 Claude API (CV tailored to a posting)</h2>
-<p class="muted">Key: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com → API Keys</a>. One CV + cover letter costs about 5–15 cents. The key is stored only on this machine.</p>
-<label>Anthropic API key %s</label><input type="password" name="anthropic_api_key" placeholder="(leave empty to keep)" style="width:100%%"></div>
-<div class="card"><h2>⚙️ General</h2><div class="row">
-<div><label>Refresh (minutes)</label><input type="number" name="interval" value="%d" min="15"></div>
-<div><label>Min. score in list</label><input type="number" name="min_score" value="%d"></div>
-<div><label>Min. score for notifications</label><input type="number" name="notify_min_score" value="%d"></div>
-<div><label>Notify for</label>%s</div>
-<div><label>Default list filter</label><select name="default_work_filter">%s</select></div>
-<div><label>Web address (link in notifications)</label><input name="public_url" value="%s" style="width:100%%"></div></div>
-<label>Sources</label>%s</div>
-<div class="card"><h2>🔎 LinkedIn searches</h2><p class="muted">One per line: <code>keywords | location</code> (the work mode is taken from the posting text, because LinkedIn's public filter does not work). Postings from the last 7 days.</p>
-<textarea name="linkedin_searches">%s</textarea>
-<label>Company job boards (one per line: <code>ashby|lever|greenhouse|bamboohr|smartrecruiters | id | name</code>)</label>
-<textarea name="studios" style="min-height:140px">%s</textarea>
-<label>Own RSS feeds (one URL per line)</label><textarea name="rss_feeds" style="min-height:60px">%s</textarea></div>
-%s
-<div class="card"><h2>🎯 Scoring (based on your CV)</h2><p class="muted">One per line: <code>term = points</code>. Terms found in the title count the most; negative terms apply only to the title. Every posting is re-scored when you save.</p>
-<div class="row"><div><label>Title</label><textarea name="title_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Description</label><textarea name="body_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Negative (title)</label><textarea name="negative_keywords" style="min-height:260px">%s</textarea></div>
-<div><label>Location</label><textarea name="location_keywords" style="min-height:260px">%s</textarea></div></div></div>
-<button class="primary">Save</button></form>
-<div class="card" style="margin-top:14px"><h2>Test</h2><form method="post" action="/test" style="display:flex;gap:8px">
-<button name="what" value="ntfy">Test push</button><button name="what" value="email">Test e-mail</button><button name="what" value="custom">🧩 Test own sources</button></form><form method="post" action="/reset-jobs" style="margin-top:10px" onsubmit="return confirm('Delete all found jobs and source status? Settings, profile, CVs and documents are kept.')"><button name="reset" value="1">Reset job cache (delete found jobs)</button> <span class="muted">Settings, profile, CVs and documents are kept; the next refresh starts from scratch.</span></form></div>""" % (
-        e(n["topic"]), e(n["server"]), chk(n.get("enabled")), e(n["server"]), e(n["topic"]), e(sub), e(sub),
-        chk(m.get("enabled")), e(m["smtp_host"]), e(m["smtp_port"]), e(m["username"]),
-        "(set ✓)" if m.get("password") else "", e(m["to"]),
-        "(set ✓)" if cfg.get("anthropic_api_key") else "",
-        cfg["interval_minutes"], cfg["min_score"], cfg["notify_min_score"],
-        "".join('<label style="font-weight:400;display:inline-block;margin-right:10px"><input type="checkbox" name="nwm_%s"%s> %s</label>' % (
-            k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), e(v)) for k, v in WORK_MODES.items()),
-        "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
-                for k, l in (("remote", "Remote only"), ("remote_unknown", "Remote + unknown"), ("remote_hybrid", "Remote + hybrid"), ("all", "All"))), e(cfg.get("public_url", "")), src_boxes,
-        e("\n".join(cfg["linkedin_searches"])), e("\n".join(cfg.get("studios") or [])),
-        e("\n".join(cfg.get("rss_feeds") or [])), custom_sources_card(cfg),
-        e(kv_text(cfg["title_keywords"])), e(kv_text(cfg["body_keywords"])), e(kv_text(cfg["negative_keywords"])),
-        e(kv_text(cfg.get("location_keywords") or {})))
+    src_boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
+        k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items())
+    modes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="nwm_%s"%s> %s</label>' % (
+        k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), e(v)) for k, v in WORK_MODES.items())
+    filt = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
+                   for k, l in (("remote", "Remote only"), ("remote_unknown", "Remote + unknown"),
+                                ("remote_hybrid", "Remote + hybrid"), ("all", "All")))
+    set_badge = lambda on: '<span class="badge badge-soft badge-success">set</span>' if on else ""
+
+    def ta(name, label, val, rows, help_="", wide=True):
+        return '<div%s><label for="%s">%s</label><textarea class="textarea ui-mono" id="%s" name="%s" rows="%d">%s</textarea>%s</div>' % (
+            ' class="wide"' if wide else "", name, label, name, name, rows, e(val),
+            ('<span class="help">%s</span>' % help_) if help_ else "")
+
+    def test(what, label):
+        return '<button class="btn btn-sm btn-outline" formaction="/test" name="what" value="%s">%s</button>' % (what, label)
+
+    notify = ui_sec("notify", "Notifications", "Where new, relevant postings are announced.",
+        '<h3 class="ui-h3">Push notifications (ntfy)</h3><div class="ui-grid">'
+        + ui_toggle("ntfy_enabled", "Send push notifications", n.get("enabled"))
+        + '<div class="wide"><ol class="ui-steps"><li>Install the <b>ntfy</b> app on your phone (App Store / Play Store).</li>'
+          '<li>In the app: “+” → Subscribe to topic → <code>%s</code> (server: %s).</li>'
+          '<li>Press “Save and send a test push” below.</li></ol>'
+          '<span class="help">The topic name works as a password: anyone who has it can read the notifications. '
+          'Subscribe link: <a href="%s" target="_blank" rel="noopener">%s</a></span></div>' % (e(n["topic"]), e(n["server"]), e(sub), e(sub))
+        + ui_field("ntfy_server", "Server", n["server"]) + ui_field("ntfy_topic", "Topic", n["topic"])
+        + '</div><h3 class="ui-h3">E-mail</h3><div class="ui-grid">'
+        + ui_toggle("email_enabled", "Send e-mail notifications", m.get("enabled"),
+                    "Gmail needs an <b>app password</b> (Google account → Security → 2-Step Verification → App passwords), "
+                    "not your normal password.")
+        + ui_field("smtp_host", "SMTP server", m["smtp_host"]) + ui_field("smtp_port", "Port", m["smtp_port"], "number")
+        + ui_field("smtp_user", "User (e-mail address)", m["username"], "email")
+        + '<div><label for="smtp_pass">Password %s</label><input class="input" id="smtp_pass" type="password" name="smtp_pass" '
+          'placeholder="Leave empty to keep" autocomplete="new-password"></div>' % set_badge(m.get("password"))
+        + ui_field("email_to", "Recipient", m["to"], "email", "Empty: the sender's own address.")
+        + '</div><h3 class="ui-h3">When to notify</h3><div class="ui-grid">'
+        + ui_field("notify_min_score", "Minimum score", cfg["notify_min_score"], "number",
+                   "A posting with at least this many points is announced.")
+        + '<div><label>Work modes</label><div class="ui-checks">%s</div>'
+          '<span class="help">No notification for the unticked ones.</span></div></div>' % modes,
+        test("ntfy", "Save and send a test push") + test("email", "Save and send a test e-mail"))
+
+    search = ui_sec("search", "Job search", "Which sites are searched, and how often.",
+        '<div class="ui-grid"><div class="wide"><label>Sources</label><div class="ui-checks">%s</div></div>' % src_boxes
+        + ui_field("interval", "Refresh every (minutes)", cfg["interval_minutes"], "number", "At least 15.", ' min="15"')
+        + ta("linkedin_searches", "LinkedIn searches", "\n".join(cfg["linkedin_searches"]), 5,
+             "One per line: <code>keywords | location</code>. Postings from the last 7 days; the work mode comes from the posting text.")
+        + ta("studios", "Company job boards", "\n".join(cfg.get("studios") or []), 6,
+             "One per line: <code>ashby|lever|greenhouse|bamboohr|smartrecruiters | id | name</code>.")
+        + ta("rss_feeds", "RSS feeds", "\n".join(cfg.get("rss_feeds") or []), 3, "One URL per line.") + '</div>')
+
+    own = ui_sec("own", "Own sources", "Any other job site, with a login if it needs one.",
+                 custom_sources_card(cfg), test("custom", "Save and test own sources"))
+
+    scoring = ui_sec("scoring", "Scoring", "How well a posting fits your CV. One rule per line: <code>term = points</code>. "
+                     "Title terms count the most; negative terms apply to the title only. Saving re-scores every posting.",
+        '<div class="ui-grid">'
+        + ta("title_keywords", "Title", kv_text(cfg["title_keywords"]), 12, wide=False)
+        + ta("body_keywords", "Description (max. 4 points)", kv_text(cfg["body_keywords"]), 12, wide=False)
+        + ta("negative_keywords", "Negative (title)", kv_text(cfg["negative_keywords"]), 8, wide=False)
+        + ta("location_keywords", "Location", kv_text(cfg.get("location_keywords") or {}), 8, wide=False)
+        + ui_field("min_score", "Minimum score in the list", cfg["min_score"], "number", "Postings below this are hidden by default.")
+        + '<div><label for="default_work_filter">Default list filter</label><select class="select" id="default_work_filter" '
+          'name="default_work_filter">%s</select></div></div>' % filt)
+
+    claude = ui_sec("claude", "Claude API", "Used for tailored CVs, cover letters and recruiter messages. "
+                    "A CV + cover letter costs about 5–15 cents, a recruiter message 1–3 cents. The key stays on this machine.",
+        '<div class="ui-grid"><div class="wide"><label for="anthropic_api_key">Anthropic API key %s</label>'
+        '<input class="input" id="anthropic_api_key" type="password" name="anthropic_api_key" placeholder="Leave empty to keep" '
+        'autocomplete="new-password"><span class="help">Create one at <a href="https://console.anthropic.com/settings/keys" '
+        'target="_blank" rel="noopener">console.anthropic.com → API Keys</a>.</span></div></div>' % set_badge(cfg.get("anthropic_api_key")))
+
+    general = ui_sec("general", "General", "",
+        '<div class="ui-grid">' + ui_field("public_url", "Web address of this app", cfg.get("public_url", ""), "url",
+                                           "Used for the link in notifications.", wide=True) + '</div>')
+
+    confirm = ("return confirm('Delete all found jobs and the source status? "
+               "Settings, profile, CVs and documents are kept.')")
+    danger = ui_sec("danger", "Maintenance", "",
+        '<form method="post" action="/reset-jobs" class="ui-danger" onsubmit="%s"><div><b>Reset the job cache</b>'
+        '<span class="help">Deletes the found postings; settings, profile, CVs and documents are kept. '
+        'The next refresh starts from scratch.</span></div>'
+        '<button class="btn btn-sm btn-error btn-outline" name="reset" value="1">Reset job cache</button></form>' % confirm)
+
+    nav = "".join('<a href="#%s">%s</a>' % (a, l) for a, l in SETTINGS_NAV)
+    body = ('<div class="ui"><div class="ui-head"><h1>Settings</h1><p>Notifications, job sources, scoring and API keys. '
+            'Changes take effect after you save.</p></div>'
+            '<div class="ui-layout"><nav class="ui-side" aria-label="Settings sections">%s</nav><div>'
+            '<form method="post" action="/settings" id="settings">%s%s%s%s%s%s'
+            '<div class="ui-savebar"><span class="muted">Saving re-scores every posting.</span>'
+            '<button class="btn btn-primary">Save changes</button></div></form>%s</div></div></div>') % (
+        nav, notify, search, own, scoring, claude, general, danger)
     return page("Settings", body, flash)
 
 
@@ -2697,6 +2781,8 @@ class Handler(BaseHTTPRequestHandler):
                 save_settings(f)
                 return self.redirect("/settings?msg=" + urllib.parse.quote("Saved, postings re-scored."))
             if u.path == "/test":
+                if "ntfy_server" in f:  # sent from the settings form: save what is on the screen first
+                    save_settings(f)
                 with CFG_LOCK:
                     cfg = load_config()
                 if f.get("what") == "custom":
