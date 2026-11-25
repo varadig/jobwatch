@@ -1007,3 +1007,45 @@ class WorkModes(unittest.TestCase):
             app.merge_into(con, row, "mail", {"work_mode": "hybrid"})
             r = con.execute("SELECT work_mode, mode_src FROM jobs WHERE id='linkedin:9'").fetchone()
         self.assertEqual((r["work_mode"], r["mode_src"]), ("hybrid", "source"))
+
+
+class UnknownReasons(unittest.TestCase):
+    def test_reason_shown_for_each_case(self):
+        base = {"id": "x", "work_mode": "unknown", "mode_src": None}
+        cases = [
+            (dict(base, source="linkedin", urlkey="li:1", description=""), "LinkedIn hides it, text not downloaded yet"),
+            (dict(base, source="linkedin", urlkey="li:1", description="long text", mode_note="?li_hidden|claude"),
+             "LinkedIn hides it, text doesn't say"),
+            (dict(base, source="flexa", urlkey="u", description="", mode_note="?board_none|"), "Flexa doesn't give it"),
+            (dict(base, source="mail", urlkey="u", description="", mode_note="?mail_none|"), "the e-mail doesn't say"),
+            (dict(base, source="rss", urlkey="u", description="some text"), "not checked yet"),
+        ]
+        for r, short in cases:
+            self.assertEqual(app.unknown_reason(r)[0], short)
+            self.assertIn(app.e(short), app.mode_picker(r))
+        long_ = app.unknown_reason(cases[1][0])[1]
+        self.assertIn("rules and Claude", long_)
+        self.assertNotIn("· ", app.mode_picker(dict(base, source="linkedin", urlkey="li:1", description="", mode_src="manual",
+                                                     work_mode="remote")).split("</summary>")[0].replace("▾", ""))
+
+    def test_linkedin_waiting_for_text_is_not_marked_checked_and_reasons_are_stored(self):
+        import cvgen
+        from unittest import mock
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            for jid, src, uk, d in (("linkedin:1", "linkedin", "li:1", ""), ("linkedin:2", "linkedin", "li:2", "Great team. " * 30),
+                                    ("flexa:3", "flexa", "u3", "")):
+                con.execute("INSERT INTO jobs(id,source,title,url,urlkey,description,score,status,first_seen,work_mode) "
+                            "VALUES(?,?,'T','https://x/'||?,?,?,5,'new','2026-11-25','unknown')", (jid, src, jid, uk, d))
+        cfg = app.load_config()
+        cfg["anthropic_api_key"] = "k"
+        with mock.patch.object(app, "fetch", lambda u, **k: "<p>no badge</p>"), mock.patch.object(app.time, "sleep", lambda s: None), \
+                mock.patch.object(cvgen, "work_mode_from_text", lambda *a: ("unknown", "")):
+            app.enrich_work_modes(cfg)
+        with app.db() as con:
+            got = {r["id"]: (r["mode_checked"] is not None, r["mode_note"]) for r in con.execute("SELECT id, mode_checked, mode_note FROM jobs")}
+        self.assertEqual(got["linkedin:1"], (False, None))              # waits for its text
+        self.assertEqual(got["linkedin:2"], (True, "?li_hidden|claude"))
+        self.assertEqual(got["flexa:3"], (True, "?board_none|"))

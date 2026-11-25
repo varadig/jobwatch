@@ -1364,6 +1364,43 @@ FOURDAY_MODE = {"remote": "remote", "hybrid": "hybrid", "onsite": "onsite", "on-
                 "office": "onsite", "in-office": "onsite", "in office": "onsite"}
 
 
+# Why a posting's work mode is not known: code -> (short text on the card, full explanation in the menu)
+UNKNOWN_WHY = {
+    "pending": ("not checked yet",
+                "Not checked yet: it is checked in the background right after the refresh."),
+    "li_wait": ("LinkedIn hides it, text not downloaded yet",
+                "LinkedIn shows the work mode only to logged-in users, so it is not in what jobwatch can read. "
+                "The posting text is still being downloaded (LinkedIn limits how fast); the text is checked once it arrives."),
+    "li_hidden": ("LinkedIn hides it, text doesn't say",
+                  "LinkedIn shows the work mode only to logged-in users, and the posting text does not state it either "
+                  "(checked by the rules%s). Set it here, or let a LinkedIn job alert e-mail bring it: those state the mode."),
+    "board_none": ("%s doesn't give it",
+                   "%s does not state the work mode for this posting, and the text does not say it either (checked by the rules%s)."),
+    "mail_none": ("the e-mail doesn't say",
+                  "The alert e-mail did not state the work mode for this posting, and there is no posting text to check."),
+    "no_text": ("no posting text",
+                "The source gives no posting text, so there is nothing to check."),
+    "text_none": ("the text doesn't say",
+                  "The posting text does not state the work mode (checked by the rules%s)."),
+}
+
+
+def unknown_reason(r):
+    """(short, long) reason why the work mode of r is unknown."""
+    note = r.get("mode_note") or ""
+    code, _, extra = note[1:].partition("|") if note.startswith("?") else ("", "", "")
+    linkedin = (r.get("urlkey") or "").startswith("li:") or r.get("source") == "linkedin"
+    if not code:  # not checked yet: say what it is waiting for
+        code = "li_wait" if linkedin and not (r.get("description") or "") else "pending"
+    by = {"claude": " and Claude", "claude_off": "; Claude is turned off in Settings", "no_key": "; no Claude API key",
+          "claude_error": "; Claude could not be reached", "": ""}.get(extra, "")
+    board = SOURCES_INFO.get(r.get("source"), (r.get("source") or "",))[0]
+    short, long_ = UNKNOWN_WHY.get(code, UNKNOWN_WHY["pending"])
+    if code == "board_none":
+        return short % board, long_ % (board, by)
+    return short, (long_ % by) if "%s" in long_ else long_
+
+
 def mode_why(r):
     src, note = r.get("mode_src") or "", r.get("mode_note") or ""
     if src == "manual":
@@ -1375,7 +1412,8 @@ def mode_why(r):
     if src == "claude":
         return "Claude read the posting: %s" % note
     if (r.get("work_mode") or "unknown") == "unknown":
-        return "The posting does not say (or it was not checked yet). Set it here if you know it."
+        long_ = unknown_reason(r)[1]
+        return long_ if "Set it here" in long_ else long_ + " You can set it here."
     return "From the posting text."
 
 
@@ -1387,10 +1425,11 @@ def mode_picker(r):
     qid = e(urllib.parse.quote(r["id"], safe=""))
     opts = "".join('<button class="btn btn-xs btn-ghost%s" name="work_mode" value="%s">%s</button>' % (
         " btn-active" if k == wm and src == "manual" else "", k, e(WORK_MODES[k])) for k in ("remote", "hybrid", "onsite"))
-    return ('<details class="wm-pick"><summary class="chip wm-%s" title="%s">%s%s ▾</summary>'
+    why_short = (' <span class="wm-why">· %s</span>' % e(unknown_reason(r)[0])) if wm == "unknown" and src != "manual" else ""
+    return ('<details class="wm-pick"><summary class="chip wm-%s" title="%s">%s%s%s ▾</summary>'
             '<form class="wm-menu" method="post" action="/job/%s"><div class="muted">%s</div>%s'
             '<button class="btn btn-xs btn-ghost" name="work_mode" value="auto" title="Let jobwatch decide again">↺ Automatic</button>'
-            '</form></details>') % (e(wm), e(mode_why(r)), e(WORK_MODES.get(wm, wm)), mark, qid, e(mode_why(r)), opts)
+            '</form></details>') % (e(wm), e(mode_why(r)), e(WORK_MODES.get(wm, wm)), mark, why_short, qid, e(mode_why(r)), opts)
 
 
 def mode_from_page(source, url):
@@ -1419,15 +1458,21 @@ def enrich_work_modes(cfg, limit=80):
         old = datetime.fromtimestamp(time.time() - 3 * 86400, timezone.utc).isoformat()
         with db() as con:
             rows = [dict(r) for r in con.execute(
-                "SELECT id, source, url, title, location, description FROM jobs WHERE dup_of IS NULL AND "
+                "SELECT id, source, url, urlkey, title, location, description FROM jobs WHERE dup_of IS NULL AND "
                 "COALESCE(work_mode,'unknown')='unknown' AND COALESCE(mode_src,'')!='manual' AND "
+                "NOT ((COALESCE(urlkey,'') LIKE 'li:%' OR source='linkedin') AND COALESCE(description,'')='') AND "
                 "(mode_checked IS NULL OR mode_checked < ?) ORDER BY first_seen DESC LIMIT ?", (old, limit))]
         key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
         use_claude = cfg.get("mode_claude", True) and key
         settled, asked = 0, 0
         for r in rows:
             mode, src, note = None, None, ""
+            linkedin = (r["urlkey"] or "").startswith("li:") or r["source"] == "linkedin"
+            if linkedin and not (r["description"] or ""):
+                continue  # wait for its text (the LinkedIn description download calls this again); not marked as checked
+            page_tried = False
             if r["source"] in ("4dayweek", "flexa"):
+                page_tried = True
                 try:
                     mode, note = mode_from_page(r["source"], r["url"])
                     src = "page" if mode else None
@@ -1438,21 +1483,37 @@ def enrich_work_modes(cfg, limit=80):
                 m2, n2 = classify_mode_ex(r["title"], r["location"], r["description"])
                 if m2 != "unknown":
                     mode, src, note = m2, "text", n2
+            claude_state = "claude_off" if not cfg.get("mode_claude", True) else ("no_key" if not key else "")
             if not mode and use_claude and len(r["description"] or "") > 200 and asked < MODE_CLAUDE_PER_RUN:
                 asked += 1
                 try:
                     m3, n3 = cvgen.work_mode_from_text(key, r["title"], r["location"], r["description"])
+                    claude_state = "claude"
                     if m3 != "unknown":
                         mode, src, note = m3, "claude", n3
                 except Exception as ex:
+                    claude_state = "claude_error"
                     log.info("Work mode (Claude) %s: %s", r["id"], ex)
+            if not mode:  # remember why it stays unknown, to show it on the card
+                if linkedin:
+                    code = "li_hidden"
+                elif page_tried:
+                    code = "board_none"
+                elif r["source"] == "mail" and not (r["description"] or ""):
+                    code = "mail_none"
+                elif not (r["description"] or ""):
+                    code = "no_text"
+                else:
+                    code = "text_none"
+                note = "?%s|%s" % (code, claude_state)
             with db() as con:
                 if mode:
                     settled += 1
                     con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=?, mode_checked=? WHERE id=? AND "
                                 "COALESCE(mode_src,'')!='manual'", (mode, src, note[:300], now_iso(), r["id"]))
                 else:
-                    con.execute("UPDATE jobs SET mode_checked=? WHERE id=?", (now_iso(), r["id"]))
+                    con.execute("UPDATE jobs SET mode_checked=?, mode_note=? WHERE id=? AND COALESCE(mode_src,'')!='manual'",
+                                (now_iso(), note, r["id"]))
         if rows:
             log.info("Work modes: %d of %d unknown settled (%d read by Claude)", settled, len(rows), asked)
     finally:
@@ -1665,7 +1726,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
 .ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
 .ui-addjob{margin-top:12px;width:100%;max-width:620px}.ui-addjob input{flex:1}
-details.wm-pick{display:inline-block;position:relative}details.wm-pick>summary{list-style:none;cursor:pointer}
+details.wm-pick{display:inline-block;position:relative}.wm-why{opacity:.8;font-weight:400}details.wm-pick>summary{list-style:none;cursor:pointer}
 details.wm-pick>summary::-webkit-details-marker{display:none}
 .wm-menu{position:absolute;z-index:6;top:calc(100% + 4px);left:0;min-width:230px;max-width:320px;display:flex;flex-direction:column;
   align-items:stretch;gap:2px;padding:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
