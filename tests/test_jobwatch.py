@@ -298,3 +298,108 @@ class ResetCache(unittest.TestCase):
             self.assertEqual(con.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
             self.assertEqual(con.execute("SELECT count(*) FROM source_state").fetchone()[0], 0)
         self.assertEqual(app.load_config()["title_keywords"], cfg_before["title_keywords"])
+
+
+class OwnSources(unittest.TestCase):
+    """Own sources against a tiny local site that needs a login (like vmp.munka.hu)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs
+
+        class Site(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, body, cookie=None):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                if cookie:
+                    self.send_header("Set-Cookie", cookie)
+                self.end_headers()
+                self.wfile.write(body.encode("utf-8"))
+
+            def logged_in(self):
+                return "sess=ok" in (self.headers.get("Cookie") or "")
+
+            def do_GET(self):
+                if self.path.startswith("/belepes"):
+                    return self.send('<form method="post" id="loginForm"><input type="hidden" name="csrf" value="t0k">'
+                                     '<input type="text" name="login_username"><input type="password" name="login_jelszo">'
+                                     '<input type="submit" name="login" value="Belépés"></form>')
+                if self.path.startswith("/allas/talalatok"):
+                    if "oldal=2" in self.path:
+                        return self.send("<table></table>")
+                    emp = "Acme Kft" if self.logged_in() else "<i>Bejelentkezés után látható</i>"
+                    row = ('<tr><td><a href="/allas/reszletek/%s">2142 - %s</a></td><td><a href="#">egyetem</a></td>'
+                           '<td><a href="#">Budapest</a></td><td>%s</td></tr>')
+                    return self.send("<table>%s%s</table>" % (row % ("1", "Szoftverfejlesztő", emp),
+                                                              row % ("2", "Szoftverfejlesztő", emp)))
+                if self.path.startswith("/allas/reszletek/"):
+                    return self.send("<td>Munkakör (FEOR)</td><td>Szoftverfejlesztő</td><td>Unity, távmunka</td><p>TÁMOP</p>")
+                if self.path == "/jobs":
+                    return self.send('<a href="/job/10">Unity Developer</a><a href="/about">About us</a>'
+                                     '<a href="/job/10">Unity Developer</a><a href="/job/11">Game Programmer</a>')
+                self.send("")
+
+            def do_POST(self):
+                f = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+                ok = f.get("login_username") == ["me"] and f.get("login_jelszo") == ["pw"] and f.get("csrf") == ["t0k"]
+                if ok:
+                    return self.send("Üdvözöljük!", cookie="sess=ok; Path=/")
+                return self.send('<form method="post"><input type="text" name="login_username">'
+                                 '<input type="password" name="login_jelszo"></form>')
+
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        self._delay, app.CUSTOM_DELAY = app.CUSTOM_DELAY, 0
+
+    def tearDown(self):
+        app.CUSTOM_DELAY = self._delay
+
+    def vmp(self, **kw):
+        src = {"id": "s1", "type": "vmp", "name": "VMP", "url": self.base + "/allas/talalatok?kulcsszo=x",
+               "login_url": self.base + "/belepes"}
+        src.update(kw)
+        return src
+
+    def test_vmp_without_login_has_no_employer_and_drops_feor_code(self):
+        items = app.run_custom_source(self.vmp(), is_new=lambda i: i == "1")
+        self.assertEqual([i["title"] for i in items], ["Szoftverfejlesztő", "Szoftverfejlesztő"])
+        self.assertEqual(items[0]["company"], "")
+        self.assertIn("távmunka", items[0]["description"])   # detail page read for the new posting
+        self.assertNotIn("távmunka", items[1]["description"])  # not new: no detail fetch
+
+    def test_vmp_login_shows_employer(self):
+        items = app.run_custom_source(self.vmp(username="me", password="pw"))
+        self.assertEqual(items[0]["company"], "Acme Kft")
+
+    def test_wrong_password_is_reported(self):
+        with self.assertRaisesRegex(RuntimeError, "login failed"):
+            app.run_custom_source(self.vmp(username="me", password="bad"))
+
+    def test_any_page_takes_links_matching_the_pattern_once(self):
+        items = app.run_custom_source({"id": "p", "type": "page", "url": self.base + "/jobs", "pattern": "/job/"})
+        self.assertEqual([i["title"] for i in items], ["Unity Developer", "Game Programmer"])
+
+    def test_settings_form_keeps_password_when_left_empty_and_deletes(self):
+        old = [{"id": "a1", "type": "vmp", "url": "u1", "username": "me", "password": "secret"},
+               {"id": "b2", "type": "page", "url": "u2"}]
+        f = {"cs_count": "2", "cs_0_id": "a1", "cs_0_type": "vmp", "cs_0_url": "u1", "cs_0_username": "me",
+             "cs_0_enabled": "on", "cs_1_id": "b2", "cs_1_url": "u2", "cs_1_delete": "on",
+             "cs_new_type": "rss", "cs_new_url": "https://example.com/feed"}
+        out = app.parse_custom_sources(f, old)
+        self.assertEqual([s["id"] for s in out[:1]], ["a1"])
+        self.assertEqual(out[0]["password"], "secret")
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1]["type"], "rss")
+        self.assertTrue(out[1]["enabled"])
