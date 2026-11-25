@@ -1086,7 +1086,7 @@ def enrich_linkedin(con, items, limit=60):
     On 429 (too many requests) it waits and retries, so the work mode is not left unknown because of the rate limit."""
     n = 0
     for it in items:
-        row = con.execute("SELECT description FROM jobs WHERE id=?", ("linkedin:" + it["ext_id"],)).fetchone()
+        row = con.execute("SELECT description FROM jobs WHERE id=?", (it.get("row_id") or "linkedin:" + it["ext_id"],)).fetchone()
         if row and row["description"]:
             continue
         if n >= limit:
@@ -1281,11 +1281,12 @@ def enrich_pending_linkedin(cfg, limit=60):
         return
     try:
         with db() as con:
-            rows = con.execute("SELECT id, title, location FROM jobs WHERE source='linkedin' "
-                               "AND (description IS NULL OR description='') ORDER BY first_seen DESC LIMIT ?",
+            # every LinkedIn posting, whichever source brought it (a LinkedIn search, an alert e-mail, a pasted link)
+            rows = con.execute("SELECT id, urlkey, title, company, location FROM jobs WHERE (urlkey LIKE 'li:%' OR source='linkedin') "
+                               "AND dup_of IS NULL AND (description IS NULL OR description='') ORDER BY first_seen DESC LIMIT ?",
                                (limit,)).fetchall()
-            items = [{"ext_id": r["id"][len("linkedin:"):], "title": r["title"], "location": r["location"]}
-                     for r in rows]
+            items = [{"ext_id": r["urlkey"][3:] if (r["urlkey"] or "").startswith("li:") else r["id"].split(":", 1)[-1],
+                      "row_id": r["id"], "title": r["title"], "company": r["company"], "location": r["location"]} for r in rows]
             if not items:
                 return
             STATE["enrich"] = {"total": len(items), "done": 0}
@@ -1295,7 +1296,7 @@ def enrich_pending_linkedin(cfg, limit=60):
             for it in items:
                 if not it.get("description"):
                     continue
-                jid = "linkedin:" + it["ext_id"]
+                jid = it["row_id"]
                 sc, hits = score_job(cfg, it)
                 con.execute("UPDATE jobs SET description=?, work_mode=?, score=?, matched=? WHERE id=?",
                             (it["description"], it["work_mode"], sc, ", ".join(hits), jid))
@@ -1405,7 +1406,7 @@ def run_all(force=False, only=None, custom_ids=None):
             if ok_channels:
                 with db() as con:
                     con.executemany("UPDATE jobs SET notified=1 WHERE id=?", [(j["id"],) for j in to_notify])
-        if any(name == "linkedin" for name, _, _ in due):
+        if any(name in ("linkedin", "mail") for name, _, _ in due):
             # descriptions for LinkedIn postings come later, in the background, so the list is not held up
             threading.Thread(target=enrich_pending_linkedin, args=(cfg,), daemon=True).start()
         threading.Thread(target=fetch_logos, daemon=True).start()

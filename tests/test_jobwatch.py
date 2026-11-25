@@ -905,3 +905,25 @@ class Duplicates(unittest.TestCase):
         with app.db() as con:
             self.assertEqual(con.execute("SELECT msgid FROM mail_seen").fetchall()[0][0], "<m9@x>")
             self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs WHERE source='mail'").fetchone()[0], 1)
+
+
+class EnrichAnySource(unittest.TestCase):
+    def test_linkedin_posting_from_an_alert_email_gets_its_description(self):
+        from unittest import mock
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            con.execute("INSERT INTO jobs(id,source,title,company,location,url,score,status,first_seen,urlkey) VALUES"
+                        "('mail:x','mail','Mobile Engineer','ElevenLabs','Hungary (Remote)','https://www.linkedin.com/jobs/view/4486152955/',"
+                        "2,'new','2026-11-25','li:4486152955')")
+        cfg = app.load_config()
+        cfg["body_keywords"] = {"unity": 3}
+        with mock.patch.object(app, "linkedin_detail", lambda jid: "We build our app in Unity. Fully remote."), \
+                mock.patch.object(app.time, "sleep", lambda s: None):
+            app.enrich_pending_linkedin(cfg)
+        with app.db() as con:
+            r = con.execute("SELECT description, work_mode, score FROM jobs WHERE id='mail:x'").fetchone()
+        self.assertIn("Unity", r["description"])
+        self.assertEqual(r["work_mode"], "remote")
+        self.assertGreater(r["score"], 2)
