@@ -487,3 +487,17 @@ class Outreach(unittest.TestCase):
         self.assertEqual((r["status"], r["message"]), ("sent", "edited"))
         self.assertTrue(r["sent_at"])
         self.assertEqual(app.outreach_action(oid, {"act": "delete"}), "Deleted.")
+
+
+class OutreachForm(unittest.TestCase):
+    def test_list_from_the_page_with_per_person_type(self):
+        f = {"recruiters_json": json.dumps([
+            {"name": "Tom", "title": "Consultant @ Amiqus", "contact": "", "kind": "agency"},
+            {"name": "  ", "title": "no name, skipped"},
+            {"name": "Anna", "title": "TA | Supercell", "contact": "https://www.linkedin.com/in/anna/", "kind": "bogus"}])}
+        r = app.recruiters_from_form(f)
+        self.assertEqual([(x["name"], x["kind"]) for x in r], [("Tom", "agency"), ("Anna", "")])
+        self.assertEqual(r[1]["title"], "TA | Supercell")   # a "|" in a field is kept as is
+
+    def test_bad_json_is_ignored(self):
+        self.assertEqual(app.recruiters_from_form({"recruiters_json": "{not json"}), [])

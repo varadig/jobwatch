@@ -134,7 +134,8 @@ Ground rules:
 - Pick the one or two facts that matter most for the recruiter's company or the given role, and say them concretely.
 - Sound like a real person writing one message: plain, warm and direct. No flattery, no clichés ("I hope this finds you well", "I came across your profile", "passionate", "rockstar"), no emojis, no bullet lists, no placeholders in brackets.
 - End with one clear, easy ask (for example whether they are hiring for a role that fits, or a short call).
-- If a specific role is given, name it. If not, say what kind of role the candidate is looking for, based on the profile's objective.
+- Do not assume the recruiter hires for the company they work at. Many recruiters work for agencies or as freelancers and fill roles at client companies, and in-house recruiters may hire for sister studios. Use the recruiter type when given; otherwise infer it from the title (e.g. "Recruitment Consultant", "Headhunter", "Talent Partner at <agency>" -> agency) and, when unclear, phrase the ask so it fits both (e.g. "if you are working on roles that fit, at your company or for clients").
+- If a specific role is given, name it together with the hiring company from the role, which may differ from the recruiter's company. If not, say what kind of role the candidate is looking for, based on the profile's objective.
 - Respect the length limit of the channel strictly; count characters for a LinkedIn connection note.
 - When an introducer is given, write to the introducer (greet them, not the recruiter) and ask for an introduction to the recruiter; never pretend the introducer knows the candidate better than stated.
 - subject: a short e-mail subject for the e-mail channel; for LinkedIn channels return an empty string."""
@@ -150,8 +151,11 @@ def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_me
             "de": "Write in German (Sie-Form)."}.get(
         language, "Write in the language the recruiter or the role most likely uses; if unclear, English.")
     parts = ["<candidate_profile>\n%s\n</candidate_profile>" % json.dumps(facts, ensure_ascii=False, indent=1),
-             "<recruiter>\nName: %s\nTitle / company: %s\n</recruiter>" % (
-                 recruiter.get("name") or "-", recruiter.get("title") or "-")]
+             "<recruiter>\nName: %s\nTitle / company: %s\nRecruiter type: %s\n</recruiter>" % (
+                 recruiter.get("name") or "-", recruiter.get("title") or "-",
+                 {"inhouse": "in-house (hires for the company they work at)",
+                  "agency": "agency / external (fills roles at client companies)"}.get(
+                     recruiter.get("kind") or "", "unknown, infer it from the title"))]
     if recruiter.get("via"):
         parts.append("<introducer>\nThe message goes to this mutual connection, not to the recruiter: %s\n</introducer>"
                      % recruiter["via"])

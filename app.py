@@ -132,7 +132,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS outreach(
           id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, name TEXT, title TEXT, contact TEXT,
           channel TEXT, language TEXT, job_id TEXT, note TEXT, subject TEXT, message TEXT,
-          status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT);
+          status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT, kind TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -153,6 +153,9 @@ def migrate_db():
         ccols = [r["name"] for r in con.execute("PRAGMA table_info(cvs)")]
         if ccols and "doc_dir" not in ccols:
             con.execute("ALTER TABLE cvs ADD COLUMN doc_dir TEXT")
+        ocols = [r["name"] for r in con.execute("PRAGMA table_info(outreach)")]
+        if ocols and "kind" not in ocols:
+            con.execute("ALTER TABLE outreach ADD COLUMN kind TEXT")
         cols = [r["name"] for r in con.execute("PRAGMA table_info(jobs)")]
         if "work_mode" not in cols:
             con.execute("ALTER TABLE jobs ADD COLUMN work_mode TEXT DEFAULT 'unknown'")
@@ -1826,9 +1829,18 @@ def outreach_page(q, flash=""):
     form = """<div class="card"><h2>✉️ Message recruiters</h2>
 <p class="muted">Claude writes a short, personal first message to each recruiter from your CV profile (your contact details are not sent to the API).
 LinkedIn does not allow sending messages from other programs, so for LinkedIn you copy the text and open the recruiter's profile with one click; e-mails can be sent from here.</p>
-<form method="post" action="/outreach/generate">
-<label>Recruiters, one per line: <code>Name | title @ company | LinkedIn profile URL or e-mail</code> (only the name is required)</label>
-<textarea name="recruiters" style="min-height:120px" placeholder="Anna Kovács | Talent Acquisition @ Supercell | https://www.linkedin.com/in/annakovacs/"></textarea>
+<form method="post" action="/outreach/generate" onsubmit="return rsubmit()">
+<h3>1. Recruiters</h3>
+<div class="row" id="radd">
+<div><label>Name *</label><input id="r_name" placeholder="Anna Kovács" onkeydown="renter(event)"></div>
+<div><label>Title @ company</label><input id="r_title" placeholder="Talent Acquisition @ Supercell" onkeydown="renter(event)"></div>
+<div><label>LinkedIn profile URL or e-mail</label><input id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)"></div>
+<div><label>Recruiter works</label><select id="r_kind"><option value="">automatic (from the title)</option><option value="inhouse">in-house: hires for their own company</option><option value="agency">agency / freelance: hires for clients</option></select></div>
+<div style="align-self:end"><button type="button" onclick="radd()">➕ Add</button></div></div>
+<p class="muted" id="rhint"></p>
+<ul id="rlist" style="list-style:none;padding:0;margin:8px 0"></ul>
+<input type="hidden" name="recruiters_json" id="rjson" value="[]">
+<h3>2. Message</h3>
 <div class="row"><div><label>Posting (optional)</label><select name="job_id" style="max-width:100%%">%s</select></div>
 <div><label>Channel</label><select name="channel">%s</select></div>
 <div><label>Language</label><select name="language"><option value="auto">automatic</option><option value="en">English</option><option value="hu">Hungarian</option><option value="de">German</option></select></div></div>
@@ -1836,7 +1848,39 @@ LinkedIn does not allow sending messages from other programs, so for LinkedIn yo
 <input name="via" style="width:100%%" placeholder="Péter Nagy | we worked together at Gameloft 2015–2017">
 <p class="muted">On LinkedIn, open the recruiter's profile and click “mutual connections” to see who knows both of you.</p>
 <label>Note for Claude (optional, e.g. “LinkedIn suggested them for the Unity Developer role”)</label><input name="note" style="width:100%%">
-<p><button class="primary">✨ Write messages (Claude)</button> <span class="muted">About 1–3 cents per message.</span></p></form></div>""" % (job_opts, ch_opts)
+<p><button class="primary" id="rgo">✨ Write messages (Claude)</button> <span class="muted">About 1–3 cents per message.</span></p></form></div>
+<script>
+var RL = [];
+function rval(id) { return document.getElementById(id).value.trim(); }
+function rdraw() {
+  var ul = document.getElementById('rlist'); ul.innerHTML = '';
+  RL.forEach(function (r, i) {
+    var li = document.createElement('li'); li.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #8883';
+    var t = document.createElement('span'); t.style.flex = '1';
+    t.textContent = r.name + (r.title ? ' · ' + r.title : '') + (r.contact ? ' · ' + r.contact : '') +
+      (r.kind ? (r.kind === 'agency' ? ' · agency' : ' · in-house') : '');
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm'; b.textContent = '✕';
+    b.title = 'Remove'; b.onclick = function () { RL.splice(i, 1); rdraw(); };
+    li.appendChild(t); li.appendChild(b); ul.appendChild(li);
+  });
+  document.getElementById('rjson').value = JSON.stringify(RL);
+  document.getElementById('rgo').textContent = '✨ Write ' + (RL.length || '') + ' message' + (RL.length === 1 ? '' : 's') + ' (Claude)';
+  document.getElementById('rhint').textContent = RL.length ? '' : 'Fill in the fields and press “Add” (or Enter) for each recruiter.';
+}
+function radd() {
+  if (!rval('r_name')) { document.getElementById('r_name').focus(); return false; }
+  RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value});
+  ['r_name', 'r_title', 'r_contact', 'r_kind'].forEach(function (id) { document.getElementById(id).value = ''; });
+  rdraw(); document.getElementById('r_name').focus(); return true;
+}
+function renter(ev) { if (ev.key === 'Enter') { ev.preventDefault(); radd(); } }
+function rsubmit() {  // a filled-in but not yet added recruiter counts too
+  if (rval('r_name')) radd();
+  if (!RL.length) { document.getElementById('rhint').textContent = 'Add at least one recruiter.'; return false; }
+  return true;
+}
+rdraw();
+</script>""" % (job_opts, ch_opts)
     cards = []
     for r in rows:
         label, limit, _ = cvgen.OUTREACH_CHANNELS.get(r["channel"], ("?", 1000, ""))
@@ -1912,8 +1956,23 @@ def outreach_action(oid, f):
     return "Saved."
 
 
+def recruiters_from_form(f):
+    """The list built on the page (recruiters_json); the old one-per-line text still works too."""
+    out = []
+    try:
+        items = json.loads(f.get("recruiters_json") or "[]")
+    except ValueError:
+        items = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and str(it.get("name") or "").strip():
+            out.append({"name": str(it["name"]).strip()[:120], "title": str(it.get("title") or "").strip()[:200],
+                        "contact": str(it.get("contact") or "").strip()[:300],
+                        "kind": it.get("kind") if it.get("kind") in ("inhouse", "agency") else ""})
+    return out + parse_recruiters(f.get("recruiters", ""))
+
+
 def outreach_create(f):
-    recs = parse_recruiters(f.get("recruiters", ""))
+    recs = recruiters_from_form(f)
     if not recs:
         return "Give at least one recruiter name."
     import cvgen
@@ -1924,10 +1983,11 @@ def outreach_create(f):
     with db() as con:
         for rc in recs[:20]:
             via = f.get("via", "").strip()[:300] if channel == "linkedin_intro" else ""
-            cur = con.execute("INSERT INTO outreach(created,name,title,contact,channel,language,job_id,note,status,via) "
-                              "VALUES(?,?,?,?,?,?,?,?,'running',?)",
+            kind = rc.get("kind") or (f.get("kind") if f.get("kind") in ("inhouse", "agency") else "")
+            cur = con.execute("INSERT INTO outreach(created,name,title,contact,channel,language,job_id,note,status,via,kind) "
+                              "VALUES(?,?,?,?,?,?,?,?,'running',?,?)",
                               (now_iso(), rc["name"], rc["title"], rc["contact"], channel,
-                               f.get("language", "auto"), f.get("job_id") or None, f.get("note", "").strip()[:500], via))
+                               f.get("language", "auto"), f.get("job_id") or None, f.get("note", "").strip()[:500], via, kind))
             ids.append(cur.lastrowid)
     for oid in ids:
         threading.Thread(target=outreach_generate, args=(oid,), daemon=True).start()
