@@ -501,3 +501,34 @@ class OutreachForm(unittest.TestCase):
 
     def test_bad_json_is_ignored(self):
         self.assertEqual(app.recruiters_from_form({"recruiters_json": "{not json"}), [])
+
+
+class LinkedInPreview(unittest.TestCase):
+    def preview(self, page=None, exc=None, url="https://hu.linkedin.com/in/anna-kovacs-1a2b3c4d?trk=x"):
+        from unittest import mock
+
+        def fake(u, **kw):
+            self.fetched = u
+            if exc:
+                raise exc
+            return page
+        with mock.patch.object(app, "fetch", fake):
+            return app.linkedin_preview(url)
+
+    def test_public_profile_gives_name_and_headline(self):
+        r = self.preview('<meta property="og:title" content="Anna Kov&#225;cs - Talent Acquisition at Supercell | LinkedIn">')
+        self.assertEqual((r["name"], r["title"], r["from"]), ("Anna Kovács", "Talent Acquisition at Supercell", "profile"))
+        self.assertEqual(self.fetched, "https://www.linkedin.com/in/anna-kovacs-1a2b3c4d/")  # tracking params dropped
+
+    def test_login_wall_falls_back_to_the_address(self):
+        r = self.preview("<title>Sign Up | LinkedIn</title>")
+        self.assertEqual((r["name"], r["title"], r["from"]), ("Anna Kovacs", "", "address"))
+
+    def test_network_error_falls_back_to_the_address(self):
+        r = self.preview(exc=OSError("999"))
+        self.assertEqual(r["name"], "Anna Kovacs")
+
+    def test_other_links_are_not_fetched(self):
+        r = self.preview(page="x", url="http://192.168.68.1/admin")
+        self.assertFalse(r["ok"])
+        self.assertFalse(hasattr(self, "fetched"))

@@ -1832,9 +1832,9 @@ LinkedIn does not allow sending messages from other programs, so for LinkedIn yo
 <form method="post" action="/outreach/generate" onsubmit="return rsubmit()">
 <h3>1. Recruiters</h3>
 <div class="row" id="radd">
+<div style="flex:2 1 320px"><label>LinkedIn profile link (name and title fill in by themselves) or e-mail</label><input id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)" onpaste="setTimeout(rlookup, 0)" onchange="rlookup()" style="width:100%%"></div>
 <div><label>Name *</label><input id="r_name" placeholder="Anna Kovács" onkeydown="renter(event)"></div>
 <div><label>Title @ company</label><input id="r_title" placeholder="Talent Acquisition @ Supercell" onkeydown="renter(event)"></div>
-<div><label>LinkedIn profile URL or e-mail</label><input id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)"></div>
 <div><label>Recruiter works</label><select id="r_kind"><option value="">automatic (from the title)</option><option value="inhouse">in-house: hires for their own company</option><option value="agency">agency / freelance: hires for clients</option></select></div>
 <div style="align-self:end"><button type="button" onclick="radd()">➕ Add</button></div></div>
 <p class="muted" id="rhint"></p>
@@ -1867,7 +1867,27 @@ function rdraw() {
   document.getElementById('rgo').textContent = '✨ Write ' + (RL.length || '') + ' message' + (RL.length === 1 ? '' : 's') + ' (Claude)';
   document.getElementById('rhint').textContent = RL.length ? '' : 'Fill in the fields and press “Add” (or Enter) for each recruiter.';
 }
+var RLOOK = null;
+function rlookup() {  // LinkedIn link -> name + title from the profile's public link preview
+  var url = rval('r_contact'), hint = document.getElementById('rhint');
+  if (!/linkedin\\.com\\/in\\//i.test(url)) return Promise.resolve();
+  hint.textContent = '⏳ Reading the profile link…';
+  RLOOK = fetch('/outreach/lookup?url=' + encodeURIComponent(url)).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d.ok) { hint.textContent = d.error || ''; return; }
+    if (rval('r_contact') === url) document.getElementById('r_contact').value = d.url;
+    if (!rval('r_name')) document.getElementById('r_name').value = d.name || '';
+    if (!rval('r_title')) document.getElementById('r_title').value = d.title || '';
+    hint.textContent = d.from === 'profile' ? '✅ Filled in from the profile. Check it, then press Add.'
+      : 'The profile is not public, so only the name was guessed from the link: check it and add the title by hand.';
+  }).catch(function () { hint.textContent = 'Could not read the link: fill in the name by hand.'; })
+    .then(function () { RLOOK = null; });
+  return RLOOK;
+}
 function radd() {
+  if (!rval('r_name') && /linkedin\\.com\\/in\\//i.test(rval('r_contact'))) {  // only the link was given
+    (RLOOK || rlookup()).then(function () { if (rval('r_name')) radd(); });
+    return false;
+  }
   if (!rval('r_name')) { document.getElementById('r_name').focus(); return false; }
   RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value});
   ['r_name', 'r_title', 'r_contact', 'r_kind'].forEach(function (id) { document.getElementById(id).value = ''; });
@@ -1954,6 +1974,37 @@ def outreach_action(oid, f):
             con.execute("UPDATE outreach SET status='sent', sent_at=? WHERE id=?", (now_iso(), oid))
         return "Sent to %s." % r["contact"]
     return "Saved."
+
+
+LINKEDIN_PROFILE_RE = re.compile(r"^https?://([a-z]{2,3}\.)?(www\.)?linkedin\.com/in/([^/?#]+)", re.I)
+
+
+def name_from_slug(slug):
+    """"anna-kovacs-1a2b3c4d" -> "Anna Kovacs" (the id-like parts with digits are dropped)."""
+    parts = [p for p in urllib.parse.unquote(slug).split("-") if p and not re.search(r"\d", p)]
+    return " ".join(p[:1].upper() + p[1:] for p in parts)
+
+
+def linkedin_preview(url):
+    """Name and headline of a LinkedIn profile from its public link preview (og:title), like a chat app shows it.
+    One request, only when the user pastes the link. Falls back to the name in the address."""
+    m = LINKEDIN_PROFILE_RE.match((url or "").strip())
+    if not m:
+        return {"ok": False, "error": "Not a LinkedIn profile link (linkedin.com/in/…)."}
+    clean = "https://www.linkedin.com/in/%s/" % m.group(3)
+    guess = {"ok": True, "url": clean, "name": name_from_slug(m.group(3)), "title": "", "from": "address"}
+    try:
+        pg = fetch(clean, timeout=15)
+    except Exception as ex:
+        log.info("LinkedIn preview %s: %s", clean, ex)
+        return guess
+    t = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', pg) or re.search(r"<title>([^<]*)</title>", pg)
+    title = html.unescape(t.group(1)).strip() if t else ""
+    if not title or re.search(r"sign ?up|sign ?in|log ?in|authwall|join linkedin", title, re.I):
+        return guess  # login wall: the profile is not public
+    title = re.sub(r"\s*\|\s*LinkedIn\s*$", "", title)
+    name, _, headline = title.partition(" - ")
+    return {"ok": True, "url": clean, "name": name.strip() or guess["name"], "title": headline.strip(), "from": "profile"}
 
 
 def recruiters_from_form(f):
@@ -2191,6 +2242,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(sources_page())
             if u.path == "/outreach":
                 return self.send_html(outreach_page(q, q.get("msg", "")))
+            if u.path == "/outreach/lookup":
+                body = json.dumps(linkedin_preview(q.get("url", "")), ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             if u.path == "/settings":
                 return self.send_html(settings_page(q.get("msg", "")))
             if u.path.startswith("/open/"):
