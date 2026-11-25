@@ -1801,7 +1801,8 @@ def outreach_signature(prof):
 OUTREACH_JS = """<script>
 function ocount(id, lim) { var t = document.getElementById('om' + id), c = document.getElementById('on' + id);
   c.textContent = t.value.length + ' / ' + lim + ' characters'; c.style.color = t.value.length > lim ? '#d33' : ''; }
-function ocopy(id) { var t = document.getElementById('om' + id), b = document.getElementById('oc' + id), ok = false;
+function ocopy(id, subj) {  // subj: copy the subject line instead of the message
+  var t = document.getElementById((subj ? 'os' : 'om') + id), b = document.getElementById((subj ? 'ocs' : 'oc') + id), ok = false;
   t.focus(); t.select(); try { ok = document.execCommand('copy'); } catch (err) {}
   if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t.value); ok = true; }
   b.textContent = ok ? '✅ Copied' : 'Selected: press Ctrl+C'; }
@@ -1925,12 +1926,13 @@ rdraw();
                     if (r["contact"] or "").startswith("http") else "")
         send_btn = ('<button name="act" value="send" title="Send to %s with the e-mail settings">✉️ Send e-mail</button>' % e(r["contact"])
                     if is_mail and r["channel"] == "email" else "")
-        subj = ('<label>Subject</label><input name="subject" value="%s" style="width:100%%">' % e(r["subject"] or "")
-                if r["channel"] == "email" else "")
+        subj = ('<label>Subject</label><div style="display:flex;gap:6px"><input id="os%d" name="subject" value="%s" style="flex:1">'
+                '<button type="button" id="ocs%d" onclick="ocopy(%d, 1)">📋 Copy subject</button></div>'
+                % (oid, e(r["subject"] or ""), oid, oid))
         cards.append("""<div class="card">%s<form method="post" action="/outreach/%d">%s
 <textarea id="om%d" name="message" style="min-height:%dpx" oninput="ocount(%d,%d)">%s</textarea>
 <div class="muted" id="on%d"></div><script>ocount(%d,%d)</script>
-<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy</button>%s%s
+<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy message</button>%s%s
 <button name="act" value="save">💾 Save edits</button><button name="act" value="sent">✅ Mark as sent</button>
 <button name="act" value="regen">🔄 Rewrite</button><button name="act" value="delete">🗑 Delete</button></p></form></div>""" % (
             head, oid, subj, oid, 90 if limit <= 300 else 200, oid, limit, e(r["message"] or ""),

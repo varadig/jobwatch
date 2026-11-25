@@ -107,16 +107,15 @@ class CVError(Exception):
 # channel -> (label, character limit of the message, what the platform expects)
 OUTREACH_CHANNELS = {
     "linkedin_note": ("LinkedIn connection request note", 300,
-                      "a LinkedIn connection request note: at most 300 characters including spaces, no subject, "
-                      "no sign-off block, one or two sentences plus a short ask"),
+                      "a LinkedIn connection request note: at most 300 characters including spaces, a greeting, "
+                      "one or two sentences and a polite ask, no sign-off block"),
     "linkedin_message": ("LinkedIn message / InMail", 1000,
-                         "a LinkedIn direct message or InMail: 60-120 words, a greeting line, a short body and the "
-                         "candidate's first name at the end; no subject needed"),
+                         "a LinkedIn direct message or InMail: 70-130 words, a greeting line, a short body, a thank-you "
+                         "and a sign-off with the candidate's full name"),
     "linkedin_intro": ("LinkedIn: ask a mutual connection to introduce you", 1000,
                        "a LinkedIn message to a mutual connection (the introducer), asking them to introduce the "
                        "candidate to the recruiter: 50-110 words, friendly and in the tone that fits how they know "
-                       "each other, easy to say no to; include one or two sentences the introducer can forward as is; "
-                       "no subject needed"),
+                       "each other, easy to say no to; include one or two sentences the introducer can forward as is"),
     "email": ("E-mail", 2000,
               "an e-mail: a subject line and a 90-160 word body, ending with a sign-off and the candidate's name; "
               "the contact details are added by the app below the text, do not write them"),
@@ -132,13 +131,13 @@ OUTREACH_SYSTEM = """You write a short first message from a job candidate to a r
 Ground rules:
 - Use only facts from the candidate profile. Never invent experience, titles, dates, products, metrics or skills.
 - Pick the one or two facts that matter most for the recruiter's company or the given role, and say them concretely.
-- Sound like a real person writing one message: plain, warm and direct. No flattery, no clichés ("I hope this finds you well", "I came across your profile", "passionate", "rockstar"), no emojis, no bullet lists, no placeholders in brackets.
-- End with one clear, easy ask (for example whether they are hiring for a role that fits, or a short call).
+- Tone: courteous and professional, a little formal but still human, the way one writes to a professional one has not met. Open with a polite greeting by name ("Dear Anna," or "Hello Anna," in English; "Kedves Anna!" in Hungarian; "Sehr geehrte Frau …," or "Hallo Anna," in German as fits), say briefly why you are writing, and thank them for their time at the end. No flattery, no clichés ("I hope this finds you well", "I came across your profile", "passionate", "rockstar"), no emojis, no bullet lists, no placeholders in brackets.
+- Never sound pushy: no assumptions that they have a role for the candidate, no pressure or urgency, no request for a call as the first ask, no "I'd love to jump on a call this week". End with one polite, easy-to-decline question, for example whether they would be open to keeping the candidate in mind, or whether they are working on roles that might fit.
 - Do not assume the recruiter hires for the company they work at. Many recruiters work for agencies or as freelancers and fill roles at client companies, and in-house recruiters may hire for sister studios. Use the recruiter type when given; otherwise infer it from the title (e.g. "Recruitment Consultant", "Headhunter", "Talent Partner at <agency>" -> agency) and, when unclear, phrase the ask so it fits both (e.g. "if you are working on roles that fit, at your company or for clients").
 - If a specific role is given, name it together with the hiring company from the role, which may differ from the recruiter's company. If not, say what kind of role the candidate is looking for, based on the profile's objective.
 - Respect the length limit of the channel strictly; count characters for a LinkedIn connection note.
 - When an introducer is given, write to the introducer (greet them, not the recruiter) and ask for an introduction to the recruiter; never pretend the introducer knows the candidate better than stated.
-- subject: a short e-mail subject for the e-mail channel; for LinkedIn channels return an empty string."""
+- subject: always write one, in the message's language, for every channel (LinkedIn InMail and e-mail use it): at most 70 characters, specific and calm, naming the role or the kind of role and the candidate's main angle, e.g. "Senior Unity developer – open to new roles" or "Senior Unity Developer role at Kolibri Games". No clickbait, no "Quick question", no exclamation marks."""
 
 
 def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_message", language="auto", note=""):
