@@ -676,3 +676,43 @@ class Logos(unittest.TestCase):
         self.assertIn(">KG</span>", h)
         self.assertIn("hsl(", h)
         self.assertEqual(h, app.logo_html("Kolibri Games GmbH", {}))  # same colour every time
+
+
+class RefreshSelection(unittest.TestCase):
+    def test_form_to_selection(self):
+        self.assertEqual(app.run_selection({}), (None, set()))                       # header button: all
+        self.assertEqual(app.run_selection({"all": "1", "run_flexa": "on"}), (None, set()))
+        self.assertEqual(app.run_selection({"one": "flexa"}), ({"flexa"}, set()))
+        self.assertEqual(app.run_selection({"one": "cs:ab12"}), (set(), {"ab12"}))
+        self.assertEqual(app.run_selection({"selected": "1", "run_flexa": "on", "run_linkedin": "on"}), ({"flexa", "linkedin"}, set()))
+        self.assertEqual(app.run_selection({"selected": "1", "run_custom": "on", "run_cs_ab12": "on"}), (set(), {"ab12"}))
+        self.assertEqual(app.run_selection({"selected": "1"}), (None, set()))        # nothing ticked: caller refuses
+
+    def test_only_the_picked_sources_run(self):
+        from unittest import mock
+        app.init_db()
+        ran = []
+        fake = {k: (lambda cfg, k=k: ran.append((k, [s["id"] for s in cfg.get("custom_sources") or []])) or [])
+                for k in app.SOURCE_FUNCS}
+        cfg = app.load_config()
+        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        cfg["custom_sources"] = [{"id": "a1", "url": "x"}, {"id": "b2", "url": "y"}]
+        app.save_config(cfg)
+        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None):
+            app.run_all(force=True, only={"flexa"})
+            self.assertEqual(ran, [("flexa", ["a1", "b2"])])
+            ran.clear()
+            app.run_all(force=True, only=set(), custom_ids={"b2"})
+            self.assertEqual(ran, [("custom", ["b2"])])
+
+    def test_jobs_list_filters_by_several_sources(self):
+        app.init_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            for jid, src in (("flexa:1", "flexa"), ("linkedin:2", "linkedin"), ("remotive:3", "remotive")):
+                con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,work_mode) "
+                            "VALUES(?,?,?,?,?,9,'new','2026-11-25T10:00:00+00:00','remote')", (jid, src, "T " + src, "C " + src, "u"))
+        page_ = app.jobs_page({"source": "flexa,remotive", "work": "all"})
+        self.assertIn("T flexa", page_)
+        self.assertIn("T remotive", page_)
+        self.assertNotIn("T linkedin", page_)

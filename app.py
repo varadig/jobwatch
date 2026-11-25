@@ -950,19 +950,26 @@ def enrich_pending_linkedin(cfg, limit=60):
         ENRICH_LOCK.release()
 
 
-def run_all(force=False):
+def run_all(force=False, only=None, custom_ids=None):
+    """Refreshes the due sources (all of them with force). only: just these source names (forced);
+    custom_ids: just these own sources (the "custom" source then runs with only them)."""
     if not RUN_LOCK.acquire(blocking=False):
         return
     STATE["running"] = True
     try:
         with CFG_LOCK:
             cfg = load_config()
+        if custom_ids:
+            cfg["custom_sources"] = [s for s in cfg.get("custom_sources") or [] if s.get("id") in custom_ids]
+            only = set(only or ()) | {"custom"}
         to_notify = []
         # 1) decide which sources are due, 2) fetch them in parallel, 3) save them one by one in order
         due = []
         with db() as con:
             for name, fn in SOURCE_FUNCS.items():
-                if cfg["sources"].get(name) and source_due(con, cfg, name, force):
+                if only is not None and name not in only:
+                    continue
+                if cfg["sources"].get(name) and source_due(con, cfg, name, force or only is not None):
                     st = con.execute("SELECT seeded FROM source_state WHERE source=?", (name,)).fetchone()
                     due.append((name, fn, bool(st and st["seeded"])))
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1265,6 +1272,20 @@ def daisify(html):
     return html
 
 
+# Reloads the page every N seconds while something runs, but not while the user is busy with it:
+# a section they opened, a field they are typing in, or an open dialog postpones the reload.
+SOFT_REFRESH = """<script>(function () {
+  var touched = false;
+  document.addEventListener('click', function (ev) { if (ev.target.closest && ev.target.closest('summary')) touched = true; }, true);
+  function busy() {
+    var a = document.activeElement;
+    return (touched && document.querySelector('details[open]')) || document.querySelector('dialog[open]') ||
+      (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+  }
+  setTimeout(function tick() { if (busy()) { setTimeout(tick, 3000); } else { location.reload(); } }, %d * 1000);
+})();</script>"""
+
+
 def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
     tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/sources", "Sources"),
@@ -1277,9 +1298,9 @@ def page(title, body, flash="", refresh=0):
 <title>%s · jobwatch</title>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
 <div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">🔔 Test push</button></form>
-<form method="post" action="/run"><button class="btn btn-primary btn-sm" title="Fetch all sources now">↻ Refresh</button></form></div></div></header>
+<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">↻ Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form></div></div></header>
 <main>%s%s</main></body></html>"""
-            % (('<meta http-equiv="refresh" content="%d">' % refresh) if refresh else "", e(title), CSS, nav, running,
+            % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, nav, running,
                '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body)))
 
 
@@ -1358,7 +1379,8 @@ def jobs_page(q):
         threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
         time.sleep(0.3)
     status = q.get("status", "active")
-    src = q.get("source", "")
+    srcs = sorted({s for s in q.get("source", "").split(",") if s in SOURCES_INFO})  # several sources may be picked
+    src = ",".join(srcs)
     try:
         mn = int(q.get("min", cfg["min_score"]))
     except ValueError:
@@ -1378,9 +1400,9 @@ def jobs_page(q):
     elif status != "all":
         sql += " AND status=?"
         args.append(status)
-    if src:
-        sql += " AND source=?"
-        args.append(src)
+    if srcs:
+        sql += " AND source IN (%s)" % ",".join("?" * len(srcs))
+        args += srcs
     if text:
         sql += " AND (title LIKE ? OR company LIKE ? OR location LIKE ?)"
         args += ["%" + text + "%"] * 3
@@ -1391,6 +1413,8 @@ def jobs_page(q):
         last_ok = {r["source"]: r["last_ok"] for r in con.execute("SELECT source, last_ok FROM source_state")}
         wcount = {r["m"]: r["c"] for r in con.execute(
             "SELECT COALESCE(work_mode,'unknown') m, COUNT(*) c FROM jobs WHERE score>=? AND status IN ('new','seen','saved') GROUP BY m", (mn,))}
+        scount = {r["source"]: r["c"] for r in con.execute(
+            "SELECT source, COUNT(*) c FROM jobs WHERE score>=? AND status IN ('new','seen','saved') GROUP BY source", (mn,))}
 
     # dates: posted (if the source does not give it, the collection day), collected
     for r in rows:
@@ -1464,21 +1488,30 @@ def jobs_page(q):
                           chip("🎯 Score", None, sort="score")])
     age_chips = "".join([chip("Any time", None, age="all"), chip("24 h", None, age="1"), chip("3 days", None, age="3"),
                          chip("7 days", None, age="7"), chip("30 days", None, age="30")])
-    src_items = [("", "All sources")] + [(k, v[0]) for k, v in SOURCES_INFO.items()]
+    # sources: toggle chips, several can be on at once; "All" clears the choice
+    src_chips = '<a class="fchip%s" href="%s">All</a>' % ("" if srcs else " on", e(link(source="")))
+    for k, v in SOURCES_INFO.items():
+        if not scount.get(k) and k not in srcs:
+            continue  # no postings from it: no chip
+        picked = sorted(set(srcs) ^ {k})
+        src_chips += '<a class="fchip%s" href="%s" aria-pressed="%s">%s<small>%d</small></a>' % (
+            " on" if k in srcs else "", e(link(source=",".join(picked))), "true" if k in srcs else "false",
+            e(v[0]), scount.get(k, 0))
     hidden_inputs = "".join('<input type="hidden" name="%s" value="%s">' % (k, e(v))
-                            for k, v in base_q.items() if k in ("status", "work", "sort", "age"))
-    more_open = " open" if (src or text or mn != cfg["min_score"]) else ""
+                            for k, v in base_q.items() if k in ("status", "work", "sort", "age", "source") and v)
+    more_open = " open" if (text or mn != cfg["min_score"]) else ""
     filt = """<section class="ui-section ui-filters" aria-label="Filters"><div class="ui-body">
 <div class="row-chips"><span class="lbl">Status</span>%s</div>
 <div class="row-chips"><span class="lbl">Work mode</span>%s</div>
+<div class="row-chips"><span class="lbl">Source</span>%s<span class="muted" style="font-size:12.5px">click several to combine</span></div>
 <div class="row-chips"><span class="lbl">Sort</span>%s</div>
 <div class="row-chips"><span class="lbl">Age</span>%s</div>
-<details class="ui-more"%s><summary>More filters: source, score, search</summary>
-<form class="filters" method="get">%s<select class="select select-sm" name="source" aria-label="Source" style="width:auto">%s</select>
+<details class="ui-more"%s><summary>More filters: score, search</summary>
+<form class="filters" method="get">%s
 <label class="ui-inline" style="margin:0;font-weight:400">Min. score <input class="input input-sm" type="number" name="min" value="%d" style="width:80px"></label>
 <input class="input input-sm" type="search" name="q" value="%s" placeholder="Search: title, company, location" aria-label="Search" style="width:260px">
 <button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/">Reset filters</a></form></details></div></section>""" % (
-        st_chips, wm_chips, sort_chips, age_chips, more_open, hidden_inputs, opts(src, src_items), mn, e(text))
+        st_chips, wm_chips, src_chips, sort_chips, age_chips, more_open, hidden_inputs, mn, e(text))
     head = """<div class="listhead"><span><b>%d</b> posting%s · age refers to <b>%s</b> · notifications from %d pts</span>
 <form method="post" action="/mark-all-seen"><button class="btn btn-sm btn-ghost">Mark all new as seen</button></form></div>""" % (
         total, " (first 300 shown)" if total > 300 else "", "collected" if sort == "seen" else "posted",
@@ -1539,12 +1572,29 @@ def jobs_page(q):
                 refresh=3 if busy else 0)
 
 
-def sources_page():
+def run_selection(f):
+    """From the Sources form: (source names or None for all, own-source ids). "one" = a single row's button."""
+    one = f.get("one", "")
+    if one.startswith("cs:"):
+        return set(), {one[3:]}
+    if one:
+        return {one}, set()
+    if f.get("all") or "selected" not in f:
+        return None, set()
+    names = {k for k in SOURCES_INFO if ("run_" + k) in f}
+    cids = {k[len("run_cs_"):] for k in f if k.startswith("run_cs_")}
+    if cids:
+        names.discard("custom")  # only the ticked own sources, not all of them
+    return (names or (set() if cids else None)), cids
+
+
+def sources_page(flash=""):
     with db() as con:
         st = {r["source"]: r for r in con.execute("SELECT * FROM source_state")}
         cnt = {r["source"]: r["c"] for r in con.execute("SELECT source, COUNT(*) c FROM jobs GROUP BY source")}
     with CFG_LOCK:
         cfg = load_config()
+    busy = bool(STATE["running"])
     rows = []
     for k, (name, url) in SOURCES_INFO.items():
         s = st.get(k)
@@ -1556,21 +1606,42 @@ def sources_page():
         else:
             status = ('<span class="badge badge-soft badge-success">OK</span>' if s else
                       '<span class="badge badge-soft badge-neutral">Not run yet</span>')
-        rows.append('<tr%s><td>%s</td><td class="when">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>' % (
-            "" if on else ' class="off"',
+        tick = ('<input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="run_%s" aria-label="Select %s"%s>'
+                % (k, e(name), "" if on else " disabled title=\"Turned off in Settings\""))
+        one = ('<button class="btn btn-xs btn-ghost" name="one" value="%s"%s>Refresh</button>'
+               % (k, "" if on and not busy else " disabled"))
+        rows.append('<tr%s><td>%s</td><td>%s</td><td class="when">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td>%s</td><td>%s</td></tr>' % (
+            "" if on else ' class="off"', tick,
             ('<a href="%s" target="_blank" rel="noopener">%s</a>' % (e(url), e(name))) if url else e(name),
-            e(fmt_dt(s["last_run"])) if s else "—", s["found"] if s else "—", s["new"] if s else "—", cnt.get(k, 0), status))
+            e(fmt_dt(s["last_run"])) if s else "—", s["found"] if s else "—", s["new"] if s else "—", cnt.get(k, 0), status, one))
+        if k == "custom":  # each own source can be refreshed on its own
+            for src in cfg.get("custom_sources") or []:
+                son = on and src.get("enabled", True)
+                rows.append('<tr class="sub%s"><td><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="run_cs_%s" '
+                            'aria-label="Select %s"%s></td><td colspan="6">↳ %s <span class="muted">· %s</span></td>'
+                            '<td><button class="btn btn-xs btn-ghost" name="one" value="cs:%s"%s>Refresh</button></td></tr>' % (
+                                "" if son else " off", e(src["id"]), e(src.get("name") or src["url"]), "" if son else " disabled",
+                                e(src.get("name") or src["url"]), e(CUSTOM_TYPES.get(src.get("type"), src.get("type"))),
+                                e(src["id"]), "" if son and not busy else " disabled"))
     uns = "".join('<tr><td>%s</td><td class="muted">%s</td></tr>' % (
         ('<a href="%s" target="_blank" rel="noopener">%s ↗</a>' % (e(u), e(n))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
     body = """<div class="ui"><div class="ui-head"><h1>Sources</h1><p>Where postings come from, and how the last refresh went.
-Sources are turned on and off in <a href="/settings#search">Settings → Job search</a>.</p></div>
-<section class="ui-section"><header><div><h2>Watched sources</h2><p class="ui-desc">Refreshed every %d minutes (Remotive at most every 6 hours).</p></div></header>
-<div style="overflow-x:auto"><table class="table ui-table"><thead><tr><th>Source</th><th>Last run</th><th class="num">Fetched</th><th class="num">New</th>
-<th class="num">In the list</th><th>Status</th></tr></thead><tbody>%s</tbody></table></div></section>
+Sources are turned on and off in <a href="/settings#search">Settings → Job search</a>.</p></div>%s
+<section class="ui-section" id="refresh"><header><div><h2>Watched sources</h2><p class="ui-desc">Refreshed automatically every %d minutes
+(Remotive at most every 6 hours). To fetch now, tick the sources you want, or use a row's Refresh button.</p></div></header>
+<form method="post" action="/run"><div style="overflow-x:auto"><table class="table ui-table"><thead><tr><th style="width:36px">
+<input type="checkbox" class="checkbox checkbox-sm" aria-label="Select all" onclick="document.querySelectorAll('#refresh tbody input[type=checkbox]:not(:disabled)').forEach(function (c) { c.checked = this.checked; }, this)"></th>
+<th>Source</th><th>Last run</th><th class="num">Fetched</th><th class="num">New</th><th class="num">In the list</th><th>Status</th><th></th></tr></thead>
+<tbody>%s</tbody></table></div>
+<div class="ui-foot"><span class="muted" style="font-size:13px">%s</span><div class="ui-btns">
+<button class="btn btn-sm btn-outline" name="all" value="1"%s>Refresh all</button>
+<button class="btn btn-sm btn-primary" name="selected" value="1"%s>Refresh selected</button></div></div></form></section>
 <section class="ui-section"><header><div><h2>Sites that cannot be watched automatically</h2><p class="ui-desc">Check these by hand now and then.</p></div></header>
 <div style="overflow-x:auto"><table class="table ui-table"><thead><tr><th>Site</th><th>Why</th></tr></thead><tbody>%s</tbody></table></div></section></div>""" % (
-        cfg["interval_minutes"], "".join(rows), uns)
-    return page("Sources", body)
+        progress_html(), cfg["interval_minutes"], "".join(rows),
+        "A refresh is running…" if busy else "Only the sources that are turned on can be selected.",
+        " disabled" if busy else "", " disabled" if busy else "", uns)
+    return page("Sources", body, flash, refresh=3 if busy else 0)
 
 
 def kv_text(d):
@@ -2687,7 +2758,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/":
                 return self.send_html(jobs_page(q))
             if u.path == "/sources":
-                return self.send_html(sources_page())
+                return self.send_html(sources_page(q.get("msg", "")))
             if u.path == "/outreach":
                 return self.send_html(outreach_page(q, q.get("msg", "")))
             if u.path == "/outreach/lookup":
@@ -2832,7 +2903,13 @@ class Handler(BaseHTTPRequestHandler):
                     con.execute("DELETE FROM source_state")
                 return self.redirect("/settings?msg=" + urllib.parse.quote("Job cache cleared. Press Refresh to fetch again."))
             if u.path == "/run":
-                threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
+                only, cids = run_selection(f)
+                if only is None and not cids and not f.get("all") and ("one" in f or "selected" in f):
+                    return self.redirect("/sources?msg=" + urllib.parse.quote("Tick at least one source to refresh."))
+                if STATE["running"]:
+                    return self.redirect(self.back() + ("&" if "?" in self.back() else "?") + "msg=" +
+                                         urllib.parse.quote("A refresh is already running; try again when it has finished."))
+                threading.Thread(target=run_all, kwargs={"force": True, "only": only, "custom_ids": cids}, daemon=True).start()
                 time.sleep(0.3)
                 return self.redirect(self.back())
             if u.path.startswith("/job/"):
