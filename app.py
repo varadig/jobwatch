@@ -176,6 +176,20 @@ def migrate_db():
             for r in con.execute("SELECT id, source, title, location, description FROM jobs").fetchall():
                 m = "remote" if r["source"] == "remotive" else classify_mode(r["title"], r["location"], r["description"])
                 con.execute("UPDATE jobs SET work_mode=? WHERE id=?", (m, r["id"]))
+        for col in ("urlkey", "also_sources", "dup_of"):
+            if col not in cols:
+                con.execute("ALTER TABLE jobs ADD COLUMN %s TEXT" % col)
+        con.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(urlkey)")
+        v = con.execute("SELECT v FROM meta WHERE k='dedupe'").fetchone()
+        if not v or v["v"] != "1":
+            # new duplicate rules: recompute the keys, then hide the duplicates already in the list
+            for r in con.execute("SELECT id, title, company, url FROM jobs").fetchall():
+                con.execute("UPDATE jobs SET dupkey=?, urlkey=? WHERE id=?",
+                            (dup_key(r["title"], r["company"], r["url"]), url_key(r["url"]), r["id"]))
+            n = dedupe_existing(con)
+            if n:
+                log.info("Duplicates: %d posting(s) hidden", n)
+            con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dedupe','1')")
 
 
 def now_iso():
@@ -228,6 +242,78 @@ def score_job(cfg, j):
 
 def norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+# ---------------------------------------------------------------- duplicates across sources
+# The same posting often comes from several places (a LinkedIn search and a LinkedIn alert e-mail, a company
+# board and Flexa…). Two postings are the same when their link points to the same posting, or when the title
+# and the company match after the noise is removed (legal forms, gender tags).
+LEGAL_FORMS = re.compile(r"\b(gmbh|ag|ltd|limited|inc|llc|plc|corp|corporation|co|sas|sa|sarl|srl|bv|nv|ab|oy|as|aps|"
+                         r"kft|zrt|nyrt|bt|spa|sl|pty|pte|kk|se)\b\.?", re.I)
+GENDER_TAGS = re.compile(r"\(\s*(?:[mwfdx]\s*/\s*){1,3}[mwfdx]\s*\)|\(\s*(?:all genders?|alle geschlechter|gn\*?|w\*m\*d)\s*\)|"
+                         r"\b[mwf]\s*/\s*[mwf]\s*/\s*[dx]\b", re.I)
+
+
+def norm_company(c):
+    return norm(LEGAL_FORMS.sub(" ", c or ""))
+
+
+def url_key(url):
+    """One key per posting link: the LinkedIn posting id, else the address without query and fragment."""
+    m = re.search(r"linkedin\.com/(?:comm/)?jobs/view/(?:[^/?#]*-)?(\d{6,})", url or "")
+    if m:
+        return "li:" + m.group(1)
+    return re.sub(r"[?#].*$", "", (url or "").strip().lower()).rstrip("/")
+
+
+def dup_key(title, company, url):
+    return norm(GENDER_TAGS.sub(" ", title or "")) + "|" + (norm_company(company) or url_key(url))
+
+
+def find_duplicate(con, title, company, url):
+    """The posting already in the list that is the same as this one (or None)."""
+    return con.execute("SELECT id, source, company, description, also_sources FROM jobs WHERE (dupkey=? OR urlkey=?) "
+                       "AND dup_of IS NULL LIMIT 1", (dup_key(title, company, url), url_key(url))).fetchone()
+
+
+def merge_into(con, row, source, it):
+    """Notes that the posting also came from another source, and fills in what the first one lacked."""
+    also = [s for s in (row["also_sources"] or "").split(",") if s]
+    if source != row["source"] and source not in also:
+        also.append(source)
+    con.execute("UPDATE jobs SET also_sources=?, company=CASE WHEN COALESCE(company,'')='' THEN ? ELSE company END, "
+                "description=CASE WHEN COALESCE(description,'')='' THEN ? ELSE description END WHERE id=?",
+                (",".join(also), it.get("company") or "", it.get("description") or "", row["id"]))
+
+
+def dedupe_existing(con):
+    """Hides the duplicates already in the list (dup_of = the one kept; nothing is deleted). The one kept is the
+    one you worked on most: a CV, then applied > saved > seen > new, then the oldest."""
+    rank = {"applied": 4, "saved": 3, "seen": 2, "new": 1}
+    with_cv = {r["job_id"] for r in con.execute("SELECT job_id FROM cvs")}
+    rows = [dict(r) for r in con.execute("SELECT id, source, status, first_seen, dupkey, urlkey, also_sources FROM jobs WHERE dup_of IS NULL")]
+    groups = {}
+    for r in rows:
+        for k in ("d:" + (r["dupkey"] or ""), "u:" + (r["urlkey"] or "")):
+            if len(k) > 2:
+                groups.setdefault(k, []).append(r)
+    hidden = 0
+    for members in groups.values():
+        members = [m for m in members if not m.get("_gone")]
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda m: (m["id"] not in with_cv, -rank.get(m["status"], 0), m["first_seen"] or ""))
+        keep = members[0]
+        also = [s for s in (keep["also_sources"] or "").split(",") if s]
+        for m in members[1:]:
+            m["_gone"] = True
+            con.execute("UPDATE jobs SET dup_of=? WHERE id=?", (keep["id"], m["id"]))
+            hidden += 1
+            if m["source"] != keep["source"] and m["source"] not in also:
+                also.append(m["source"])
+        keep["also_sources"] = ",".join(also)
+        con.execute("UPDATE jobs SET also_sources=? WHERE id=?", (keep["also_sources"], keep["id"]))
+    return hidden
 
 
 WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 On-site", "unknown": "❔ Unknown"}
@@ -827,29 +913,56 @@ def jobs_from_mail(cfg, sender, subject, msg):
     return jobs_from_links(links)
 
 
+MAIL_PER_RUN = 15   # newest first; the rest waits for the next run, so one run stays short
+MAIL_WORKERS = 4    # e-mails read by Claude at the same time
+
+
 def src_mail(cfg):
-    out, errs = [], []
-    for msgid, sender, subject, msg in read_alert_mails(cfg):
+    """The postings of the new alert e-mails. The e-mails are marked as done only after their postings are
+    saved (run_all calls mark_mails_done), so a restart in the middle loses nothing."""
+    from concurrent.futures import ThreadPoolExecutor
+    mails = read_alert_mails(cfg, limit=MAIL_PER_RUN)
+    prog = (STATE.get("progress") or {}).get("sources")
+    done_n = [0]
+
+    def one(m):
+        msgid, sender, subject, msg = m
         try:
-            jobs = jobs_from_mail(cfg, sender, subject, msg)
+            return msgid, sender, msg, jobs_from_mail(cfg, sender, subject, msg), None
         except Exception as ex:
-            errs.append("%s: %s" % (subject[:60], ex))
-            continue  # not marked as done: tried again next time
-        via = re.sub(r".*@", "", re.sub(r"[<>\s]", "", sender.rsplit(" ", 1)[-1]))
-        for j in jobs:
-            url = j.get("url") or ""
-            if not url.startswith("http"):
-                continue
-            out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
-                        "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
-                        "url": url, "posted": parsedate_iso(msg.get("Date")), "description": ""})
-        with db() as con:
-            con.execute("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES(?,?,?)", (msgid, now_iso(), len(jobs)))
+            return msgid, sender, msg, [], "%s: %s" % (subject[:60], ex)
+        finally:
+            done_n[0] += 1
+            if prog is not None and "mail" in prog:
+                prog["mail"] = "fetching %d / %d e-mails" % (done_n[0], len(mails))
+
+    out, errs, done = [], [], []
+    with ThreadPoolExecutor(max_workers=MAIL_WORKERS) as pool:
+        for msgid, sender, msg, jobs, err in pool.map(one, mails):
+            if err:
+                errs.append(err)
+                continue  # not marked as done: tried again next time
+            via = re.sub(r".*@", "", re.sub(r"[<>\s]", "", sender.rsplit(" ", 1)[-1]))
+            for j in jobs:
+                url = j.get("url") or ""
+                if not url.startswith("http"):
+                    continue
+                out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
+                            "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
+                            "url": url, "posted": parsedate_iso(msg.get("Date")), "description": ""})
+            done.append((msgid, len(jobs)))
+    cfg.setdefault("_mail_done", []).extend(done)
     if errs:
         log.warning("E-mail alert errors: %s", "; ".join(errs))
         if not out:
             raise RuntimeError("; ".join(errs))
     return out
+
+
+def mark_mails_done(done):
+    with db() as con:
+        con.executemany("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES(?,?,?)",
+                        [(m, now_iso(), n) for m, n in done])
 
 
 # ---------------------------------------------------------------- a posting added by its link
@@ -902,12 +1015,10 @@ def add_job_by_link(url):
     url = (url or "").strip()
     if not re.match(r"^https?://", url):
         return None, "Paste the full link of the posting (https://…)."
-    m = LINKEDIN_JOB_RE.search(url)
     with db() as con:
-        for jid in (["linkedin:" + m.group(1), "manual:linkedin-" + m.group(1)] if m else []) + \
-                   ["manual:" + hashlib.sha1(url.encode()).hexdigest()[:16]]:
-            if con.execute("SELECT 1 FROM jobs WHERE id=?", (jid,)).fetchone():
-                return jid, "This posting is already in the list."
+        row = con.execute("SELECT id, dup_of FROM jobs WHERE urlkey=? LIMIT 1", (url_key(url),)).fetchone()
+        if row:
+            return row["dup_of"] or row["id"], "This posting is already in the list."
     try:
         it = job_from_page(url)
     except Exception as ex:
@@ -921,10 +1032,14 @@ def add_job_by_link(url):
     jid, ts = "manual:" + it["ext_id"], now_iso()
     with db() as con:
         remember_logo(con, it["company"], it.get("logo"))
+        same = find_duplicate(con, it["title"], it["company"], it["url"])
+        if same:
+            merge_into(con, same, "manual", it)
+            return same["id"], "This posting is already in the list (from %s)." % SOURCES_INFO.get(same["source"], (same["source"],))[0]
         con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
-                    "first_seen,last_seen,status,notified,work_mode) VALUES(?,'manual',?,?,?,?,?,?,?,?,?,?,?,'new',1,?)",
+                    "first_seen,last_seen,status,notified,work_mode,urlkey) VALUES(?,'manual',?,?,?,?,?,?,?,?,?,?,?,'new',1,?,?)",
                     (jid, it["title"][:200], it["company"][:120], it["location"][:200], it["url"], it["posted"], it["description"],
-                     sc, ", ".join(hits), norm(it["title"]) + "|" + (norm(it["company"]) or it["url"]), ts, ts, wm))
+                     sc, ", ".join(hits), dup_key(it["title"], it["company"], it["url"]), ts, ts, wm, url_key(it["url"])))
     threading.Thread(target=fetch_logos, daemon=True).start()
     return jid, "Added: %s (%d points)." % (it["title"][:80], sc)
 
@@ -1239,7 +1354,7 @@ def run_all(force=False, only=None, custom_ids=None):
                     remember_logo(con, it.get("company"), it.get("logo"))
                     sc, hits = score_job(cfg, it)
                     # without an employer the title alone is not enough to call two postings the same
-                    dup = norm(it["title"]) + "|" + (norm(it["company"]) or it["url"])
+                    dup = dup_key(it["title"], it["company"], it["url"])
                     wm = it.get("work_mode") or classify_mode(it["title"], it["location"], it.get("description"))
                     ex_row = con.execute("SELECT id FROM jobs WHERE id=?", (jid,)).fetchone()
                     if ex_row:
@@ -1252,15 +1367,17 @@ def run_all(force=False, only=None, custom_ids=None):
                         else:
                             con.execute("UPDATE jobs SET last_seen=? WHERE id=?", (ts, jid))
                         continue
-                    if con.execute("SELECT 1 FROM jobs WHERE dupkey=?", (dup,)).fetchone():
-                        continue  # already seen from another source
+                    same = find_duplicate(con, it["title"], it["company"], it["url"])
+                    if same:
+                        merge_into(con, same, name, it)  # already listed from another source
+                        continue
                     notified = 0 if (seeded and sc >= cfg["notify_min_score"]
                                      and wm in cfg.get("notify_work_modes", ["remote", "unknown"])) else 1
                     con.execute(
                         "INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,"
-                        "dupkey,first_seen,last_seen,status,notified,work_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?)",
+                        "dupkey,first_seen,last_seen,status,notified,work_mode,urlkey) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?)",
                         (jid, name, it["title"], it["company"], it["location"], it["url"], it["posted"],
-                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, notified, wm))
+                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, notified, wm, url_key(it["url"])))
                     new += 1
                     if not notified:
                         to_notify.append(dict(id=jid, source=name, score=sc, **{
@@ -1271,6 +1388,8 @@ def run_all(force=False, only=None, custom_ids=None):
                     "last_ok=COALESCE(excluded.last_ok, source_state.last_ok), found=excluded.found, "
                     "new=excluded.new, error=excluded.error, seeded=MAX(source_state.seeded, excluded.seeded)",
                     (name, ts, None if err else ts, len(items), new, err, 0 if err else 1))
+            if name == "mail" and not err:
+                mark_mails_done(cfg.pop("_mail_done", []))  # only now that their postings are saved
             prog = STATE["progress"]
             prog["done"] += 1
             prog["sources"][name] = ("error" if err else "done") + " (%d)" % len(items)
@@ -1632,7 +1751,7 @@ def jobs_page(q):
     wf = q.get("work", cfg.get("default_work_filter", "remote_unknown"))
     sort = q.get("sort", "posted")
     age = q.get("age", "all")
-    sql, args = "SELECT * FROM jobs WHERE score>=?", [mn]
+    sql, args = "SELECT * FROM jobs WHERE score>=? AND dup_of IS NULL", [mn]
     wf_sql = {"remote": ["remote"], "remote_unknown": ["remote", "unknown"], "remote_hybrid": ["remote", "hybrid"],
               "hybrid": ["hybrid"], "onsite": ["onsite"]}.get(wf)
     if wf_sql:
@@ -1652,12 +1771,12 @@ def jobs_page(q):
     with db() as con:
         rows = [dict(r) for r in con.execute(sql, args).fetchall()]
         counts = {r["status"]: r["c"] for r in con.execute(
-            "SELECT status, COUNT(*) c FROM jobs WHERE score>=? GROUP BY status", (mn,))}
+            "SELECT status, COUNT(*) c FROM jobs WHERE score>=? AND dup_of IS NULL GROUP BY status", (mn,))}
         last_ok = {r["source"]: r["last_ok"] for r in con.execute("SELECT source, last_ok FROM source_state")}
         wcount = {r["m"]: r["c"] for r in con.execute(
-            "SELECT COALESCE(work_mode,'unknown') m, COUNT(*) c FROM jobs WHERE score>=? AND status IN ('new','seen','saved') GROUP BY m", (mn,))}
+            "SELECT COALESCE(work_mode,'unknown') m, COUNT(*) c FROM jobs WHERE score>=? AND dup_of IS NULL AND status IN ('new','seen','saved') GROUP BY m", (mn,))}
         scount = {r["source"]: r["c"] for r in con.execute(
-            "SELECT source, COUNT(*) c FROM jobs WHERE score>=? AND status IN ('new','seen','saved') GROUP BY source", (mn,))}
+            "SELECT source, COUNT(*) c FROM jobs WHERE score>=? AND dup_of IS NULL AND status IN ('new','seen','saved') GROUP BY source", (mn,))}
 
     # dates: posted (if the source does not give it, the collection day), collected
     for r in rows:
@@ -1703,7 +1822,7 @@ def jobs_page(q):
     # summary tiles (active postings, together with the work-mode filter)
     with db() as con:
         act_rows = [dict(r) for r in con.execute(
-            "SELECT posted, first_seen, status FROM jobs WHERE score>=? AND status IN ('new','seen','saved')"
+            "SELECT posted, first_seen, status FROM jobs WHERE score>=? AND dup_of IS NULL AND status IN ('new','seen','saved')"
             + ((" AND COALESCE(work_mode,'unknown') IN (%s)" % ",".join("?" * len(wf_sql))) if wf_sql else ""),
             [mn] + (wf_sql or []))]
     fresh = sum(1 for r in act_rows if parse_dt(r["posted"]) and days_ago(parse_dt(r["posted"])) <= 2)
@@ -1790,6 +1909,9 @@ def jobs_page(q):
         chips.append('<span class="chip" title="Collected: %s">📥 %s</span>' % (e(fmt_dt(r["first_seen"])), e(rel_day(r["_sdays"]))))
         if r["status"] != "new":
             chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
+        if r.get("also_sources"):
+            chips.append('<span class="chip" title="The same posting came from these sources too">🔁 also on %s</span>' % e(
+                ", ".join(SOURCES_INFO.get(x, (x,))[0] for x in r["also_sources"].split(",") if x)))
         icon_btns = "".join('<button class="btn btn-sm btn-ghost btn-square" name="status" value="%s" title="%s" aria-label="%s">%s</button>'
                             % (s_, t, t, ic) for s_, ic, t in (
             ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Mark seen"),

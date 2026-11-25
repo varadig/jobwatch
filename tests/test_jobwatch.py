@@ -14,6 +14,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 # app.py reads its data folder when it is imported, so point it at a throwaway one.
 os.environ.setdefault("JOBWATCH_DATA", tempfile.mkdtemp(prefix="jobwatch-test-"))
 app = importlib.import_module("app")
+app.init_db()
+app.migrate_db()  # the tests share one throwaway database with the current columns
 new_profile = importlib.import_module("new_profile")
 
 
@@ -772,7 +774,9 @@ class MailAlerts(unittest.TestCase):
         from unittest import mock
         calls = []
         with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)):
-            jobs = app.src_mail(self.cfg())
+            cfg = self.cfg()
+            jobs = app.src_mail(cfg)
+            app.mark_mails_done(cfg.pop("_mail_done"))  # what run_all does once the postings are saved
             again = app.src_mail(self.cfg())
         self.assertIn(("select", '"INBOX"', True), calls)                      # read-only
         self.assertTrue(all(c[2] == "(BODY.PEEK[])" for c in calls if c[0] == "fetch"))  # not marked as read
@@ -828,3 +832,76 @@ class AddByLink(unittest.TestCase):
 
     def test_bad_link(self):
         self.assertEqual(app.add_job_by_link("not a link")[0], None)
+
+
+class Duplicates(unittest.TestCase):
+    def setUp(self):
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            con.execute("DELETE FROM source_state")
+
+    def run_sources(self, results):
+        from unittest import mock
+        fake = {k: (lambda cfg, k=k: results.get(k, [])) for k in app.SOURCE_FUNCS}
+        cfg = app.load_config()
+        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        app.save_config(cfg)
+        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None),                 mock.patch.object(app, "enrich_pending_linkedin", lambda cfg: None):
+            app.run_all(force=True, only=set(results))
+
+    def test_keys(self):
+        self.assertEqual(app.dup_key("Senior Unity Developer (m/w/d)", "Kolibri Games GmbH", "u"),
+                         app.dup_key("Senior Unity Developer", "Kolibri Games", "x"))
+        self.assertEqual(app.url_key("https://www.linkedin.com/comm/jobs/view/4494498619/?trackingId=x"),
+                         app.url_key("https://hu.linkedin.com/jobs/view/unity-dev-at-acme-4494498619"))
+
+    def test_same_posting_from_two_sources_is_one_card(self):
+        li = {"ext_id": "4494498619", "title": "Unity Engineer", "company": "Acme", "location": "Remote", "posted": "",
+              "url": "https://www.linkedin.com/jobs/view/4494498619/", "description": ""}
+        mail = {"ext_id": "m1", "title": "Unity Engineer", "company": "", "location": "linkedin.com", "posted": "",
+                "url": "https://www.linkedin.com/jobs/view/4494498619/", "description": ""}           # same link, no company
+        flexa = {"ext_id": "f1", "title": "Unity Engineer (f/m/d)", "company": "ACME Ltd", "location": "", "posted": "",
+                 "url": "https://flexa.careers/jobs/x", "description": "Full text"}                    # same title+company
+        self.run_sources({"linkedin": [li]})
+        self.run_sources({"mail": [mail], "flexa": [flexa]})
+        with app.db() as con:
+            rows = con.execute("SELECT source, also_sources, description FROM jobs").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "linkedin")
+        self.assertEqual(sorted(rows[0]["also_sources"].split(",")), ["flexa", "mail"])
+        self.assertEqual(rows[0]["description"], "Full text")   # filled in from the other source
+        self.assertIn("also on", app.jobs_page({"work": "all", "min": "-99"}))
+
+    def test_existing_duplicates_are_hidden_keeping_the_one_worked_on(self):
+        with app.db() as con:
+            for jid, src, status in (("flexa:1", "flexa", "new"), ("linkedin:2", "linkedin", "applied")):
+                con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,dupkey,urlkey) "
+                            "VALUES(?,?,?,?,?,9,?,'2026-11-25',?,?)", (jid, src, "Unity Dev", "Acme", "u/" + jid, status,
+                                                                     app.dup_key("Unity Dev", "Acme", ""), "u/" + jid))
+            self.assertEqual(app.dedupe_existing(con), 1)
+            kept = con.execute("SELECT id, also_sources FROM jobs WHERE dup_of IS NULL").fetchall()
+        self.assertEqual([(r["id"], r["also_sources"]) for r in kept], [("linkedin:2", "flexa")])
+
+    def test_mails_are_marked_done_only_after_saving(self):
+        from unittest import mock
+        with app.db() as con:
+            con.execute("DELETE FROM mail_seen")
+
+        def fake_mail(cfg):
+            cfg.setdefault("_mail_done", []).append(("<m9@x>", 1))
+            with app.db() as con:
+                self.assertIsNone(con.execute("SELECT 1 FROM mail_seen").fetchone())  # not yet
+            return [{"ext_id": "z", "title": "Unity Dev", "company": "Z", "location": "", "posted": "",
+                     "url": "https://z.example/jobs/1", "description": ""}]
+        fake = {k: (lambda cfg: []) for k in app.SOURCE_FUNCS}
+        fake["mail"] = fake_mail
+        cfg = app.load_config()
+        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        app.save_config(cfg)
+        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None):
+            app.run_all(force=True, only={"mail"})
+        with app.db() as con:
+            self.assertEqual(con.execute("SELECT msgid FROM mail_seen").fetchall()[0][0], "<m9@x>")
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs WHERE source='mail'").fetchone()[0], 1)
