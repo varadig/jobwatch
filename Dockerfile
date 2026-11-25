@@ -14,6 +14,7 @@ COPY app.py cvgen.py ./
 COPY fonts ./fonts
 COPY templates ./templates
 COPY tools ./tools
+COPY static ./static
 COPY docker-entrypoint.sh ./
 
 RUN chmod +x docker-entrypoint.sh && mkdir -p /data

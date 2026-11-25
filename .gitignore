@@ -5,6 +5,7 @@ data/
 *.pdf
 *.png
 !fonts/*.png
+!static/*.png
 __pycache__/
 *.pyc
 .venv/

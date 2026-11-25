@@ -1884,6 +1884,7 @@ def page(title, body, flash="", refresh=0):
     return ("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
 <script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";</script>
 <title>%s · jobwatch</title>
+<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
 <div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">🔔 Test push</button></form>
 <form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">↻ Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form></div></div></header>
@@ -3324,6 +3325,15 @@ and fills in the editor below. Nothing is saved until you check it and press Sav
 
 AUTH_PASSWORD = os.environ.get("JOBWATCH_PASSWORD", "")
 AUTH_PUBLIC_PATHS = ("/health",)  # the platform's health check must get through without a password
+# the icons too: browsers fetch them without the password, and they hold nothing private
+STATIC_DIR = os.path.join(BASE, "static")
+ICON_FILES = {"/favicon.ico": ("favicon.ico", "image/x-icon"), "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+              "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"), "/icon-192.png": ("icon-192.png", "image/png")}
+MANIFEST = json.dumps({"name": "jobwatch", "short_name": "jobwatch", "start_url": "/", "display": "standalone",
+                       "background_color": "#1d232a", "theme_color": "#5b5bd6",
+                       "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                                 {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"}]}).encode()
+AUTH_PUBLIC_PATHS = AUTH_PUBLIC_PATHS + tuple(ICON_FILES) + ("/manifest.webmanifest",)
 
 
 def auth_ok(header, password):
@@ -3389,6 +3399,19 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         REQ.path = u.path
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
+        if u.path in ICON_FILES or u.path == "/manifest.webmanifest":
+            if u.path == "/manifest.webmanifest":
+                data, ctype = MANIFEST, "application/manifest+json"
+            else:
+                fname, ctype = ICON_FILES[u.path]
+                with open(os.path.join(STATIC_DIR, fname), "rb") as fh:
+                    data = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=604800")
+            self.end_headers()
+            return self.wfile.write(data)
         try:
             if u.path == "/":
                 return self.send_html(jobs_page(q))
