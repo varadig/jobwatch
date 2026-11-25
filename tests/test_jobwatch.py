@@ -716,3 +716,115 @@ class RefreshSelection(unittest.TestCase):
         self.assertIn("T flexa", page_)
         self.assertIn("T remotive", page_)
         self.assertNotIn("T linkedin", page_)
+
+
+class MailAlerts(unittest.TestCase):
+    """Job alert e-mails from a fake mailbox; the mailbox must be opened read-only and fetched with PEEK."""
+    MAIL = (b"From: Jack <jack@jackandjill.ai>\r\nSubject: New roles for you\r\nMessage-ID: <m1@jj>\r\n"
+            b"Date: Wed, 25 Nov 2026 08:00:00 +0000\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+            b'<p>Hi!</p><a href="https://app.jackandjill.ai/jobs/123">Senior Unity Developer</a> at Supercell'
+            b'<a href="https://www.linkedin.com/comm/jobs/view/4494498619/?trackingId=x">Unity Engineer</a>'
+            b'<a href="https://app.jackandjill.ai/settings">Manage your settings</a>'
+            b'<a href="https://jackandjill.ai/unsubscribe">Unsubscribe</a>')
+
+    def fake_imap(self, calls):
+        mail = self.MAIL
+
+        class M:
+            def __init__(self, host, port, timeout=0):
+                calls.append(("connect", host, port))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def login(self, u, p):
+                calls.append(("login", u))
+
+            def select(self, folder, readonly=False):
+                calls.append(("select", folder, readonly))
+                return "OK", [b"1"]
+
+            def search(self, charset, *crit):
+                calls.append(("search",) + crit)
+                return "OK", [b"7"]
+
+            def fetch(self, num, what):
+                calls.append(("fetch", num, what))
+                return "OK", [(b"7 (BODY[] {1}", mail)]
+        return M
+
+    def cfg(self, claude=False):
+        cfg = app.load_config()
+        cfg["email"].update(username="me@gmail.com", password="app-pw")
+        cfg["mail_source"] = dict(app.DEFAULT_CONFIG["mail_source"], senders=["jackandjill.ai"], use_claude=claude)
+        cfg["anthropic_api_key"] = "k"
+        return cfg
+
+    def setUp(self):
+        app.init_db()
+        with app.db() as con:
+            con.execute("DELETE FROM mail_seen")
+
+    def test_links_mode_read_only_and_once(self):
+        from unittest import mock
+        calls = []
+        with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)):
+            jobs = app.src_mail(self.cfg())
+            again = app.src_mail(self.cfg())
+        self.assertIn(("select", '"INBOX"', True), calls)                      # read-only
+        self.assertTrue(all(c[2] == "(BODY.PEEK[])" for c in calls if c[0] == "fetch"))  # not marked as read
+        self.assertEqual(sorted(j["title"] for j in jobs), ["Senior Unity Developer", "Unity Engineer"])
+        self.assertIn("https://www.linkedin.com/jobs/view/4494498619/", [j["url"] for j in jobs])  # tracking removed
+        self.assertEqual(again, [])                                              # each e-mail once
+
+    def test_claude_mode_only_keeps_links_from_the_mail(self):
+        import cvgen
+        from unittest import mock
+        calls = []
+        fake = lambda key, subj, sender, text, links: [
+            {"title": "Senior Unity Developer", "company": "Supercell", "location": "Helsinki", "url": "https://app.jackandjill.ai/jobs/123"}]
+        with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)), mock.patch.object(cvgen, "jobs_from_email", fake):
+            jobs = app.src_mail(self.cfg(claude=True))
+        self.assertEqual([(j["title"], j["company"]) for j in jobs], [("Senior Unity Developer", "Supercell")])
+
+    def test_claude_filter_drops_made_up_links(self):
+        import cvgen
+        from unittest import mock
+        cap = {}
+        sdk = Outreach().fake_sdk(cap, text='{"jobs": [{"title": "A", "company": "", "location": "", "url": "https://evil.example/x"},'
+                                            '{"title": "B", "company": "", "location": "", "url": "https://ok.example/j/1"}]}')
+        with mock.patch.dict(sys.modules, {"anthropic": sdk}):
+            out = cvgen.jobs_from_email("k", "s", "f", "t", [("B", "https://ok.example/j/1")])
+        self.assertEqual([j["title"] for j in out], ["B"])
+
+
+class AddByLink(unittest.TestCase):
+    PAGE = ('<html><head><title>Careers</title><script type="application/ld+json">{"@context": "https://schema.org", '
+            '"@type": "JobPosting", "title": "Senior Unity Developer", "datePosted": "2026-11-20", '
+            '"hiringOrganization": {"@type": "Organization", "name": "Kolibri Games", "logo": "https://cdn.example/k.png"}, '
+            '"jobLocation": {"@type": "Place", "address": {"addressLocality": "Berlin", "addressCountry": "DE"}}, '
+            '"jobLocationType": "TELECOMMUTE", "description": "&lt;p&gt;Build idle games in Unity&lt;/p&gt;"}</script></head></html>')
+
+    def test_structured_data_and_no_duplicates(self):
+        from unittest import mock
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs WHERE source='manual'")
+        with mock.patch.object(app, "fetch", lambda u, **k: self.PAGE), mock.patch.object(app, "fetch_logos", lambda: None):
+            jid, msg = app.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
+            again, msg2 = app.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
+        with app.db() as con:
+            r = dict(con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
+            logo = con.execute("SELECT url FROM company_logos WHERE ckey='kolibrigames'").fetchone()
+        self.assertEqual((r["title"], r["company"], r["location"], r["source"]), ("Senior Unity Developer", "Kolibri Games", "Berlin, DE, Remote", "manual"))
+        self.assertIn("idle games", r["description"])
+        self.assertEqual(r["work_mode"], "remote")
+        self.assertEqual(logo["url"], "https://cdn.example/k.png")
+        self.assertEqual((again, msg2), (jid, "This posting is already in the list."))
+
+    def test_bad_link(self):
+        self.assertEqual(app.add_job_by_link("not a link")[0], None)

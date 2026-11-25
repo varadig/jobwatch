@@ -44,7 +44,10 @@ SOURCES_INFO = {
     "studios": ("Company job boards", ""),
     "rss": ("Own RSS feeds", ""),
     "custom": ("Own sources", ""),
+    "mail": ("E-mail alerts", ""),
+    "manual": ("Added by hand", ""),
 }
+FETCHED_SOURCES = [k for k in SOURCES_INFO if k != "manual"]  # "manual" is never fetched, only added from the Jobs page
 UNSUPPORTED = [
     ("HiringCafe", "https://hiringcafe.com/", "Cloudflare blocks automated fetching (403)"),
     ("JobLeads", "https://www.jobleads.com/", "Cloudflare blocks automated fetching (403)"),
@@ -67,7 +70,11 @@ DEFAULT_CONFIG = {
     "email": {"enabled": False, "smtp_host": "smtp.gmail.com", "smtp_port": 587,
               "username": "", "password": "", "to": ""},
     "sources": {"linkedin": True, "meetfrank": True, "4dayweek": True, "flexa": True,
-                "remotive": True, "studios": True, "rss": True, "custom": True},
+                "remotive": True, "studios": True, "rss": True, "custom": True, "mail": False},
+    # job alert e-mails read from a mailbox (IMAP, read-only). Empty username/password: the e-mail (SMTP) login is used.
+    "mail_source": {"imap_host": "imap.gmail.com", "imap_port": 993, "username": "", "password": "",
+                    "folder": "INBOX", "senders": ["jackandjill.ai", "jobalerts-noreply@linkedin.com"], "days": 7,
+                    "use_claude": True},
     "linkedin_searches": [],   # pl. "project manager | Hungary | any"
     "remotive_queries": [],    # pl. ["project manager"]
     "rss_feeds": [],
@@ -135,6 +142,8 @@ def init_db():
           channel TEXT, language TEXT, job_id TEXT, note TEXT, subject TEXT, message TEXT,
           status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT, kind TEXT,
           profile TEXT, role_ref TEXT, role_text TEXT);
+        CREATE TABLE IF NOT EXISTS mail_seen(
+          msgid TEXT PRIMARY KEY, processed_at TEXT, found INTEGER);
         CREATE TABLE IF NOT EXISTS company_logos(
           ckey TEXT PRIMARY KEY, url TEXT, file TEXT, tried TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
@@ -712,6 +721,239 @@ def src_custom(cfg):
     return out
 
 
+# ---------------------------------------------------------------- job alert e-mails (IMAP, read-only)
+MAIL_SKIP_TEXT = re.compile(r"unsubscribe|leiratkoz|preferences|settings|privacy|help|view (it )?in (your )?browser|"
+                            r"see all|show all|manage|terms|sign in|log ?in|download the app|feedback|^here$|^click", re.I)
+MAIL_JOB_URL = re.compile(r"/(jobs?|careers?|positions?|vacanc\w*|openings?|roles?|apply|opportunit\w*|allas\w*)(/|\?|$|-)", re.I)
+
+
+def canonical_job_url(url):
+    """LinkedIn alert links carry tracking parameters; one posting should be one address."""
+    m = re.search(r"linkedin\.com/(?:comm/)?jobs/view/(?:[^/?#]*-)?(\d{6,})", url)
+    return "https://www.linkedin.com/jobs/view/%s/" % m.group(1) if m else url
+
+
+def mail_body(msg):
+    """(plain text, [(link text, url)]) of an e-mail; the HTML part is preferred for the links."""
+    html_part = msg.get_body(preferencelist=("html",))
+    text_part = msg.get_body(preferencelist=("plain",))
+    links, text = [], ""
+    if html_part is not None:
+        h = html_part.get_content()
+        for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", h, re.S | re.I):
+            href = html_attr(m.group(1), "href") or ""
+            if href.startswith("http"):
+                links.append((strip_tags(m.group(2)) or (html_attr(m.group(1), "title") or ""), href))
+        text = strip_tags(h.replace("</tr>", "\n").replace("<br", "\n<br").replace("</p>", "\n"))
+    if text_part is not None and not text:
+        text = text_part.get_content()
+    return text, links
+
+
+def jobs_from_links(links):
+    """Without Claude: links that look like postings, their text as the title."""
+    out, seen = [], set()
+    for t, u in links:
+        t = re.sub(r"\s+", " ", t).strip()
+        u = canonical_job_url(html.unescape(u))
+        if not (6 <= len(t) <= 160) or MAIL_SKIP_TEXT.search(t) or u in seen:
+            continue
+        if not (MAIL_JOB_URL.search(urllib.parse.urlparse(u).path) or "linkedin.com/jobs/view/" in u):
+            continue
+        seen.add(u)
+        out.append({"title": t, "company": "", "location": "", "url": u})
+    return out
+
+
+def mail_login(cfg):
+    """(IMAP host, port, user, password): the alert settings, else the e-mail (SMTP) login."""
+    ms, em = cfg.get("mail_source") or {}, cfg["email"]
+    user = ms.get("username") or em.get("username")
+    pw = ms.get("password") or em.get("password")
+    if not (user and pw):
+        raise RuntimeError("no mailbox login: set the e-mail account in Settings → Notifications, or one for e-mail alerts")
+    return ms.get("imap_host") or "imap.gmail.com", int(ms.get("imap_port") or 993), user, pw
+
+
+def read_alert_mails(cfg, only_new=True, limit=40):
+    """The alert e-mails of the last days from the listed senders, newest first: [(msgid, sender, subject, msg)].
+    The mailbox is opened read-only and messages are fetched with PEEK, so nothing is marked as read."""
+    import email as email_lib
+    import email.policy
+    import imaplib
+    ms = cfg.get("mail_source") or {}
+    senders = [s.strip() for s in ms.get("senders") or [] if s.strip()]
+    if not senders:
+        raise RuntimeError("no senders listed for e-mail alerts")
+    host, port, user, pw = mail_login(cfg)
+    since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - 86400 * int(ms.get("days") or 7)))
+    out = []
+    with imaplib.IMAP4_SSL(host, port, timeout=30) as M:
+        M.login(user, pw)
+        typ, _ = M.select('"%s"' % (ms.get("folder") or "INBOX").replace('"', ""), readonly=True)
+        if typ != "OK":
+            raise RuntimeError("cannot open the mail folder %s" % ms.get("folder"))
+        ids = set()
+        for s in senders:
+            typ, data = M.search(None, "SINCE", since, "FROM", '"%s"' % s.replace('"', ""))
+            if typ == "OK" and data and data[0]:
+                ids.update(data[0].split())
+        with db() as con:
+            done = {r["msgid"] for r in con.execute("SELECT msgid FROM mail_seen")} if only_new else set()
+        for num in sorted(ids, key=int, reverse=True)[:limit * 3]:
+            typ, data = M.fetch(num, "(BODY.PEEK[])")
+            if typ != "OK" or not data or not isinstance(data[0], tuple):
+                continue
+            msg = email_lib.message_from_bytes(data[0][1], policy=email.policy.default)
+            msgid = (msg.get("Message-ID") or "").strip() or hashlib.sha1(data[0][1][:2000]).hexdigest()
+            if msgid in done:
+                continue
+            out.append((msgid, str(msg.get("From", "")), str(msg.get("Subject", "")), msg))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def jobs_from_mail(cfg, sender, subject, msg):
+    """The postings in one alert e-mail: Claude reads it when that is turned on (and a key is set), else the links."""
+    import cvgen
+    text, links = mail_body(msg)
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if (cfg.get("mail_source") or {}).get("use_claude", True) and key:
+        found = cvgen.jobs_from_email(key, subject, sender, text, links)
+        for j in found:
+            j["url"] = canonical_job_url(html.unescape(j.get("url") or ""))
+        return found
+    return jobs_from_links(links)
+
+
+def src_mail(cfg):
+    out, errs = [], []
+    for msgid, sender, subject, msg in read_alert_mails(cfg):
+        try:
+            jobs = jobs_from_mail(cfg, sender, subject, msg)
+        except Exception as ex:
+            errs.append("%s: %s" % (subject[:60], ex))
+            continue  # not marked as done: tried again next time
+        via = re.sub(r".*@", "", re.sub(r"[<>\s]", "", sender.rsplit(" ", 1)[-1]))
+        for j in jobs:
+            url = j.get("url") or ""
+            if not url.startswith("http"):
+                continue
+            out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
+                        "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
+                        "url": url, "posted": parsedate_iso(msg.get("Date")), "description": ""})
+        with db() as con:
+            con.execute("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES(?,?,?)", (msgid, now_iso(), len(jobs)))
+    if errs:
+        log.warning("E-mail alert errors: %s", "; ".join(errs))
+        if not out:
+            raise RuntimeError("; ".join(errs))
+    return out
+
+
+# ---------------------------------------------------------------- a posting added by its link
+def job_from_page(url):
+    """Title, company, location, description (and logo) of any job page: from its JobPosting structured data
+    (schema.org, what Google for Jobs reads) when it has one, else from the page title and text."""
+    m = LINKEDIN_JOB_RE.search(url)
+    if m:
+        j = linkedin_job(m.group(1))
+        return dict(j, url="https://www.linkedin.com/jobs/view/%s/" % m.group(1), ext_id="linkedin-" + m.group(1), logo="", posted="")
+    pg = fetch(url, timeout=25)
+    job = {"url": url, "ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": "", "company": "", "location": "",
+           "description": "", "logo": "", "posted": ""}
+    for blk in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', pg, re.S | re.I):
+        try:
+            data = json.loads(blk.strip())
+        except ValueError:
+            continue
+        nodes = data if isinstance(data, list) else data.get("@graph", [data]) if isinstance(data, dict) else []
+        for n in nodes:
+            if not isinstance(n, dict) or "JobPosting" not in str(n.get("@type")):
+                continue
+            org = n.get("hiringOrganization") or {}
+            org = org if isinstance(org, dict) else {"name": str(org)}
+            locs = n.get("jobLocation") or []
+            locs = locs if isinstance(locs, list) else [locs]
+            place = []
+            for L in locs:
+                a = (L or {}).get("address") or {} if isinstance(L, dict) else {}
+                a = a if isinstance(a, dict) else {}
+                place.append(", ".join(x for x in (a.get("addressLocality"), a.get("addressCountry") if isinstance(a.get("addressCountry"), str)
+                                                    else (a.get("addressCountry") or {}).get("name")) if x))
+            remote = "Remote" if str(n.get("jobLocationType", "")).upper() == "TELECOMMUTE" else ""
+            logo = org.get("logo")
+            job.update(title=strip_tags(n.get("title") or ""), company=org.get("name") or "",
+                       location=", ".join(x for x in place + [remote] if x),
+                       description=strip_tags(html.unescape(n.get("description") or ""))[:8000],
+                       logo=(logo.get("url") if isinstance(logo, dict) else logo) or "", posted=n.get("datePosted") or "")
+            return job
+    meta = lambda prop: (lambda mm: html.unescape(mm.group(1)).strip() if mm else "")(
+        re.search(r'<meta[^>]+(?:property|name)="%s"[^>]+content="([^"]*)"' % prop, pg, re.I))
+    t = re.search(r"<title[^>]*>(.*?)</title>", pg, re.S | re.I)
+    job.update(title=meta("og:title") or (strip_tags(t.group(1)) if t else ""), company=meta("og:site_name"),
+               description=strip_tags(pg)[:8000])
+    return job
+
+
+def add_job_by_link(url):
+    """Adds the posting behind url to the list (source "manual"). Returns (job id, message)."""
+    url = (url or "").strip()
+    if not re.match(r"^https?://", url):
+        return None, "Paste the full link of the posting (https://…)."
+    m = LINKEDIN_JOB_RE.search(url)
+    with db() as con:
+        for jid in (["linkedin:" + m.group(1), "manual:linkedin-" + m.group(1)] if m else []) + \
+                   ["manual:" + hashlib.sha1(url.encode()).hexdigest()[:16]]:
+            if con.execute("SELECT 1 FROM jobs WHERE id=?", (jid,)).fetchone():
+                return jid, "This posting is already in the list."
+    try:
+        it = job_from_page(url)
+    except Exception as ex:
+        return None, "Could not read the page: %s" % ex
+    if not it["title"]:
+        return None, "The page has no readable posting (it may need a login). Copy its text into the CV page instead."
+    with CFG_LOCK:
+        cfg = load_config()
+    sc, hits = score_job(cfg, it)
+    wm = classify_mode(it["title"], it["location"], it["description"])
+    jid, ts = "manual:" + it["ext_id"], now_iso()
+    with db() as con:
+        remember_logo(con, it["company"], it.get("logo"))
+        con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
+                    "first_seen,last_seen,status,notified,work_mode) VALUES(?,'manual',?,?,?,?,?,?,?,?,?,?,?,'new',1,?)",
+                    (jid, it["title"][:200], it["company"][:120], it["location"][:200], it["url"], it["posted"], it["description"],
+                     sc, ", ".join(hits), norm(it["title"]) + "|" + (norm(it["company"]) or it["url"]), ts, ts, wm))
+    threading.Thread(target=fetch_logos, daemon=True).start()
+    return jid, "Added: %s (%d points)." % (it["title"][:80], sc)
+
+
+def parsedate_iso(value):
+    try:
+        return parsedate_to_datetime(str(value)).isoformat()
+    except Exception:
+        return ""
+
+
+def test_mail_source(cfg):
+    """Settings → "test": reads the newest alert e-mail (even if already processed) and shows what it finds."""
+    try:
+        mails = read_alert_mails(cfg, only_new=False, limit=1)
+    except Exception as ex:
+        return "E-mail alerts: ERROR %s" % ex
+    if not mails:
+        return "E-mail alerts: mailbox OK, but no e-mail from the listed senders in the last %s days." % (
+            (cfg.get("mail_source") or {}).get("days", 7))
+    _, sender, subject, msg = mails[0]
+    try:
+        jobs = jobs_from_mail(cfg, sender, subject, msg)
+    except Exception as ex:
+        return "E-mail alerts: mailbox OK, newest e-mail “%s”, but reading it failed: %s" % (subject[:80], ex)
+    sample = "; ".join("%s (%s)" % (j["title"], j.get("company") or "-") for j in jobs[:3])
+    return "E-mail alerts: mailbox OK. Newest e-mail “%s”: %d posting(s)%s" % (subject[:80], len(jobs), (" – e.g. " + sample) if sample else "")
+
+
 def linkedin_detail(jid):
     """Full posting text from the public jobPosting endpoint (None if it failed)."""
     page = fetch("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/%s" % jid)
@@ -761,7 +1003,7 @@ def enrich_linkedin(con, items, limit=60):
 
 SOURCE_FUNCS = {"linkedin": src_linkedin, "meetfrank": src_meetfrank, "4dayweek": src_4dayweek,
                 "flexa": src_flexa, "remotive": src_remotive, "studios": src_studios,
-                "rss": src_rss, "custom": src_custom}
+                "rss": src_rss, "custom": src_custom, "mail": lambda cfg: src_mail(cfg)}
 MIN_INTERVAL = {"remotive": 360,  # perc; a Remotive API max ~4 hivast ker naponta
                 "custom": 120}    # own sources (e.g. munka.hu): gentle, so the site does not block us
 
@@ -1143,6 +1385,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .ui-btns{display:flex;gap:6px;flex-wrap:wrap}.ui-empty{color:var(--muted);text-align:center;padding:28px 18px}
 .ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
 .ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
+.ui-addjob{margin-top:12px;width:100%;max-width:620px}.ui-addjob input{flex:1}
 .job-head{display:flex;gap:12px;align-items:center}.job-head>div{min-width:0}
 .logo{flex:0 0 auto;border-radius:9px;object-fit:contain;background:#fff;border:1px solid var(--line)}
 .logo.ph{display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;
@@ -1567,9 +1810,12 @@ def jobs_page(q):
                      'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
     busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
     top = ('<div class="ui-head"><h1>Jobs</h1><p>Postings from your sources, scored against your CV. '
-           'Click a title to open the posting; “CV + Resume” writes documents tailored to it.</p></div>')
+           'Click a title to open the posting; “CV + Resume” writes documents tailored to it.</p>'
+           '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
+           'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
+           '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
     return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)),
-                refresh=3 if busy else 0)
+                q.get("msg", ""), refresh=3 if busy else 0)
 
 
 def run_selection(f):
@@ -1581,7 +1827,7 @@ def run_selection(f):
         return {one}, set()
     if f.get("all") or "selected" not in f:
         return None, set()
-    names = {k for k in SOURCES_INFO if ("run_" + k) in f}
+    names = {k for k in FETCHED_SOURCES if ("run_" + k) in f}
     cids = {k[len("run_cs_"):] for k in f if k.startswith("run_cs_")}
     if cids:
         names.discard("custom")  # only the ticked own sources, not all of them
@@ -1596,7 +1842,8 @@ def sources_page(flash=""):
         cfg = load_config()
     busy = bool(STATE["running"])
     rows = []
-    for k, (name, url) in SOURCES_INFO.items():
+    for k in FETCHED_SOURCES:
+        name, url = SOURCES_INFO[k]
         s = st.get(k)
         on = cfg["sources"].get(k)
         if not on:
@@ -1761,7 +2008,7 @@ def ui_sec(anchor, title, desc, inner, foot=""):
         ('<div class="ui-foot">%s</div>' % foot) if foot else "")
 
 
-SETTINGS_NAV = (("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("scoring", "Scoring"),
+SETTINGS_NAV = (("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("mail", "E-mail alerts"), ("scoring", "Scoring"),
                 ("claude", "Claude API"), ("general", "General"), ("danger", "Maintenance"))
 
 
@@ -1772,7 +2019,7 @@ def settings_page(flash=""):
     chk = lambda b: " checked" if b else ""
     sub = "%s/%s" % (n["server"].rstrip("/"), n["topic"])
     src_boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
-        k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items())
+        k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items() if k in FETCHED_SOURCES)
     modes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="nwm_%s"%s> %s</label>' % (
         k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), e(v)) for k, v in WORK_MODES.items())
     filt = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
@@ -1824,6 +2071,31 @@ def settings_page(flash=""):
 
     own = ui_sec("own", "Own sources", "Any other job site, with a login if it needs one.",
                  custom_sources_card(cfg), test("custom", "Save and test own sources"))
+
+    ms = cfg.get("mail_source") or {}
+    mail = ui_sec("mail", "E-mail alerts", "For sites that only send their jobs by e-mail or need a login you cannot "
+                  "automate (Jack &amp; Jill, LinkedIn job alerts, Indeed, Glassdoor…): jobwatch reads those e-mails from your "
+                  "mailbox. It only reads: the mailbox is opened read-only, nothing is marked as read, moved or deleted. "
+                  "Turn the source on under Job search → Sources.",
+        '<div class="ui-grid">'
+        + ta("mail_senders", "Senders to read", "\n".join(ms.get("senders") or []), 4,
+             "One per line: an address or just the domain, e.g. <code>jackandjill.ai</code> or "
+             "<code>jobalerts-noreply@linkedin.com</code>.")
+        + ui_field("mail_days", "Look back (days)", ms.get("days", 7), "number", "Only e-mails from the last days.", ' min="1" max="60"')
+        + '<div><label>Reading the e-mails</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
+          'class="toggle toggle-sm toggle-primary" name="mail_use_claude"%s> Claude reads them</label><span class="help">More accurate '
+          '(title, company, location) in any format; about 1 cent per e-mail, every e-mail once. Off: only the links that look like '
+          'postings, free.</span></div>' % chk(ms.get("use_claude", True))
+        + '<div class="wide"><span class="help">Mailbox: by default the e-mail account under Notifications (for Gmail the same app '
+          'password works; IMAP is on by default). Fill these in only for another mailbox.</span></div>'
+        + ui_field("mail_imap_host", "IMAP server", ms.get("imap_host", "imap.gmail.com"))
+        + ui_field("mail_imap_port", "Port", ms.get("imap_port", 993), "number")
+        + ui_field("mail_folder", "Folder", ms.get("folder", "INBOX"), help_="For Gmail labels: the label name.")
+        + ui_field("mail_user", "User (empty = the e-mail account)", ms.get("username", ""), "email")
+        + '<div><label for="mail_pass">Password %s</label><input class="input" id="mail_pass" type="password" name="mail_pass" '
+          'placeholder="Empty = the e-mail account\'s" autocomplete="new-password"></div></div>' % set_badge(ms.get("password")),
+        test("mail", "Save and test e-mail alerts"))
+    own += mail
 
     scoring = ui_sec("scoring", "Scoring", "How well a posting fits your CV. One rule per line: <code>term = points</code>. "
                      "Title terms count the most; negative terms apply to the title only. Saving re-scores every posting.",
@@ -1885,11 +2157,21 @@ def save_settings(f):
         cfg["notify_work_modes"] = [k for k in WORK_MODES if ("nwm_" + k) in f]
         cfg["default_work_filter"] = g("default_work_filter", "remote_unknown")
         cfg["public_url"] = g("public_url").strip()
-        cfg["sources"] = {k: ("src_" + k) in f for k in SOURCES_INFO}
+        cfg["sources"] = {k: ("src_" + k) in f for k in FETCHED_SOURCES}
         cfg["linkedin_searches"] = [l.strip() for l in g("linkedin_searches").splitlines() if l.strip()]
         cfg["studios"] = [l.strip() for l in g("studios").splitlines() if l.strip().count("|") >= 1]
         cfg["rss_feeds"] = [l.strip() for l in g("rss_feeds").splitlines() if l.strip().startswith("http")]
         cfg["custom_sources"] = parse_custom_sources(f, cfg.get("custom_sources"))
+        if "mail_senders" in f:
+            ms = cfg.setdefault("mail_source", {})
+            ms.update(senders=[l.strip() for l in g("mail_senders").splitlines() if l.strip()],
+                      days=max(1, min(60, int(g("mail_days", "7") or 7))), use_claude="mail_use_claude" in f,
+                      imap_host=g("mail_imap_host").strip() or "imap.gmail.com", imap_port=int(g("mail_imap_port", "993") or 993),
+                      folder=g("mail_folder").strip() or "INBOX", username=g("mail_user").strip())
+            if g("mail_pass"):
+                ms["password"] = g("mail_pass").replace(" ", "")
+            if not ms["username"]:
+                ms["password"] = ""  # no own login: the e-mail account's is used
         for k in ("title_keywords", "body_keywords", "negative_keywords", "location_keywords"):
             cfg[k] = parse_kv(g(k))
         save_config(cfg)
@@ -3000,6 +3282,11 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/outreach/(\d+)$", u.path)
             if m:
                 return self.redirect("/outreach?msg=" + urllib.parse.quote(outreach_action(int(m.group(1)), f)))
+            if u.path == "/add-job":
+                jid, msg = add_job_by_link(f.get("url", ""))
+                if jid:
+                    return self.redirect("/cv/%s?msg=%s" % (urllib.parse.quote(jid, safe=""), urllib.parse.quote(msg)))
+                return self.redirect("/?msg=" + urllib.parse.quote(msg))
             if u.path == "/mark-all-seen":
                 with db() as con:
                     con.execute("UPDATE jobs SET status='seen' WHERE status='new'")
@@ -3014,6 +3301,8 @@ class Handler(BaseHTTPRequestHandler):
                     cfg = load_config()
                 if f.get("what") == "custom":
                     return self.redirect("/settings?msg=" + urllib.parse.quote(test_custom_sources(cfg)[:1500]))
+                if f.get("what") == "mail":
+                    return self.redirect("/settings?msg=" + urllib.parse.quote(test_mail_source(cfg)[:1500]) + "#mail")
                 try:
                     if f.get("what") == "email":
                         send_email(cfg, "jobwatch test", "E-mail notifications work.",

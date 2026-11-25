@@ -210,6 +210,70 @@ def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_me
     return data
 
 
+# ---------------------------------------------------------------- job alert e-mails
+MAIL_JOBS_SCHEMA = {
+    "type": "object",
+    "properties": {"jobs": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"title": _STR, "company": _STR, "location": _STR, "url": _STR},
+        "required": ["title", "company", "location", "url"], "additionalProperties": False}}},
+    "required": ["jobs"],
+    "additionalProperties": False,
+}
+MAIL_JOBS_SYSTEM = """You read one job alert e-mail (from a job board, a recruiting platform or an AI job agent) and list the job postings it recommends.
+
+Rules:
+- Only real job postings the e-mail recommends. Not newsletters, tips, the sender's own careers page, "see all jobs" links, settings, surveys or ads.
+- title: the job title as written. company: the hiring company ("" if not given). location: as written, including remote/hybrid if stated ("" if not given).
+- url: the link that opens that posting, copied exactly from the <links> list (the link whose text or position belongs to that posting). If the e-mail has no link for a posting, use "".
+- Return an empty list if the e-mail recommends no postings."""
+
+
+def jobs_from_email(api_key, subject, sender, text, links):
+    """Claude API call: the postings in a job alert e-mail. links: [(text, url)]. Returns [{title, company, location, url}]."""
+    import anthropic
+
+    link_lines = "\n".join("[%d] %s -> %s" % (i, t[:120], u) for i, (t, u) in enumerate(links[:150]))
+    user = "<email>\nFrom: %s\nSubject: %s\n\n%s\n</email>\n\n<links>\n%s\n</links>" % (sender, subject, text[:15000], link_lines)
+    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
+    try:
+        resp = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": MAIL_JOBS_SCHEMA}},
+            system=MAIL_JOBS_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+    except anthropic.AuthenticationError:
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
+    except anthropic.PermissionDeniedError:
+        raise CVError("The API key has no permission for this model.")
+    except anthropic.RateLimitError:
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
+    except anthropic.BadRequestError as e:
+        raise CVError("Claude API bad request: %s" % e.message)
+    except anthropic.APIStatusError as e:
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
+    except anthropic.APIConnectionError:
+        raise CVError("Cannot reach the Claude API (network error).")
+    if resp.stop_reason == "refusal":
+        raise CVError("The model refused the request.")
+    if resp.stop_reason == "max_tokens":
+        raise CVError("The response was too long.")
+    try:
+        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
+    except ValueError:
+        raise CVError("The model's response is not valid JSON.")
+    known = {u for _, u in links}
+    out = []
+    for j in data.get("jobs", []):
+        if j.get("title") and (not j.get("url") or j["url"] in known):  # never a link the e-mail does not have
+            out.append(j)
+    return out
+
+
 def tailor(api_key, profile, job, description):
     """Claude API call: returns the tailored CV data (dict, same structure as the profile)."""
     import anthropic
