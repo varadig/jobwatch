@@ -994,6 +994,15 @@ def src_mail(cfg):
     return out
 
 
+def reset_job_cache():
+    """Deletes the found postings and the source status, and forgets which alert e-mails were read, so the
+    next refresh reads those e-mails again (otherwise their postings would not come back)."""
+    with db() as con:
+        con.execute("DELETE FROM jobs")
+        con.execute("DELETE FROM source_state")
+        con.execute("DELETE FROM mail_seen")
+
+
 def mark_mails_done(done):
     with db() as con:
         con.executemany("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES(?,?,?)",
@@ -3556,9 +3565,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/profile/import":
                 return self.profile_import_text(f.get("cv_text", ""))
             if u.path == "/reset-jobs":
-                with db() as con:
-                    con.execute("DELETE FROM jobs")
-                    con.execute("DELETE FROM source_state")
+                reset_job_cache()
                 return self.redirect("/settings?msg=" + urllib.parse.quote("Job cache cleared. Press Refresh to fetch again."))
             if u.path == "/run":
                 only, cids = run_selection(f)

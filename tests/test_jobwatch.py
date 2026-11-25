@@ -1049,3 +1049,16 @@ class UnknownReasons(unittest.TestCase):
         self.assertEqual(got["linkedin:1"], (False, None))              # waits for its text
         self.assertEqual(got["linkedin:2"], (True, "?li_hidden|claude"))
         self.assertEqual(got["flexa:3"], (True, "?board_none|"))
+
+
+class ResetForgetsMails(unittest.TestCase):
+    def test_reset_also_forgets_read_alert_emails(self):
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES('<a@b>', '2026-11-25', 3)")
+            con.execute("INSERT OR REPLACE INTO jobs(id,source,title,url,score,status,first_seen) VALUES('mail:z','mail','T','u',5,'new','x')")
+        app.reset_job_cache()
+        with app.db() as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM mail_seen").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
