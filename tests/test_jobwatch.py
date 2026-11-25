@@ -532,3 +532,73 @@ class LinkedInPreview(unittest.TestCase):
         r = self.preview(page="x", url="http://192.168.68.1/admin")
         self.assertFalse(r["ok"])
         self.assertFalse(hasattr(self, "fetched"))
+
+
+class OutreachSpecific(unittest.TestCase):
+    def test_profile_summary_drops_linkedin_boilerplate(self):
+        from unittest import mock
+        pg = ('<meta property="og:title" content="Tom Baker - Games Recruiter | LinkedIn">'
+              '<meta property="og:description" content="Games Recruiter · Hiring Unity devs for mobile studios in the '
+              'Nordics. · Experience: Amiqus · Location: London · 500+ connections on LinkedIn. View Tom Baker’s profile on LinkedIn">')
+        with mock.patch.object(app, "fetch", lambda u, **k: pg):
+            r = app.linkedin_preview("https://www.linkedin.com/in/tom-baker/")
+        self.assertEqual(r["about"], "Games Recruiter · Hiring Unity devs for mobile studios in the Nordics. · "
+                                     "Experience: Amiqus · Location: London")
+
+    def test_job_links_are_recognised(self):
+        for u in ("https://www.linkedin.com/jobs/view/4494793948/",
+                  "https://hu.linkedin.com/jobs/view/senior-unity-developer-at-kolibri-4494793948?trk=x",
+                  "https://www.linkedin.com/jobs/collections/recommended/?currentJobId=4494793948"):
+            self.assertEqual(app.LINKEDIN_JOB_RE.search(u).group(1), "4494793948", u)
+
+    def test_role_from_linkedin_job_and_plain_text(self):
+        from unittest import mock
+        app.init_db()
+        page = ('<h2 class="top-card-layout__title topcard__title">Senior Unity Developer</h2>'
+                '<a class="topcard__org-name-link" href="#">\n Kolibri Games \n</a>'
+                '<span class="topcard__flavor topcard__flavor--bullet">Berlin</span>'
+                '<div class="show-more-less-html__markup">Build our idle games in Unity.</div>')
+        with mock.patch.object(app, "fetch", lambda u, **k: page):
+            t = app.resolve_role("https://www.linkedin.com/jobs/view/4494793948/")
+        self.assertIn("Title: Senior Unity Developer\nCompany: Kolibri Games\nLocation: Berlin", t)
+        self.assertIn("idle games", t)
+        self.assertEqual(app.resolve_role("Senior Unity dev, mobile"), "Senior Unity dev, mobile")
+
+    def test_list_items_carry_profile_and_role(self):
+        r = app.recruiters_from_form({"recruiters_json": json.dumps(
+            [{"name": "Tom", "about": "Hiring Unity devs", "role": "https://www.linkedin.com/jobs/view/1234567/"}])})
+        self.assertEqual((r[0]["profile"], r[0]["role_ref"]), ("Hiring Unity devs", "https://www.linkedin.com/jobs/view/1234567/"))
+
+    def test_prompt_uses_the_recruiters_own_role_over_the_general_posting(self):
+        import cvgen
+        from unittest import mock
+        cap = {}
+        sdk = Outreach().fake_sdk(cap)
+        with mock.patch.dict(sys.modules, {"anthropic": sdk}):
+            cvgen.outreach_message("k", {"name": "G"}, {"name": "Tom", "profile": "Hiring for Nordic mobile studios",
+                                                        "role_text": "Title: Senior Unity Developer\nCompany: Kolibri"},
+                                   {"title": "General posting", "company": "Other"})
+        user = cap["messages"][0]["content"]
+        self.assertIn("Hiring for Nordic mobile studios", user)
+        self.assertIn("Kolibri", user)
+        self.assertNotIn("General posting", user)
+
+    def test_role_from_the_database_needs_no_request_and_429_is_retried(self):
+        import urllib.error
+        from unittest import mock
+        app.init_db()
+        with app.db() as con:
+            con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,location,url,description,score,status) "
+                        "VALUES('linkedin:7777777','linkedin','Unity Dev','Acme','Remote','u','Make games',9,'new')")
+        calls = []
+
+        def busy(u, **k):
+            calls.append(u)
+            raise urllib.error.HTTPError(u, 429, "Too Many", {}, None)
+        with mock.patch.object(app, "fetch", busy):
+            t = app.resolve_role("https://www.linkedin.com/jobs/view/7777777/")
+            self.assertIn("Company: Acme", t)
+            self.assertEqual(calls, [])
+            t = app.resolve_role("https://www.linkedin.com/jobs/view/8888888/", waits=(0, 0))
+        self.assertIn(app.ROLE_UNREAD, t)
+        self.assertEqual(len(calls), 3)  # first try + 2 retries

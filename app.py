@@ -132,7 +132,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS outreach(
           id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, name TEXT, title TEXT, contact TEXT,
           channel TEXT, language TEXT, job_id TEXT, note TEXT, subject TEXT, message TEXT,
-          status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT, kind TEXT);
+          status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT, kind TEXT,
+          profile TEXT, role_ref TEXT, role_text TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -154,8 +155,9 @@ def migrate_db():
         if ccols and "doc_dir" not in ccols:
             con.execute("ALTER TABLE cvs ADD COLUMN doc_dir TEXT")
         ocols = [r["name"] for r in con.execute("PRAGMA table_info(outreach)")]
-        if ocols and "kind" not in ocols:
-            con.execute("ALTER TABLE outreach ADD COLUMN kind TEXT")
+        for col in ("kind", "profile", "role_ref", "role_text"):
+            if ocols and col not in ocols:
+                con.execute("ALTER TABLE outreach ADD COLUMN %s TEXT" % col)
         cols = [r["name"] for r in con.execute("PRAGMA table_info(jobs)")]
         if "work_mode" not in cols:
             con.execute("ALTER TABLE jobs ADD COLUMN work_mode TEXT DEFAULT 'unknown'")
@@ -1782,6 +1784,10 @@ def outreach_generate(oid):
         with db() as con:
             r = dict(con.execute("SELECT * FROM outreach WHERE id=?", (oid,)).fetchone())
             job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r["job_id"] else None
+        if r.get("role_ref") and (not r.get("role_text") or ROLE_UNREAD in r["role_text"]):  # a rewrite reuses it
+            r["role_text"] = resolve_role(r["role_ref"])
+            with db() as con:
+                con.execute("UPDATE outreach SET role_text=? WHERE id=?", (r["role_text"], oid))
         data = cvgen.outreach_message(key, load_profile(), r, dict(job) if job else None,
                                       r["channel"], r["language"], r["note"] or "")
         with db() as con:
@@ -1836,6 +1842,8 @@ LinkedIn does not allow sending messages from other programs, so for LinkedIn yo
 <div style="flex:2 1 320px"><label>LinkedIn profile link (name and title fill in by themselves) or e-mail</label><input id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)" onpaste="setTimeout(rlookup, 0)" onchange="rlookup()" style="width:100%%"></div>
 <div><label>Name *</label><input id="r_name" placeholder="Anna Kovács" onkeydown="renter(event)"></div>
 <div><label>Title @ company</label><input id="r_title" placeholder="Talent Acquisition @ Supercell" onkeydown="renter(event)"></div>
+<div style="flex:2 1 320px"><label>Role they hire for (optional): LinkedIn job link, other job page, or a few words</label><input id="r_role" placeholder="https://www.linkedin.com/jobs/view/… or “Senior Unity Developer, mobile, Helsinki”" onkeydown="renter(event)" style="width:100%%"></div>
+<input type="hidden" id="r_about">
 <div><label>Recruiter works</label><select id="r_kind"><option value="">automatic (from the title)</option><option value="inhouse">in-house: hires for their own company</option><option value="agency">agency / freelance: hires for clients</option></select></div>
 <div style="align-self:end"><button type="button" onclick="radd()">➕ Add</button></div></div>
 <p class="muted" id="rhint"></p>
@@ -1859,7 +1867,8 @@ function rdraw() {
     var li = document.createElement('li'); li.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #8883';
     var t = document.createElement('span'); t.style.flex = '1';
     t.textContent = r.name + (r.title ? ' · ' + r.title : '') + (r.contact ? ' · ' + r.contact : '') +
-      (r.kind ? (r.kind === 'agency' ? ' · agency' : ' · in-house') : '');
+      (r.kind ? (r.kind === 'agency' ? ' · agency' : ' · in-house') : '') +
+      (r.role ? ' · 🎯 ' + (r.role.length > 60 ? r.role.slice(0, 60) + '…' : r.role) : '') + (r.about ? ' · ℹ️ profile read' : '');
     var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm'; b.textContent = '✕';
     b.title = 'Remove'; b.onclick = function () { RL.splice(i, 1); rdraw(); };
     li.appendChild(t); li.appendChild(b); ul.appendChild(li);
@@ -1878,6 +1887,7 @@ function rlookup() {  // LinkedIn link -> name + title from the profile's public
     if (rval('r_contact') === url) document.getElementById('r_contact').value = d.url;
     if (!rval('r_name')) document.getElementById('r_name').value = d.name || '';
     if (!rval('r_title')) document.getElementById('r_title').value = d.title || '';
+    document.getElementById('r_about').value = d.about || '';
     hint.textContent = d.from === 'profile' ? '✅ Filled in from the profile. Check it, then press Add.'
       : 'The profile is not public, so only the name was guessed from the link: check it and add the title by hand.';
   }).catch(function () { hint.textContent = 'Could not read the link: fill in the name by hand.'; })
@@ -1890,8 +1900,9 @@ function radd() {
     return false;
   }
   if (!rval('r_name')) { document.getElementById('r_name').focus(); return false; }
-  RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value});
-  ['r_name', 'r_title', 'r_contact', 'r_kind'].forEach(function (id) { document.getElementById(id).value = ''; });
+  RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value,
+           role: rval('r_role'), about: rval('r_about')});
+  ['r_name', 'r_title', 'r_contact', 'r_kind', 'r_role', 'r_about'].forEach(function (id) { document.getElementById(id).value = ''; });
   rdraw(); document.getElementById('r_name').focus(); return true;
 }
 function renter(ev) { if (ev.key === 'Enter') { ev.preventDefault(); radd(); } }
@@ -1911,6 +1922,11 @@ rdraw();
         head = '<div class="jt"><b>%s</b>%s%s</div><div class="chips"><span class="chip">%s</span>%s<span class="chip">%s</span></div>' % (
             e(r["name"]), (" · " + e(r["title"])) if r["title"] else "",
             (' <span class="muted">— via %s (send the message to them)</span>' % e(r["via"])) if r["via"] else "", e(label),
+            (('<span class="chip">🎯 %s</span>' % e(re.sub(r"^Title: |\n.*", "", r["role_text"] or r["role_ref"], flags=re.S)[:80]))
+             if ROLE_UNREAD not in (r["role_text"] or "") else
+             '<span class="chip" style="color:#d33" title="LinkedIn limits requests right now. Paste the posting text '
+             'into the role field instead and write the message again.">⚠️ the posting could not be read: the message is not tailored to it</span>')
+            if r["role_ref"] else
             ('<span class="chip">📌 %s – %s</span>' % (e(r["job_title"]), e(r["job_company"] or "?"))) if r["job_title"] else "",
             e(status))
         if r["status"] == "running":
@@ -2006,7 +2022,72 @@ def linkedin_preview(url):
         return guess  # login wall: the profile is not public
     title = re.sub(r"\s*\|\s*LinkedIn\s*$", "", title)
     name, _, headline = title.partition(" - ")
-    return {"ok": True, "url": clean, "name": name.strip() or guess["name"], "title": headline.strip(), "from": "profile"}
+    d = re.search(r'<meta[^>]+(?:property="og:description"|name="description")[^>]+content="([^"]*)"', pg)
+    # "headline · about text · Experience: X · Education: Y · Location: Z · 500 connections … View … profile …"
+    about = re.split(r"\s·\s*\d[\d,+]*\s+(?:connections|followers)|View [^·]{0,80}profile on LinkedIn",
+                     html.unescape(d.group(1)) if d else "")[0].strip(" ·")
+    return {"ok": True, "url": clean, "name": name.strip() or guess["name"], "title": headline.strip(),
+            "about": about[:1500], "from": "profile"}
+
+
+LINKEDIN_JOB_RE = re.compile(r"linkedin\.com/.*?(?:jobs/view/(?:[^/?#]*?-)?|currentJobId=)(\d{6,})", re.I)
+
+
+def linkedin_job(job_id):
+    """Title, company, location and text of a LinkedIn posting from its public page."""
+    pg = fetch("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/%s" % job_id, timeout=20)
+    grab = lambda rx: (lambda m: strip_tags(m.group(1)) if m else "")(re.search(rx, pg, re.S))
+    return {"title": grab(r'top-card-layout__title[^>]*>(.*?)</h'),
+            "company": grab(r'topcard__org-name-link[^>]*>(.*?)</a>'),
+            "location": grab(r'topcard__flavor topcard__flavor--bullet[^>]*>(.*?)</span>'),
+            "description": linkedin_detail(job_id) or ""}
+
+
+ROLE_UNREAD = "(the page could not be read)"
+
+
+def resolve_role(ref, waits=(20, 60)):
+    """What the recruiter is hiring for, as text for Claude: a LinkedIn job link, another job page, or plain text.
+    A LinkedIn posting already in the database is used from there; on 429 (rate limit) it waits and retries."""
+    ref = (ref or "").strip()
+    if not ref:
+        return ""
+    m = LINKEDIN_JOB_RE.search(ref)
+    if m:
+        with db() as con:
+            row = con.execute("SELECT title, company, location, description FROM jobs WHERE id=?",
+                              ("linkedin:" + m.group(1),)).fetchone()
+        if row and row["description"]:
+            return "Title: %s\nCompany: %s\nLocation: %s\nURL: %s\n\n%s" % (
+                row["title"], row["company"], row["location"] or "-", ref, row["description"][:6000])
+    for wait in (0,) + tuple(waits):
+        time.sleep(wait)
+        try:
+            return _read_role_page(ref, m)
+        except urllib.error.HTTPError as ex:
+            if ex.code != 429:
+                log.warning("Role page %s: %s", ref, ex)
+                break
+            log.warning("Role page %s: 429, retrying", ref)
+        except Exception as ex:
+            log.warning("Role page %s: %s", ref, ex)
+            break
+    return "URL: %s %s" % (ref, ROLE_UNREAD)
+
+
+def _read_role_page(ref, m):
+    """One attempt; raises on network / HTTP errors. Plain text (no link) is returned as it is."""
+    if m:
+        j = linkedin_job(m.group(1))
+        if not j["title"] and not j["description"]:
+            raise RuntimeError("no posting on the page")
+        return "Title: %s\nCompany: %s\nLocation: %s\nURL: %s\n\n%s" % (
+            j["title"], j["company"], j["location"] or "-", ref, j["description"][:6000])
+    if re.match(r"^https?://", ref):
+        pg = fetch(ref, timeout=20)
+        t = re.search(r"<title>(.*?)</title>", pg, re.S)
+        return "Page title: %s\nURL: %s\n\n%s" % (strip_tags(t.group(1)) if t else "", ref, strip_tags(pg)[:6000])
+    return ref[:3000]
 
 
 def recruiters_from_form(f):
@@ -2020,7 +2101,9 @@ def recruiters_from_form(f):
         if isinstance(it, dict) and str(it.get("name") or "").strip():
             out.append({"name": str(it["name"]).strip()[:120], "title": str(it.get("title") or "").strip()[:200],
                         "contact": str(it.get("contact") or "").strip()[:300],
-                        "kind": it.get("kind") if it.get("kind") in ("inhouse", "agency") else ""})
+                        "kind": it.get("kind") if it.get("kind") in ("inhouse", "agency") else "",
+                        "profile": str(it.get("about") or "").strip()[:1500],
+                        "role_ref": str(it.get("role") or "").strip()[:3000]})
     return out + parse_recruiters(f.get("recruiters", ""))
 
 
@@ -2037,10 +2120,11 @@ def outreach_create(f):
         for rc in recs[:20]:
             via = f.get("via", "").strip()[:300] if channel == "linkedin_intro" else ""
             kind = rc.get("kind") or (f.get("kind") if f.get("kind") in ("inhouse", "agency") else "")
-            cur = con.execute("INSERT INTO outreach(created,name,title,contact,channel,language,job_id,note,status,via,kind) "
-                              "VALUES(?,?,?,?,?,?,?,?,'running',?,?)",
+            cur = con.execute("INSERT INTO outreach(created,name,title,contact,channel,language,job_id,note,status,via,kind,"
+                              "profile,role_ref) VALUES(?,?,?,?,?,?,?,?,'running',?,?,?,?)",
                               (now_iso(), rc["name"], rc["title"], rc["contact"], channel,
-                               f.get("language", "auto"), f.get("job_id") or None, f.get("note", "").strip()[:500], via, kind))
+                               f.get("language", "auto"), f.get("job_id") or None, f.get("note", "").strip()[:500], via, kind,
+                               rc.get("profile", ""), rc.get("role_ref", "")))
             ids.append(cur.lastrowid)
     for oid in ids:
         threading.Thread(target=outreach_generate, args=(oid,), daemon=True).start()

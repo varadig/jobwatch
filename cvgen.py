@@ -130,7 +130,10 @@ OUTREACH_SYSTEM = """You write a short first message from a job candidate to a r
 
 Ground rules:
 - Use only facts from the candidate profile. Never invent experience, titles, dates, products, metrics or skills.
-- Pick the one or two facts that matter most for the recruiter's company or the given role, and say them concretely.
+- Make every message specific to this recruiter; it must not read like a template sent to many people. Use what you know about them: the role they hire for (its title, company, product, engine, platform, seniority, team setup), their focus from the profile (e.g. games, mobile, Unity, a region, a studio), their company. Mention one concrete thing about it in the opening, in your own words, without copying their headline.
+- Then connect it to the candidate: pick the one or two facts from the profile that match that role or focus best (e.g. live mobile games for a mobile studio, UI architecture for a UI-heavy role, remote teamwork for a remote team), and say why they fit, concretely. Different recruiters should get different facts when their focus differs.
+- If the role's requirements include something the candidate lacks, do not claim it; simply lead with what does match.
+- If you know nothing beyond the name and title, keep it short and do not pad it with generic statements.
 - Tone: courteous and professional, a little formal but still human, the way one writes to a professional one has not met. Open with a polite greeting by name ("Dear Anna," or "Hello Anna," in English; "Kedves Anna!" in Hungarian; "Sehr geehrte Frau …," or "Hallo Anna," in German as fits), say briefly why you are writing, and thank them for their time at the end. No flattery, no clichés ("I hope this finds you well", "I came across your profile", "passionate", "rockstar"), no emojis, no bullet lists, no placeholders in brackets.
 - Never sound pushy: no assumptions that they have a role for the candidate, no pressure or urgency, no request for a call as the first ask, no "I'd love to jump on a call this week". End with one polite, easy-to-decline question, for example whether they would be open to keeping the candidate in mind, or whether they are working on roles that might fit.
 - Do not assume the recruiter hires for the company they work at. Many recruiters work for agencies or as freelancers and fill roles at client companies, and in-house recruiters may hire for sister studios. Use the recruiter type when given; otherwise infer it from the title (e.g. "Recruitment Consultant", "Headhunter", "Talent Partner at <agency>" -> agency) and, when unclear, phrase the ask so it fits both (e.g. "if you are working on roles that fit, at your company or for clients").
@@ -155,6 +158,12 @@ def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_me
                  {"inhouse": "in-house (hires for the company they work at)",
                   "agency": "agency / external (fills roles at client companies)"}.get(
                      recruiter.get("kind") or "", "unknown, infer it from the title"))]
+    if recruiter.get("profile"):
+        parts.append("<recruiter_profile>\nFrom the recruiter's public LinkedIn profile (headline, about, current company, "
+                     "location):\n%s\n</recruiter_profile>" % recruiter["profile"])
+    if recruiter.get("role_text"):  # the role this recruiter hires for: takes priority over the general posting
+        job = None
+        parts.append("<role>\nThe role this recruiter is hiring for:\n%s\n</role>" % recruiter["role_text"][:7000])
     if recruiter.get("via"):
         parts.append("<introducer>\nThe message goes to this mutual connection, not to the recruiter: %s\n</introducer>"
                      % recruiter["via"])
