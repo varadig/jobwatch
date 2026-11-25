@@ -20,6 +20,7 @@ PORT = int(os.environ.get("JOBWATCH_PORT", "8090"))
 CFG_PATH = os.path.join(DATA, "config.json")
 PROFILE_PATH = os.path.join(DATA, "profile.json")
 CV_DIR = os.path.join(DATA, "cv")
+LOGO_DIR = os.path.join(DATA, "logos")  # company logos, downloaded once and served from here
 FONT_DIR = os.path.join(BASE, "fonts")
 PHOTO_PATH = os.path.join(DATA, "photo.png")
 # Generalt dokumentumok cegenkent; /mnt/media a Samba "Media" megosztas, igy a Macrol is elerheto.
@@ -134,6 +135,8 @@ def init_db():
           channel TEXT, language TEXT, job_id TEXT, note TEXT, subject TEXT, message TEXT,
           status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT, kind TEXT,
           profile TEXT, role_ref TEXT, role_text TEXT);
+        CREATE TABLE IF NOT EXISTS company_logos(
+          ckey TEXT PRIMARY KEY, url TEXT, file TEXT, tried TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -322,6 +325,8 @@ def src_linkedin(cfg):
                     "location": strip_tags(lo.group(1)) if lo else loc,
                     "url": "https://www.linkedin.com/jobs/view/%s/" % jid,
                     "posted": dt.group(1) if dt else "", "description": "", "bonus": 1,
+                    "logo": (lambda m: html.unescape(m.group(1)) if m else "")(
+                        re.search(r'data-delayed-url="(https://media\.licdn\.com/[^"]*company-logo[^"]*)"', c)),
                 })
                 got += 1
             time.sleep(8)
@@ -424,7 +429,8 @@ def src_remotive(cfg):
                         "company": j.get("company_name", ""),
                         "location": j.get("candidate_required_location", ""), "url": j.get("url", ""),
                         "posted": j.get("publication_date", ""),
-                        "description": strip_tags(j.get("description", ""))[:8000], "work_mode": "remote"})
+                        "description": strip_tags(j.get("description", ""))[:8000], "work_mode": "remote",
+                        "logo": j.get("company_logo") or ""})
     return out
 
 
@@ -841,6 +847,76 @@ def source_due(con, cfg, name, force):
 ENRICH_LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------------- company logos
+LOGO_MAX_BYTES = 300 * 1024
+# no SVG: served from this origin, an SVG could run scripts
+LOGO_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+LOGO_LOCK = threading.Lock()
+
+
+def remember_logo(con, company, url):
+    """Notes the logo address of a company (once per company; a later source may fill in a missing one)."""
+    key = norm(company)
+    if not key or not url or not url.startswith("https://"):
+        return
+    row = con.execute("SELECT url, file FROM company_logos WHERE ckey=?", (key,)).fetchone()
+    if not row:
+        con.execute("INSERT INTO company_logos(ckey, url) VALUES(?, ?)", (key, url))
+    elif not row["file"] and row["url"] != url:
+        con.execute("UPDATE company_logos SET url=?, tried=NULL WHERE ckey=?", (url, key))
+
+
+def fetch_logos(limit=200):
+    """Background job: downloads the logos not downloaded yet (a failed one is retried after a day)."""
+    if not LOGO_LOCK.acquire(blocking=False):
+        return
+    try:
+        day_ago = datetime.fromtimestamp(time.time() - 86400, timezone.utc).isoformat()
+        with db() as con:
+            rows = con.execute("SELECT ckey, url FROM company_logos WHERE file IS NULL AND (tried IS NULL OR tried < ?) "
+                               "LIMIT ?", (day_ago, limit)).fetchall()
+        os.makedirs(LOGO_DIR, exist_ok=True)
+        done = 0
+        for r in rows:
+            fname = None
+            try:
+                req = urllib.request.Request(r["url"], headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    ctype = (resp.headers.get_content_type() or "").lower()
+                    data = resp.read(LOGO_MAX_BYTES + 1)
+                if ctype in LOGO_TYPES and 0 < len(data) <= LOGO_MAX_BYTES:
+                    fname = hashlib.sha1(r["ckey"].encode()).hexdigest()[:16] + LOGO_TYPES[ctype]
+                    with open(os.path.join(LOGO_DIR, fname), "wb") as fh:
+                        fh.write(data)
+                    done += 1
+            except Exception as ex:
+                log.info("Logo %s: %s", r["ckey"], ex)
+            with db() as con:
+                con.execute("UPDATE company_logos SET file=?, tried=? WHERE ckey=?", (fname, now_iso(), r["ckey"]))
+            time.sleep(0.5)
+        if rows:
+            log.info("Logos: %d of %d downloaded", done, len(rows))
+    finally:
+        LOGO_LOCK.release()
+
+
+def logo_files():
+    with db() as con:
+        return {r["ckey"]: r["file"] for r in con.execute("SELECT ckey, file FROM company_logos WHERE file IS NOT NULL")}
+
+
+def logo_html(company, files, size=40):
+    """The company's logo, or its initials on a colour picked from the name when there is no logo."""
+    key = norm(company)
+    if key in files:
+        return '<img class="logo" src="/logo/%s" alt="" width="%d" height="%d" loading="lazy">' % (e(key), size, size)
+    words = [w for w in re.split(r"[\s\-_.,&/]+", company or "") if w and w[0].isalnum()]
+    initials = "".join(w[0] for w in words[:2]).upper() or "?"
+    hue = int(hashlib.md5(key.encode()).hexdigest()[:4], 16) % 360 if key else 0
+    return ('<span class="logo ph" style="width:%dpx;height:%dpx;background:hsl(%d 45%% 42%%)" aria-hidden="true">%s</span>'
+            % (size, size, hue, e(initials)))
+
+
 def enrich_pending_linkedin(cfg, limit=60):
     """Background job: fetches the description of LinkedIn postings that still have none,
     then updates their work mode and score in the database. Never blocks a refresh."""
@@ -911,6 +987,7 @@ def run_all(force=False):
                     if not it.get("title") or not it.get("url", "").startswith("http"):
                         continue
                     jid = "%s:%s" % (name, it["ext_id"])
+                    remember_logo(con, it.get("company"), it.get("logo"))
                     sc, hits = score_job(cfg, it)
                     # without an employer the title alone is not enough to call two postings the same
                     dup = norm(it["title"]) + "|" + (norm(it["company"]) or it["url"])
@@ -963,6 +1040,7 @@ def run_all(force=False):
         if any(name == "linkedin" for name, _, _ in due):
             # descriptions for LinkedIn postings come later, in the background, so the list is not held up
             threading.Thread(target=enrich_pending_linkedin, args=(cfg,), daemon=True).start()
+        threading.Thread(target=fetch_logos, daemon=True).start()
     finally:
         STATE["running"] = False
         STATE["last_run"] = now_iso()
@@ -1058,6 +1136,10 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .ui-btns{display:flex;gap:6px;flex-wrap:wrap}.ui-empty{color:var(--muted);text-align:center;padding:28px 18px}
 .ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
 .ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
+.job-head{display:flex;gap:12px;align-items:center}.job-head>div{min-width:0}
+.logo{flex:0 0 auto;border-radius:9px;object-fit:contain;background:#fff;border:1px solid var(--line)}
+.logo.ph{display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;
+  letter-spacing:.02em;border:0;user-select:none}
 .ui-section>header>div{min-width:0}.ui-desc{margin:3px 0 0;color:var(--muted);font-size:13.5px;max-width:75ch}
 .ui-h3{font-size:14px;font-weight:650;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
 .ui-body>.ui-h3:first-child{margin-top:0;padding-top:0;border-top:0}
@@ -1404,6 +1486,7 @@ def jobs_page(q):
 
     with db() as con:
         has_cv = {r["job_id"] for r in con.execute("SELECT job_id FROM cvs WHERE status='done'")}
+    logos = logo_files()
     cards, cur_bucket = [], None
     for r in rows:
         if sort != "score":
@@ -1438,12 +1521,13 @@ def jobs_page(q):
         cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if r["id"] in has_cv else
                   '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
         cards.append("""<article class="job st-%s%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
-<div><div class="jt"><a href="/open/%s" target="_blank" rel="noopener noreferrer">%s</a></div>
-<div class="co"><b>%s</b> <span class="src">· %s</span></div><div class="chips">%s</div>
+<div><div class="job-head">%s<div><div class="jt"><a href="/open/%s" target="_blank" rel="noopener noreferrer">%s</a></div>
+<div class="co"><b>%s</b> <span class="src">· %s</span></div></div></div><div class="chips">%s</div>
 <details class="why"><summary>Why this score?</summary>%s</details></div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
             e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", cls, sc,
-            qid, e(r["title"]), e(r["company"] or "?"), e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
+            logo_html(r["company"], logos), qid, e(r["title"]), e(r["company"] or "?"),
+            e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
         cards.append('<section class="ui-section"><div class="ui-body ui-empty">No postings match the filters. '
@@ -2390,10 +2474,10 @@ def cv_page(jid, flash=""):
         job = dict(r)
         cv = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
     qid = e(urllib.parse.quote(jid, safe=""))
-    head = """<div class="ui-head"><a href="/" style="font-size:13px">← Jobs</a><h1 style="margin-top:4px">%s</h1>
-<p>%s · %s · %s · <b>%d points</b> · <a href="%s" target="_blank" rel="noopener">posting ↗</a></p>
+    head = """<div class="ui-head"><a href="/" style="font-size:13px">← Jobs</a><div class="job-head" style="margin-top:6px">%s<div><h1>%s</h1>
+<p style="margin-top:2px">%s · %s · %s · <b>%d points</b> · <a href="%s" target="_blank" rel="noopener">posting ↗</a></p></div></div>
 <div class="ui-btns" style="margin-top:12px"><a class="btn btn-sm btn-outline" href="/outreach?job=%s">Message a recruiter about this posting</a></div></div>""" % (
-        e(job["title"]), e(job["company"] or "?"), e(job["location"] or "-"),
+        logo_html(job["company"], logo_files(), 52), e(job["title"]), e(job["company"] or "?"), e(job["location"] or "-"),
         e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"], e(safe_url(job["url"])), qid)
     if cv and cv["status"] == "running":
         return page("Generating CV", '<div class="ui">%s<section class="ui-section"><div class="ui-body ui-empty">'
@@ -2615,6 +2699,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self.wfile.write(body)
             if u.path == "/settings":
                 return self.send_html(settings_page(q.get("msg", "")))
+            m = re.match(r"^/logo/([a-z0-9]{1,200})$", u.path)
+            if m:
+                fname = logo_files().get(m.group(1))
+                path = os.path.join(LOGO_DIR, fname) if fname else ""
+                if not path or not os.path.isfile(path):
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                ctype = {v: k for k, v in LOGO_TYPES.items()}.get(os.path.splitext(fname)[1], "application/octet-stream")
+                data = open(path, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "max-age=604800")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                return self.wfile.write(data)
             if u.path.startswith("/open/"):
                 jid = urllib.parse.unquote(u.path[6:])
                 with db() as con:

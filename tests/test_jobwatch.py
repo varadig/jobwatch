@@ -618,3 +618,61 @@ class LinkedInHeadless(unittest.TestCase):
         with mock.patch.object(app, "fetch", lambda u, **k: pg):
             r = app.linkedin_preview("https://www.linkedin.com/in/rita-toth/")
         self.assertEqual((r["name"], r["title"]), ("Rita Tóth", "@ Amiqus"))
+
+
+class Logos(unittest.TestCase):
+    def setUp(self):
+        app.init_db()
+        with app.db() as con:
+            con.execute("DELETE FROM company_logos")
+
+    def test_one_logo_per_company_and_download(self):
+        from unittest import mock
+        import io
+        with app.db() as con:
+            app.remember_logo(con, "Super Cell Oy", "https://cdn.example/a.png")
+            app.remember_logo(con, "supercell oy", "https://cdn.example/b.png")  # same company, kept first
+            app.remember_logo(con, "NoLogo Ltd", "")
+            app.remember_logo(con, "Bad", "http://insecure.example/x.png")
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+
+        class Resp(io.BytesIO):
+            headers = mock.Mock(get_content_type=lambda: "image/png")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with mock.patch.object(app.urllib.request, "urlopen", lambda req, timeout=0: Resp(png)), \
+                mock.patch.object(app.time, "sleep", lambda s: None):
+            app.fetch_logos()
+        files = app.logo_files()
+        self.assertEqual(list(files), ["supercelloy"])
+        self.assertTrue(open(os.path.join(app.LOGO_DIR, files["supercelloy"]), "rb").read().startswith(b"\x89PNG"))
+        self.assertIn('src="/logo/supercelloy"', app.logo_html("Super Cell Oy", files))
+
+    def test_svg_and_html_are_not_stored(self):
+        from unittest import mock
+        import io
+        with app.db() as con:
+            app.remember_logo(con, "Evil", "https://cdn.example/x.svg")
+
+        class Resp(io.BytesIO):
+            headers = mock.Mock(get_content_type=lambda: "image/svg+xml")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with mock.patch.object(app.urllib.request, "urlopen", lambda req, timeout=0: Resp(b"<svg onload=alert(1)>")), \
+                mock.patch.object(app.time, "sleep", lambda s: None):
+            app.fetch_logos()
+        self.assertEqual(app.logo_files(), {})
+
+    def test_initials_when_there_is_no_logo(self):
+        h = app.logo_html("Kolibri Games GmbH", {})
+        self.assertIn(">KG</span>", h)
+        self.assertIn("hsl(", h)
+        self.assertEqual(h, app.logo_html("Kolibri Games GmbH", {}))  # same colour every time
