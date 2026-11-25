@@ -129,6 +129,10 @@ def init_db():
         CREATE TABLE IF NOT EXISTS cvs(
           job_id TEXT PRIMARY KEY, status TEXT, error TEXT, data TEXT, description TEXT,
           created TEXT, sent_to TEXT, sent_at TEXT);
+        CREATE TABLE IF NOT EXISTS outreach(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, name TEXT, title TEXT, contact TEXT,
+          channel TEXT, language TEXT, job_id TEXT, note TEXT, subject TEXT, message TEXT,
+          status TEXT, error TEXT, sent_at TEXT, model TEXT, via TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -1099,7 +1103,8 @@ def daisify(html):
 
 def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
-    tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/sources", "Sources"), ("/profile", "CV profile"), ("/settings", "Settings")]
+    tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/sources", "Sources"),
+            ("/profile", "CV profile"), ("/settings", "Settings")]
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
     running = '<span class="badge badge-soft badge-warning">⏳ refresh running…</span>' if STATE["running"] else ""
@@ -1748,6 +1753,187 @@ def smb_path(d):
     return d
 
 
+# ---------------------------------------------------------------- recruiter outreach
+def parse_recruiters(text):
+    """One recruiter per line: "Name | title @ company | LinkedIn profile URL or e-mail" (only the name is required)."""
+    out = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if not parts[0]:
+            continue
+        contact = next((p for p in parts[1:] if p.startswith("http") or re.match(r"^[^@\s]+@[^@\s]+\.\w+$", p)), "")
+        title = next((p for p in parts[1:] if p and p != contact), "")
+        out.append({"name": parts[0][:120], "title": title[:200], "contact": contact[:300]})
+    return out
+
+
+def outreach_generate(oid):
+    """Background job: writes the message for one outreach row with the Claude API."""
+    import cvgen
+    try:
+        with CFG_LOCK:
+            cfg = load_config()
+        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            raise cvgen.CVError("No Anthropic API key (Settings → Claude API).")
+        with db() as con:
+            r = dict(con.execute("SELECT * FROM outreach WHERE id=?", (oid,)).fetchone())
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r["job_id"] else None
+        data = cvgen.outreach_message(key, load_profile(), r, dict(job) if job else None,
+                                      r["channel"], r["language"], r["note"] or "")
+        with db() as con:
+            con.execute("UPDATE outreach SET status='draft', error=NULL, subject=?, message=?, model=? WHERE id=?",
+                        (data["subject"], data["message"], data["_model"], oid))
+    except Exception as ex:
+        log.exception("Outreach message %s", oid)
+        with db() as con:
+            con.execute("UPDATE outreach SET status='error', error=? WHERE id=?", (str(ex)[:500], oid))
+
+
+def outreach_signature(prof):
+    c = prof.get("contact") or {}
+    return " · ".join(x for x in (c.get("phone"), c.get("email"), c.get("linkedin"), c.get("portfolio")) if x)
+
+
+OUTREACH_JS = """<script>
+function ocount(id, lim) { var t = document.getElementById('om' + id), c = document.getElementById('on' + id);
+  c.textContent = t.value.length + ' / ' + lim + ' characters'; c.style.color = t.value.length > lim ? '#d33' : ''; }
+function ocopy(id) { var t = document.getElementById('om' + id), b = document.getElementById('oc' + id), ok = false;
+  t.focus(); t.select(); try { ok = document.execCommand('copy'); } catch (err) {}
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t.value); ok = true; }
+  b.textContent = ok ? '✅ Copied' : 'Selected: press Ctrl+C'; }
+</script>"""
+
+
+def outreach_page(q, flash=""):
+    import cvgen
+    with CFG_LOCK:
+        cfg = load_config()
+    with db() as con:
+        jobs = con.execute("SELECT id, title, company FROM jobs WHERE status != 'hidden' AND score >= ? "
+                           "ORDER BY first_seen DESC LIMIT 100", (cfg["min_score"],)).fetchall()
+        rows = con.execute("SELECT o.*, j.title AS job_title, j.company AS job_company FROM outreach o "
+                           "LEFT JOIN jobs j ON j.id = o.job_id ORDER BY o.id DESC LIMIT 200").fetchall()
+        picked = q.get("job", "")
+        if picked and not any(j["id"] == picked for j in jobs):
+            extra = con.execute("SELECT id, title, company FROM jobs WHERE id=?", (picked,)).fetchone()
+            jobs = ([extra] if extra else []) + list(jobs)
+    job_opts = '<option value="">— no specific posting (general message) —</option>' + "".join(
+        '<option value="%s"%s>%s – %s</option>' % (e(j["id"]), " selected" if j["id"] == picked else "",
+                                                   e(j["title"]), e(j["company"] or "?")) for j in jobs)
+    ch_opts = "".join('<option value="%s">%s (max %d characters)</option>' % (k, e(v[0]), v[1])
+                      for k, v in cvgen.OUTREACH_CHANNELS.items())
+    form = """<div class="card"><h2>✉️ Message recruiters</h2>
+<p class="muted">Claude writes a short, personal first message to each recruiter from your CV profile (your contact details are not sent to the API).
+LinkedIn does not allow sending messages from other programs, so for LinkedIn you copy the text and open the recruiter's profile with one click; e-mails can be sent from here.</p>
+<form method="post" action="/outreach/generate">
+<label>Recruiters, one per line: <code>Name | title @ company | LinkedIn profile URL or e-mail</code> (only the name is required)</label>
+<textarea name="recruiters" style="min-height:120px" placeholder="Anna Kovács | Talent Acquisition @ Supercell | https://www.linkedin.com/in/annakovacs/"></textarea>
+<div class="row"><div><label>Posting (optional)</label><select name="job_id" style="max-width:100%%">%s</select></div>
+<div><label>Channel</label><select name="channel">%s</select></div>
+<div><label>Language</label><select name="language"><option value="auto">automatic</option><option value="en">English</option><option value="hu">Hungarian</option><option value="de">German</option></select></div></div>
+<label>Mutual connection who could introduce you (only for the “ask a mutual connection” channel): <code>Name | how you know each other</code></label>
+<input name="via" style="width:100%%" placeholder="Péter Nagy | we worked together at Gameloft 2015–2017">
+<p class="muted">On LinkedIn, open the recruiter's profile and click “mutual connections” to see who knows both of you.</p>
+<label>Note for Claude (optional, e.g. “LinkedIn suggested them for the Unity Developer role”)</label><input name="note" style="width:100%%">
+<p><button class="primary">✨ Write messages (Claude)</button> <span class="muted">About 1–3 cents per message.</span></p></form></div>""" % (job_opts, ch_opts)
+    cards = []
+    for r in rows:
+        label, limit, _ = cvgen.OUTREACH_CHANNELS.get(r["channel"], ("?", 1000, ""))
+        oid = r["id"]
+        status = {"running": "⏳ writing…", "draft": "draft", "sent": "✅ sent %s" % fmt_dt(r["sent_at"]),
+                  "error": "❌ error"}.get(r["status"], r["status"])
+        head = '<div class="jt"><b>%s</b>%s%s</div><div class="chips"><span class="chip">%s</span>%s<span class="chip">%s</span></div>' % (
+            e(r["name"]), (" · " + e(r["title"])) if r["title"] else "",
+            (' <span class="muted">— via %s (send the message to them)</span>' % e(r["via"])) if r["via"] else "", e(label),
+            ('<span class="chip">📌 %s – %s</span>' % (e(r["job_title"]), e(r["job_company"] or "?"))) if r["job_title"] else "",
+            e(status))
+        if r["status"] == "running":
+            cards.append('<div class="card">%s<p class="muted">Claude is writing the message…</p></div>' % head)
+            continue
+        if r["status"] == "error":
+            cards.append('<div class="card">%s<p class="err">%s</p><form method="post" action="/outreach/%d">'
+                         '<button name="act" value="regen">🔄 Try again</button> <button name="act" value="delete">🗑 Delete</button></form></div>'
+                         % (head, e(r["error"]), oid))
+            continue
+        is_mail = "@" in (r["contact"] or "") and not (r["contact"] or "").startswith("http")
+        open_btn = ('<a class="btn" href="%s" target="_blank" rel="noopener noreferrer">🔗 Open profile</a>' % e(safe_url(r["contact"]))
+                    if (r["contact"] or "").startswith("http") else "")
+        send_btn = ('<button name="act" value="send" title="Send to %s with the e-mail settings">✉️ Send e-mail</button>' % e(r["contact"])
+                    if is_mail and r["channel"] == "email" else "")
+        subj = ('<label>Subject</label><input name="subject" value="%s" style="width:100%%">' % e(r["subject"] or "")
+                if r["channel"] == "email" else "")
+        cards.append("""<div class="card">%s<form method="post" action="/outreach/%d">%s
+<textarea id="om%d" name="message" style="min-height:%dpx" oninput="ocount(%d,%d)">%s</textarea>
+<div class="muted" id="on%d"></div><script>ocount(%d,%d)</script>
+<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy</button>%s%s
+<button name="act" value="save">💾 Save edits</button><button name="act" value="sent">✅ Mark as sent</button>
+<button name="act" value="regen">🔄 Rewrite</button><button name="act" value="delete">🗑 Delete</button></p></form></div>""" % (
+            head, oid, subj, oid, 90 if limit <= 300 else 200, oid, limit, e(r["message"] or ""),
+            oid, oid, limit, oid, oid, open_btn, send_btn))
+    busy = any(r["status"] == "running" for r in rows)
+    return page("Recruiters", OUTREACH_JS + form + "".join(cards), flash, refresh=3 if busy else 0)
+
+
+def outreach_action(oid, f):
+    """POST /outreach/<id>: act = save | sent | send | regen | delete. Returns the flash message."""
+    act = f.get("act", "save")
+    with db() as con:
+        r = con.execute("SELECT * FROM outreach WHERE id=?", (oid,)).fetchone()
+        if not r:
+            return "No such message."
+        if act == "delete":
+            con.execute("DELETE FROM outreach WHERE id=?", (oid,))
+            return "Deleted."
+        if "message" in f:
+            con.execute("UPDATE outreach SET message=?, subject=? WHERE id=?",
+                        (f.get("message", "").strip(), f.get("subject", r["subject"] or "").strip(), oid))
+        if act == "sent":
+            con.execute("UPDATE outreach SET status='sent', sent_at=? WHERE id=?", (now_iso(), oid))
+            return "Marked as sent."
+        if act == "regen":
+            con.execute("UPDATE outreach SET status='running', error=NULL WHERE id=?", (oid,))
+    if act == "regen":
+        threading.Thread(target=outreach_generate, args=(oid,), daemon=True).start()
+        return "Rewriting…"
+    if act == "send":
+        with CFG_LOCK:
+            cfg = load_config()
+        with db() as con:
+            r = con.execute("SELECT * FROM outreach WHERE id=?", (oid,)).fetchone()
+        sig = outreach_signature(load_profile())
+        try:
+            send_email(cfg, r["subject"] or "Hello", (r["message"] or "") + ("\n\n" + sig if sig else ""), to=r["contact"])
+        except Exception as ex:
+            return "Sending error: %s" % ex
+        with db() as con:
+            con.execute("UPDATE outreach SET status='sent', sent_at=? WHERE id=?", (now_iso(), oid))
+        return "Sent to %s." % r["contact"]
+    return "Saved."
+
+
+def outreach_create(f):
+    recs = parse_recruiters(f.get("recruiters", ""))
+    if not recs:
+        return "Give at least one recruiter name."
+    import cvgen
+    channel = f.get("channel") if f.get("channel") in cvgen.OUTREACH_CHANNELS else "linkedin_message"
+    if channel == "linkedin_intro" and not f.get("via", "").strip():
+        return "For an introduction request, give the mutual connection's name."
+    ids = []
+    with db() as con:
+        for rc in recs[:20]:
+            via = f.get("via", "").strip()[:300] if channel == "linkedin_intro" else ""
+            cur = con.execute("INSERT INTO outreach(created,name,title,contact,channel,language,job_id,note,status,via) "
+                              "VALUES(?,?,?,?,?,?,?,?,'running',?)",
+                              (now_iso(), rc["name"], rc["title"], rc["contact"], channel,
+                               f.get("language", "auto"), f.get("job_id") or None, f.get("note", "").strip()[:500], via))
+            ids.append(cur.lastrowid)
+    for oid in ids:
+        threading.Thread(target=outreach_generate, args=(oid,), daemon=True).start()
+    return "Writing %d message(s)…" % len(ids)
+
+
 def cv_page(jid, flash=""):
     import cvgen
     with db() as con:
@@ -1757,9 +1943,9 @@ def cv_page(jid, flash=""):
         job = dict(r)
         cv = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
     qid = e(urllib.parse.quote(jid, safe=""))
-    head = '<p><a href="/">← Back to jobs</a></p><div class="card"><h2>📄 <a href="%s" target="_blank" rel="noopener">%s</a></h2><div class="meta">%s · %s · %s · %d pont</div></div>' % (
+    head = '<p><a href="/">← Back to jobs</a></p><div class="card"><h2>📄 <a href="%s" target="_blank" rel="noopener">%s</a></h2><div class="meta">%s · %s · %s · %d pont</div><p><a class="btn" href="/outreach?job=%s">✉️ Message a recruiter about this posting</a></p></div>' % (
         e(safe_url(job["url"])), e(job["title"]), e(job["company"]), e(job["location"] or "-"),
-        e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"])
+        e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"], qid)
     if cv and cv["status"] == "running":
         return page("Generating CV", head + '<div class="card"><p>⏳ Claude is now writing the CV, Resume and cover letter tailored to the posting (about 1–2 minutes). The page refreshes itself.</p></div>', flash, refresh=5)
     desc = cv["description"] if cv and cv["description"] else cvgen.fetch_description(fetch, strip_tags, job)
@@ -1943,6 +2129,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(jobs_page(q))
             if u.path == "/sources":
                 return self.send_html(sources_page())
+            if u.path == "/outreach":
+                return self.send_html(outreach_page(q, q.get("msg", "")))
             if u.path == "/settings":
                 return self.send_html(settings_page(q.get("msg", "")))
             if u.path.startswith("/open/"):
@@ -2146,6 +2334,11 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as ex:
                         msg = "Sending error: %s" % ex
                     return self.redirect(back + "?msg=" + urllib.parse.quote(msg))
+            if u.path == "/outreach/generate":
+                return self.redirect("/outreach?msg=" + urllib.parse.quote(outreach_create(f)))
+            m = re.match(r"^/outreach/(\d+)$", u.path)
+            if m:
+                return self.redirect("/outreach?msg=" + urllib.parse.quote(outreach_action(int(m.group(1)), f)))
             if u.path == "/mark-all-seen":
                 with db() as con:
                     con.execute("UPDATE jobs SET status='seen' WHERE status='new'")

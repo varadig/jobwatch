@@ -103,6 +103,101 @@ class CVError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- recruiter outreach
+# channel -> (label, character limit of the message, what the platform expects)
+OUTREACH_CHANNELS = {
+    "linkedin_note": ("LinkedIn connection request note", 300,
+                      "a LinkedIn connection request note: at most 300 characters including spaces, no subject, "
+                      "no sign-off block, one or two sentences plus a short ask"),
+    "linkedin_message": ("LinkedIn message / InMail", 1000,
+                         "a LinkedIn direct message or InMail: 60-120 words, a greeting line, a short body and the "
+                         "candidate's first name at the end; no subject needed"),
+    "linkedin_intro": ("LinkedIn: ask a mutual connection to introduce you", 1000,
+                       "a LinkedIn message to a mutual connection (the introducer), asking them to introduce the "
+                       "candidate to the recruiter: 50-110 words, friendly and in the tone that fits how they know "
+                       "each other, easy to say no to; include one or two sentences the introducer can forward as is; "
+                       "no subject needed"),
+    "email": ("E-mail", 2000,
+              "an e-mail: a subject line and a 90-160 word body, ending with a sign-off and the candidate's name; "
+              "the contact details are added by the app below the text, do not write them"),
+}
+OUTREACH_SCHEMA = {
+    "type": "object",
+    "properties": {"subject": _STR, "message": _STR},
+    "required": ["subject", "message"],
+    "additionalProperties": False,
+}
+OUTREACH_SYSTEM = """You write a short first message from a job candidate to a recruiter.
+
+Ground rules:
+- Use only facts from the candidate profile. Never invent experience, titles, dates, products, metrics or skills.
+- Pick the one or two facts that matter most for the recruiter's company or the given role, and say them concretely.
+- Sound like a real person writing one message: plain, warm and direct. No flattery, no clichés ("I hope this finds you well", "I came across your profile", "passionate", "rockstar"), no emojis, no bullet lists, no placeholders in brackets.
+- End with one clear, easy ask (for example whether they are hiring for a role that fits, or a short call).
+- If a specific role is given, name it. If not, say what kind of role the candidate is looking for, based on the profile's objective.
+- Respect the length limit of the channel strictly; count characters for a LinkedIn connection note.
+- When an introducer is given, write to the introducer (greet them, not the recruiter) and ask for an introduction to the recruiter; never pretend the introducer knows the candidate better than stated.
+- subject: a short e-mail subject for the e-mail channel; for LinkedIn channels return an empty string."""
+
+
+def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_message", language="auto", note=""):
+    """Claude API call: a short message to one recruiter. Returns {"subject", "message", "_model"}."""
+    import anthropic
+
+    label, limit, how = OUTREACH_CHANNELS.get(channel, OUTREACH_CHANNELS["linkedin_message"])
+    facts = {k: v for k, v in profile.items() if k != "contact"}  # contact details are not sent out
+    lang = {"en": "Write in English.", "hu": "Write in Hungarian, addressing the recruiter formally (magázás).",
+            "de": "Write in German (Sie-Form)."}.get(
+        language, "Write in the language the recruiter or the role most likely uses; if unclear, English.")
+    parts = ["<candidate_profile>\n%s\n</candidate_profile>" % json.dumps(facts, ensure_ascii=False, indent=1),
+             "<recruiter>\nName: %s\nTitle / company: %s\n</recruiter>" % (
+                 recruiter.get("name") or "-", recruiter.get("title") or "-")]
+    if recruiter.get("via"):
+        parts.append("<introducer>\nThe message goes to this mutual connection, not to the recruiter: %s\n</introducer>"
+                     % recruiter["via"])
+    if job:
+        parts.append("<role>\nTitle: %s\nCompany: %s\nLocation: %s\nURL: %s\n\n%s\n</role>" % (
+            job.get("title", ""), job.get("company", ""), job.get("location") or "-", job.get("url", ""),
+            (job.get("description") or "")[:6000]))
+    if note:
+        parts.append("<candidate_note>\n%s\n</candidate_note>" % note)
+    parts.append("Channel: %s. Write %s (hard limit: %d characters for the message). %s" % (label, how, limit, lang))
+    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
+    try:
+        resp = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": OUTREACH_SCHEMA}},
+            system=OUTREACH_SYSTEM,
+            messages=[{"role": "user", "content": "\n\n".join(parts)}],
+        )
+    except anthropic.AuthenticationError:
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
+    except anthropic.PermissionDeniedError:
+        raise CVError("The API key has no permission for this model.")
+    except anthropic.RateLimitError:
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
+    except anthropic.BadRequestError as e:
+        raise CVError("Claude API bad request: %s" % e.message)
+    except anthropic.APIStatusError as e:
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
+    except anthropic.APIConnectionError:
+        raise CVError("Cannot reach the Claude API (network error).")
+    if resp.stop_reason == "refusal":
+        raise CVError("The model refused the request.")
+    if resp.stop_reason == "max_tokens":
+        raise CVError("The response was too long, try again.")
+    try:
+        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
+    except ValueError:
+        raise CVError("The model's response is not valid JSON.")
+    data["message"] = data["message"].strip()
+    data["_model"] = resp.model
+    return data
+
+
 def tailor(api_key, profile, job, description):
     """Claude API call: returns the tailored CV data (dict, same structure as the profile)."""
     import anthropic

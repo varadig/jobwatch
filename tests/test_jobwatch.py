@@ -403,3 +403,87 @@ class OwnSources(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertEqual(out[1]["type"], "rss")
         self.assertTrue(out[1]["enabled"])
+
+
+class Outreach(unittest.TestCase):
+    """Recruiter messages: the API request shape (with a fake SDK) and the page flow (with a stubbed call)."""
+
+    def fake_sdk(self, captured, text='{"subject": "", "message": " Hi Anna, ... "}', stop="end_turn"):
+        import types
+
+        class Err(Exception):
+            pass
+
+        class Messages:
+            def create(self, **kw):
+                captured.update(kw)
+                return types.SimpleNamespace(stop_reason=stop, model="claude-opus-5-5",
+                                             content=[types.SimpleNamespace(type="text", text=text)])
+
+        mod = types.ModuleType("anthropic")
+        mod.Anthropic = lambda **kw: types.SimpleNamespace(beta=types.SimpleNamespace(messages=Messages()))
+        for n in ("AuthenticationError", "PermissionDeniedError", "RateLimitError", "BadRequestError",
+                  "APIStatusError", "APIConnectionError"):
+            setattr(mod, n, Err)
+        return mod
+
+    def test_request_and_parsing(self):
+        import cvgen
+        from unittest import mock
+        cap = {}
+        prof = {"name": "Gábor", "contact": {"email": "secret@example.com"}, "summary": "Unity dev"}
+        with mock.patch.dict(sys.modules, {"anthropic": self.fake_sdk(cap)}):
+            out = cvgen.outreach_message("k", prof, {"name": "Anna", "title": "TA @ Supercell", "via": "Péter | ex-colleague"},
+                                         {"title": "Unity Developer", "company": "Supercell"}, "linkedin_intro", "hu")
+        self.assertEqual(out["message"], "Hi Anna, ...")
+        self.assertEqual(cap["model"], "claude-opus-5-5")
+        self.assertEqual(cap["fallbacks"], "default")
+        self.assertEqual(cap["output_config"]["format"]["schema"], cvgen.OUTREACH_SCHEMA)
+        user = cap["messages"][0]["content"]
+        self.assertNotIn("secret@example.com", user)         # contact details stay local
+        self.assertIn("<introducer>", user)
+        self.assertIn("Hungarian", user)
+
+    def test_refusal_is_reported(self):
+        import cvgen
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {"anthropic": self.fake_sdk({}, stop="refusal")}):
+            with self.assertRaises(cvgen.CVError):
+                cvgen.outreach_message("k", {"name": "x"}, {"name": "Anna"})
+
+    def test_recruiter_lines(self):
+        r = app.parse_recruiters("Anna Kovács | TA @ Supercell | https://www.linkedin.com/in/anna/\nBob | bob@corp.com\n\n | x")
+        self.assertEqual(r[0], {"name": "Anna Kovács", "title": "TA @ Supercell", "contact": "https://www.linkedin.com/in/anna/"})
+        self.assertEqual(r[1]["contact"], "bob@corp.com")
+        self.assertEqual(len(r), 2)
+
+    def test_page_flow(self):
+        import cvgen
+        import threading
+        from unittest import mock
+        app.init_db()
+        cfg = app.load_config()
+        cfg["anthropic_api_key"] = "k"
+        app.save_config(cfg)
+        fake = lambda *a, **k: {"subject": "", "message": "Hello %s" % a[2]["name"], "_model": "m"}
+        with mock.patch.object(cvgen, "outreach_message", fake):
+            self.assertIn("mutual connection", app.outreach_create({"recruiters": "Anna", "channel": "linkedin_intro"}))
+            msg = app.outreach_create({"recruiters": "Anna | TA @ X | https://www.linkedin.com/in/anna/\nBob",
+                                       "channel": "linkedin_note"})
+            self.assertEqual(msg, "Writing 2 message(s)…")
+            for t in [t for t in threading.enumerate() if t.name != "MainThread" and t.daemon]:
+                t.join(5)
+        with app.db() as con:
+            rows = con.execute("SELECT id, status, message FROM outreach ORDER BY id").fetchall()
+        self.assertEqual([(r["status"], r["message"]) for r in rows[-2:]], [("draft", "Hello Anna"), ("draft", "Hello Bob")])
+        html = app.outreach_page({})
+        self.assertIn("Hello Anna", html)
+        self.assertIn("🔗 Open profile", html)
+        oid = rows[-2]["id"]
+        self.assertEqual(app.outreach_action(oid, {"act": "save", "message": "edited"}), "Saved.")
+        self.assertEqual(app.outreach_action(oid, {"act": "sent", "message": "edited"}), "Marked as sent.")
+        with app.db() as con:
+            r = con.execute("SELECT status, message, sent_at FROM outreach WHERE id=?", (oid,)).fetchone()
+        self.assertEqual((r["status"], r["message"]), ("sent", "edited"))
+        self.assertTrue(r["sent_at"])
+        self.assertEqual(app.outreach_action(oid, {"act": "delete"}), "Deleted.")
