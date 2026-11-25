@@ -998,7 +998,7 @@ CSS = """
 --good:var(--color-success);--good-soft:color-mix(in oklab,var(--color-success) 16%,transparent);
 --warn:var(--color-warning);--warn-soft:color-mix(in oklab,var(--color-warning) 18%,transparent);
 --bad:var(--color-error);--bad-soft:color-mix(in oklab,var(--color-error) 16%,transparent);--radius:var(--radius-box,12px)}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Segoe UI,Roboto,Inter,sans-serif}
+*{box-sizing:border-box}html{background:var(--bg);min-height:100%}body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Segoe UI,Roboto,Inter,sans-serif}
 a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 a.btn-primary,a.btn-primary:hover{color:var(--color-primary-content)}
 a.btn-primary:hover{text-decoration:none}
@@ -1051,6 +1051,13 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 @media (max-width:700px){.job{grid-template-columns:42px 1fr}.acts{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;min-width:0}
 .acts .icons{justify-content:flex-start}.score{width:42px;height:42px}.bucket{top:88px}.row-chips .lbl{width:100%}}
 /* shared page building blocks (ui-*) and the Recruiters page (rc-*) */
+.ui-table td,.ui-table th{vertical-align:middle;font-size:14px}.ui-table .num{text-align:right}.ui-table td.when{white-space:nowrap;color:var(--muted)}
+.ui-table tr.off td{opacity:.55}.ui-err{font-size:12px;color:var(--bad);margin-top:3px;max-width:42ch}
+.ui-row{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;padding:14px 18px;border-top:1px solid var(--line)}
+.ui-section>header+.ui-row{border-top:0}.ui-row-main{min-width:0;flex:1}.ui-row-title{font-weight:650;font-size:15px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ui-btns{display:flex;gap:6px;flex-wrap:wrap}.ui-empty{color:var(--muted);text-align:center;padding:28px 18px}
+.ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
+.ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
 .ui-section>header>div{min-width:0}.ui-desc{margin:3px 0 0;color:var(--muted);font-size:13.5px;max-width:75ch}
 .ui-h3{font-size:14px;font-weight:650;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--line)}
 .ui-body>.ui-h3:first-child{margin-top:0;padding-top:0;border-top:0}
@@ -1183,7 +1190,7 @@ def page(title, body, flash="", refresh=0):
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
     running = '<span class="badge badge-soft badge-warning">⏳ refresh running…</span>' if STATE["running"] else ""
-    return ("""<!doctype html><html lang="hu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
+    return ("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
 <script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";</script>
 <title>%s · jobwatch</title>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
@@ -1379,19 +1386,19 @@ def jobs_page(q):
     hidden_inputs = "".join('<input type="hidden" name="%s" value="%s">' % (k, e(v))
                             for k, v in base_q.items() if k in ("status", "work", "sort", "age"))
     more_open = " open" if (src or text or mn != cfg["min_score"]) else ""
-    filt = """<div class="panel">
+    filt = """<section class="ui-section ui-filters" aria-label="Filters"><div class="ui-body">
 <div class="row-chips"><span class="lbl">Status</span>%s</div>
 <div class="row-chips"><span class="lbl">Work mode</span>%s</div>
 <div class="row-chips"><span class="lbl">Sort</span>%s</div>
 <div class="row-chips"><span class="lbl">Age</span>%s</div>
-<details class="more"%s><summary>More filters (source, score, search)</summary>
-<form class="filters" method="get">%s<select name="source">%s</select>
-<label style="margin:0;font-weight:400">Min. score <input type="number" name="min" value="%d" style="width:70px"></label>
-<input type="search" name="q" value="%s" placeholder="Search: title, company, location"><button>Filter</button>
-<a class="btn" href="/">Alaphelyzet</a></form></details></div>""" % (
+<details class="ui-more"%s><summary>More filters: source, score, search</summary>
+<form class="filters" method="get">%s<select class="select select-sm" name="source" aria-label="Source" style="width:auto">%s</select>
+<label class="ui-inline" style="margin:0;font-weight:400">Min. score <input class="input input-sm" type="number" name="min" value="%d" style="width:80px"></label>
+<input class="input input-sm" type="search" name="q" value="%s" placeholder="Search: title, company, location" aria-label="Search" style="width:260px">
+<button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/">Reset filters</a></form></details></div></section>""" % (
         st_chips, wm_chips, sort_chips, age_chips, more_open, hidden_inputs, opts(src, src_items), mn, e(text))
     head = """<div class="listhead"><span><b>%d</b> posting%s · age refers to <b>%s</b> · notifications from %d pts</span>
-<form method="post" action="/mark-all-seen"><button class="sm">Mark all new → seen</button></form></div>""" % (
+<form method="post" action="/mark-all-seen"><button class="btn btn-sm btn-ghost">Mark all new as seen</button></form></div>""" % (
         total, " (first 300 shown)" if total > 300 else "", "collected" if sort == "seen" else "posted",
         cfg["notify_min_score"])
 
@@ -1416,19 +1423,20 @@ def jobs_page(q):
             chips.append('<span class="chip closed">❌ probably closed</span>')
         if r["_posted_known"]:
             cls_age = "age-new" if r["_pdays"] <= 2 else ("age-old" if r["_pdays"] > 30 else "")
-            chips.append('<span class="chip %s" title="Feladva: %s">📅 %s</span>' % (
+            chips.append('<span class="chip %s" title="Posted: %s">📅 %s</span>' % (
                 cls_age, e(r["_posted"].astimezone().strftime("%Y-%m-%d")),
-                e(("feladva " + rel_day(r["_pdays"])) if r["_pdays"] > 2 else "🆕 " + rel_day(r["_pdays"]))))
+                e(("posted " + rel_day(r["_pdays"])) if r["_pdays"] > 2 else "🆕 " + rel_day(r["_pdays"]))))
         else:
             chips.append('<span class="chip" title="The source does not give the posting date">📅 posted date unknown</span>')
         chips.append('<span class="chip" title="Collected: %s">📥 %s</span>' % (e(fmt_dt(r["first_seen"])), e(rel_day(r["_sdays"]))))
         if r["status"] != "new":
             chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
-        icon_btns = "".join('<button name="status" value="%s" title="%s">%s</button>' % (s_, t, ic) for s_, ic, t in (
+        icon_btns = "".join('<button class="btn btn-sm btn-ghost btn-square" name="status" value="%s" title="%s" aria-label="%s">%s</button>'
+                            % (s_, t, t, ic) for s_, ic, t in (
             ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Mark seen"),
             ("hidden", "🚫", "Hide"), ("new", "↺", "Mark new again")) if s_ != r["status"])
-        cv_btn = ('<a class="btn" href="/cv/%s">📄 Documents ✓</a>' if r["id"] in has_cv else
-                  '<a class="btn primary" href="/cv/%s">📄 CV + Resume</a>') % qid
+        cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if r["id"] in has_cv else
+                  '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
         cards.append("""<article class="job st-%s%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
 <div><div class="jt"><a href="/open/%s" target="_blank" rel="noopener noreferrer">%s</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div><div class="chips">%s</div>
@@ -1438,9 +1446,13 @@ def jobs_page(q):
             qid, e(r["title"]), e(r["company"] or "?"), e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
-        cards.append('<div class="card muted">No postings match the filters. Try loosening them, or press “Refresh”.</div>')
+        cards.append('<section class="ui-section"><div class="ui-body ui-empty">No postings match the filters. '
+                     'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
     busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
-    return page("Jobs", progress_html() + stats + filt + head + "".join(cards), refresh=3 if busy else 0)
+    top = ('<div class="ui-head"><h1>Jobs</h1><p>Postings from your sources, scored against your CV. '
+           'Click a title to open the posting; “CV + Resume” writes documents tailored to it.</p></div>')
+    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)),
+                refresh=3 if busy else 0)
 
 
 def sources_page():
@@ -1453,19 +1465,27 @@ def sources_page():
     for k, (name, url) in SOURCES_INFO.items():
         s = st.get(k)
         on = cfg["sources"].get(k)
-        status = ('<span class="err">%s</span>' % e(s["error"])) if s and s["error"] else (
-            '<span class="ok">OK</span>' if s else '<span class="muted">not run yet</span>')
-        rows.append("<tr><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+        if not on:
+            status = '<span class="badge badge-soft badge-neutral">Off</span>'
+        elif s and s["error"]:
+            status = '<span class="badge badge-soft badge-error">Error</span><div class="ui-err">%s</div>' % e(s["error"][:200])
+        else:
+            status = ('<span class="badge badge-soft badge-success">OK</span>' if s else
+                      '<span class="badge badge-soft badge-neutral">Not run yet</span>')
+        rows.append('<tr%s><td>%s</td><td class="when">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>' % (
+            "" if on else ' class="off"',
             ('<a href="%s" target="_blank" rel="noopener">%s</a>' % (e(url), e(name))) if url else e(name),
-            "" if on else ' <span class="badge">kikapcsolva</span>',
-            e(fmt_dt(s["last_run"])) if s else "-", s["found"] if s else "-", s["new"] if s else "-",
-            cnt.get(k, 0), status))
+            e(fmt_dt(s["last_run"])) if s else "—", s["found"] if s else "—", s["new"] if s else "—", cnt.get(k, 0), status))
     uns = "".join('<tr><td>%s</td><td class="muted">%s</td></tr>' % (
-        ('<a href="%s" target="_blank" rel="noopener">%s</a>' % (e(u), e(n))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
-    body = """<div class="card"><h2>Watched sources</h2><table><tr><th>Source</th><th>Last run</th><th>Fetched</th><th>New</th><th>Total</th><th>Status</th></tr>%s</table>
-<p class="muted">Refresh every %d minutes (Remotive at most every 6 hours).</p></div>
-<div class="card"><h2>Sites that cannot be watched automatically</h2><p class="muted">Check these manually now and then.</p><table>%s</table></div>""" % (
-        "".join(rows), cfg["interval_minutes"], uns)
+        ('<a href="%s" target="_blank" rel="noopener">%s ↗</a>' % (e(u), e(n))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
+    body = """<div class="ui"><div class="ui-head"><h1>Sources</h1><p>Where postings come from, and how the last refresh went.
+Sources are turned on and off in <a href="/settings#search">Settings → Job search</a>.</p></div>
+<section class="ui-section"><header><div><h2>Watched sources</h2><p class="ui-desc">Refreshed every %d minutes (Remotive at most every 6 hours).</p></div></header>
+<div style="overflow-x:auto"><table class="table ui-table"><thead><tr><th>Source</th><th>Last run</th><th class="num">Fetched</th><th class="num">New</th>
+<th class="num">In the list</th><th>Status</th></tr></thead><tbody>%s</tbody></table></div></section>
+<section class="ui-section"><header><div><h2>Sites that cannot be watched automatically</h2><p class="ui-desc">Check these by hand now and then.</p></div></header>
+<div style="overflow-x:auto"><table class="table ui-table"><thead><tr><th>Site</th><th>Why</th></tr></thead><tbody>%s</tbody></table></div></section></div>""" % (
+        cfg["interval_minutes"], "".join(rows), uns)
     return page("Sources", body)
 
 
@@ -2370,60 +2390,78 @@ def cv_page(jid, flash=""):
         job = dict(r)
         cv = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
     qid = e(urllib.parse.quote(jid, safe=""))
-    head = '<p><a href="/">← Back to jobs</a></p><div class="card"><h2>📄 <a href="%s" target="_blank" rel="noopener">%s</a></h2><div class="meta">%s · %s · %s · %d pont</div><p><a class="btn" href="/outreach?job=%s">✉️ Message a recruiter about this posting</a></p></div>' % (
-        e(safe_url(job["url"])), e(job["title"]), e(job["company"]), e(job["location"] or "-"),
-        e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"], qid)
+    head = """<div class="ui-head"><a href="/" style="font-size:13px">← Jobs</a><h1 style="margin-top:4px">%s</h1>
+<p>%s · %s · %s · <b>%d points</b> · <a href="%s" target="_blank" rel="noopener">posting ↗</a></p>
+<div class="ui-btns" style="margin-top:12px"><a class="btn btn-sm btn-outline" href="/outreach?job=%s">Message a recruiter about this posting</a></div></div>""" % (
+        e(job["title"]), e(job["company"] or "?"), e(job["location"] or "-"),
+        e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"], e(safe_url(job["url"])), qid)
     if cv and cv["status"] == "running":
-        return page("Generating CV", head + '<div class="card"><p>⏳ Claude is now writing the CV, Resume and cover letter tailored to the posting (about 1–2 minutes). The page refreshes itself.</p></div>', flash, refresh=5)
+        return page("Generating CV", '<div class="ui">%s<section class="ui-section"><div class="ui-body ui-empty">'
+                    '<span class="loading loading-spinner loading-md"></span><p>Claude is writing the CV, Resume and cover letter for this posting '
+                    '(about 1–2 minutes). The page refreshes by itself.</p></div></section></div>' % head, flash, refresh=5)
     desc = cv["description"] if cv and cv["description"] else cvgen.fetch_description(fetch, strip_tags, job)
-    gen_form = """<div class="card"><h2>%s</h2>%s<form method="post" action="/cv/%s/generate">
-<label>Posting text (Claude works from this; you can fix or extend it)</label><textarea name="description" style="min-height:220px">%s</textarea>
-<p class="muted">Only facts from your CV profile go in; your contact details are not sent to the API.</p>
-<button class="primary">%s</button></form></div>""" % (
-        "Regenerate" if cv and cv["status"] == "done" else "Create a CV tailored to this posting",
-        ('<p class="err">Hiba: %s</p>' % e(cv["error"])) if cv and cv["status"] == "error" else "",
-        qid, e(desc), "🔄 Regenerate" if cv and cv["status"] == "done" else "✨ Generate CV + Resume + cover letter (Claude)")
-    if not cv or cv["status"] != "done":
-        return page("CV", head + gen_form, flash)
+    done = bool(cv and cv["status"] == "done")
+    gen_form = """<section class="ui-section"><header><div><h2>%s</h2><p class="ui-desc">Claude works from this posting text: fix or extend it if
+something is missing. Only facts from your CV profile go in; your contact details are not sent to the API.</p></div></header>
+<form method="post" action="/cv/%s/generate"><div class="ui-body">%s<label for="description">Posting text</label>
+<textarea class="textarea" id="description" name="description" rows="12">%s</textarea></div>
+<div class="ui-foot"><span class="muted" style="font-size:13px">About 5–15 cents.</span><button class="btn %s">%s</button></div></form></section>""" % (
+        "Write it again" if done else "Create documents for this posting", qid,
+        ('<div role="alert" class="alert alert-error alert-soft" style="margin-bottom:12px"><span>%s</span></div>' % e(cv["error"]))
+        if cv and cv["status"] == "error" else "",
+        e(desc), "btn-outline" if done else "btn-primary",
+        "Regenerate the documents" if done else "Write CV + Resume + cover letter")
+    if not done:
+        return page("CV", '<div class="ui">%s%s</div>' % (head, gen_form), flash)
     data = json.loads(cv["data"])
     notes = "".join("<li>%s</li>" % e(n) for n in data.get("match_notes", []))
     emails = cvgen.find_emails(desc)
-    sent = ('<p class="ok">✅ Sent: %s → %s</p>' % (e(fmt_dt(cv["sent_at"])), e(cv["sent_to"]))) if cv["sent_at"] else ""
+    sent = ('<div role="status" class="alert alert-success alert-soft" style="margin-bottom:12px"><span>Sent %s → %s</span></div>'
+            % (e(fmt_dt(cv["sent_at"])), e(cv["sent_to"]))) if cv["sent_at"] else ""
     paths = cv_paths(jid)
     folder = smb_path(os.path.dirname(paths["cv"])) if paths["cv"] else ""
-    body = head + """<div class="card"><h2>Documents</h2><p><a class="btn primary" href="/cv/%s/cv.pdf" target="_blank">⬇️ CV (detailed)</a>
-<a class="btn primary" href="/cv/%s/resume.pdf" target="_blank">⬇️ Resume (1 page)</a>
-<a class="btn" href="/cv/%s/letter.pdf" target="_blank">⬇️ Cover letter</a></p>
-<p class="muted">Folder (on a Mac: Finder → Go → Connect to Server): <code>%s</code></p>
-<form method="post" action="/cv/%s/photo" style="margin:6px 0">Photo on the CV: <b>%s</b> &nbsp;<button name="photo" value="%s">%s</button>
-<span class="muted"> (by default: no photo for US/UK/Canada/Australia locations)</span></form>
-<p><b>%s</b></p><p>%s</p><label>Notes for you</label><ul>%s</ul><p class="muted">Model: %s · %s</p></div>
-<div class="card"><h2>✉️ Send by e-mail to the company</h2>%s
-<p class="muted">It sends only when you press the button (and confirm). It is sent from your Gmail.%s</p>
-<form method="post" action="/cv/%s/send" onsubmit="return confirm('Really send the application to this address: ' + this.to.value + ' ?')">
-<label>Recipient (recruiter's e-mail address)</label><input name="to" value="%s" style="width:100%%" required type="email">
-<label>Subject</label><input name="subject" value="%s" style="width:100%%">
-<label>Message</label><textarea name="body" style="min-height:260px;font-family:inherit;font-size:14px">%s</textarea>
-<label>Attachment</label>
-<label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="cv" checked> CV</label>
-<label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="resume"> Resume</label>
-<label style="font-weight:400;display:inline-block;margin-right:12px"><input type="radio" name="attach" value="both"> Both</label>
-<label style="font-weight:400"><input type="checkbox" name="attach_letter"> + cover letter as PDF too</label>
-<button class="primary">📨 Send application</button></form></div>
-<div class="card"><h2>Manual editing</h2><p class="muted">The CV, the Resume (<code>resume</code> section) and the cover letter content are in JSON. Saving rebuilds the PDFs (no API call).</p>
-<form method="post" action="/cv/%s/save"><textarea name="data" style="min-height:300px">%s</textarea><button>💾 Save and rebuild PDFs</button></form></div>""" % (
-        qid, qid, qid, e(folder), qid, "yes" if data.get("_photo", True) else "no",
-        "off" if data.get("_photo", True) else "on", "Remove photo" if data.get("_photo", True) else "Add photo",
-        e(data["headline"]), e(data["summary"]), notes, e(data.get("_model", "")), e(fmt_dt(cv["created"])),
-        sent, (" E-mail addresses found in the posting: " + e(", ".join(emails))) if emails else " No e-mail address found in the posting; in most places you have to upload the PDF on the application form.",
-        qid, e(emails[0] if emails else ""), e(data.get("email_subject", "")), e(data["cover_letter"]),
+    photo = data.get("_photo", True)
+    docs = """<section class="ui-section"><header><div><h2>Documents</h2><p class="ui-desc">Written by %s, %s.</p></div></header>
+<div class="ui-body"><div class="ui-btns"><a class="btn btn-sm btn-primary" href="/cv/%s/cv.pdf" target="_blank">CV (detailed)</a>
+<a class="btn btn-sm btn-primary" href="/cv/%s/resume.pdf" target="_blank">Resume (1 page)</a>
+<a class="btn btn-sm btn-outline" href="/cv/%s/letter.pdf" target="_blank">Cover letter</a></div>
+<form method="post" action="/cv/%s/photo" class="ui-inline"><span>Photo on the CV: <b>%s</b></span>
+<button class="btn btn-xs btn-ghost" name="photo" value="%s">%s</button>
+<span class="help">By default no photo for US, UK, Canadian and Australian postings.</span></form>
+<h3 class="ui-h3">%s</h3><p>%s</p>
+<h3 class="ui-h3">Notes for you</h3><ul class="ui-list">%s</ul>
+<p class="help">Folder (on a Mac: Finder → Go → Connect to Server): <code>%s</code></p></div></section>""" % (
+        e(data.get("_model", "") or "Claude"), e(fmt_dt(cv["created"])), qid, qid, qid, qid,
+        "yes" if photo else "no", "off" if photo else "on", "Remove the photo" if photo else "Add a photo",
+        e(data["headline"]), e(data["summary"]), notes, e(folder))
+    send = """<section class="ui-section"><header><div><h2>Send by e-mail</h2><p class="ui-desc">%s Nothing is sent until you press
+the button and confirm. It goes from the e-mail account in Settings.</p></div></header>
+<form method="post" action="/cv/%s/send" onsubmit="return confirm('Send the application to ' + this.to.value + '?')"><div class="ui-body">%s<div class="ui-grid">
+<div><label for="to">Recipient</label><input class="input" id="to" name="to" value="%s" required type="email"></div>
+<div><label for="subject">Subject</label><input class="input" id="subject" name="subject" value="%s"></div>
+<div class="wide"><label for="body">Message</label><textarea class="textarea" id="body" name="body" rows="12">%s</textarea></div>
+<div class="wide"><label>Attachments</label><div class="ui-checks">
+<label><input type="radio" class="radio radio-sm radio-primary" name="attach" value="cv" checked> CV</label>
+<label><input type="radio" class="radio radio-sm radio-primary" name="attach" value="resume"> Resume</label>
+<label><input type="radio" class="radio radio-sm radio-primary" name="attach" value="both"> Both</label>
+<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="attach_letter"> Cover letter as a PDF too</label></div></div>
+</div></div><div class="ui-foot"><span></span><button class="btn btn-primary">Send the application</button></div></form></section>""" % (
+        ("E-mail addresses in the posting: " + e(", ".join(emails)) + ".") if emails else
+        "The posting has no e-mail address; most companies want the PDF uploaded on their application form.",
+        qid, sent, e(emails[0] if emails else ""), e(data.get("email_subject", "")), e(data["cover_letter"]))
+    edit = """<section class="ui-section"><header><div><h2>Edit by hand</h2><p class="ui-desc">The CV, the Resume (<code>resume</code>) and the
+cover letter in JSON. Saving rebuilds the PDFs, without an API call.</p></div></header>
+<form method="post" action="/cv/%s/save"><div class="ui-body"><textarea class="textarea ui-mono" name="data" rows="18" aria-label="Document content (JSON)">%s</textarea></div>
+<div class="ui-foot"><span></span><button class="btn btn-outline">Save and rebuild the PDFs</button></div></form></section>""" % (
         qid, e(json.dumps({k: v for k, v in data.items() if not k.startswith("_")}, ensure_ascii=False, indent=2)))
-    return page("CV", body + gen_form, flash)
+    return page("CV", '<div class="ui">%s%s%s%s%s</div>' % (head, docs, send, gen_form, edit), flash)
 
 
 def docs_page():
     if not os.path.isdir(DOCS_ROOT):
-        return page("Documents", '<div class="card muted">No documents generated yet. On a posting, press the “📄 CV + Resume” button.</div>')
+        return page("Documents", '<div class="ui"><div class="ui-head"><h1>Documents</h1></div><section class="ui-section">'
+                                 '<div class="ui-body ui-empty">No documents yet. On a posting in the Jobs list, press “CV + Resume” '
+                                 'to create the first one.</div></section></div>')
     with db() as con:
         sent = {r["job_id"]: r for r in con.execute("SELECT job_id, sent_to, sent_at FROM cvs")}
     blocks = []
@@ -2443,43 +2481,53 @@ def docs_page():
             except Exception:
                 pass
             rel = os.path.relpath(d, DOCS_ROOT)
-            files = "".join('<a class="btn sm" href="/docs/file?p=%s" target="_blank">%s</a>' % (
+            files = "".join('<a class="btn btn-sm btn-outline" href="/docs/file?p=%s" target="_blank">%s</a>' % (
                 e(urllib.parse.quote(os.path.join(rel, fn))), e(DOC_LABEL[k])) for k, fn in doc_names().items()
                 if os.path.exists(os.path.join(d, fn)))
             if os.path.exists(os.path.join(d, "hirdetes.txt")):
-                files += '<a class="btn sm" href="/docs/file?p=%s" target="_blank">Posting text</a>' % e(urllib.parse.quote(os.path.join(rel, "hirdetes.txt")))
+                files += '<a class="btn btn-sm btn-ghost" href="/docs/file?p=%s" target="_blank">Posting text</a>' % e(
+                    urllib.parse.quote(os.path.join(rel, "hirdetes.txt")))
             older = len(os.listdir(os.path.join(d, "korabbi"))) if os.path.isdir(os.path.join(d, "korabbi")) else 0
             s_ = sent.get(info.get("job_id"))
-            status = ('<span class="chip wm-remote">✅ sent %s → %s</span>' % (e(fmt_dt(s_["sent_at"])), e(s_["sent_to"]))) if s_ and s_["sent_at"] else ""
-            jobs_html.append("""<div class="docs-job"><div><b>%s</b> %s %s</div><div class="meta">Generated: %s%s · <a href="%s" target="_blank" rel="noopener">posting</a> · %s</div>
-<div class="files">%s</div></div>""" % (
+            status = ('<span class="badge badge-soft badge-success">Sent %s → %s</span>' % (e(fmt_dt(s_["sent_at"])), e(s_["sent_to"]))
+                      if s_ and s_["sent_at"] else "")
+            jobs_html.append("""<div class="ui-row"><div class="ui-row-main"><div class="ui-row-title">%s %s</div>
+<div class="muted" style="font-size:13px">Generated %s%s · %s · <a href="%s" target="_blank" rel="noopener">posting ↗</a></div>
+<div class="ui-btns" style="margin-top:8px">%s</div></div><div>%s</div></div>""" % (
                 e(info.get("title") or jd), status,
-                ('<a class="btn sm" href="/cv/%s">open</a>' % e(urllib.parse.quote(info["job_id"], safe=""))) if info.get("job_id") else "",
                 e(fmt_dt(info.get("generated"))), (" · %d earlier version(s)" % older) if older else "",
-                e(safe_url(info.get("url", ""))), e(WORK_MODES.get(info.get("work_mode") or "unknown", "")), files))
+                e(WORK_MODES.get(info.get("work_mode") or "unknown", "")), e(safe_url(info.get("url", ""))), files,
+                ('<a class="btn btn-sm btn-primary" href="/cv/%s">Open</a>' % e(urllib.parse.quote(info["job_id"], safe="")))
+                if info.get("job_id") else ""))
         if jobs_html:
-            blocks.append('<div class="card docs-co"><h3>🏢 %s</h3>%s</div>' % (e(co), "".join(jobs_html)))
-    intro = """<div class="card"><h2>Documents by company</h2><p class="muted">Every generation is kept here: CV, Resume, cover letter, the posting text and an info.json.
-When you regenerate, the old version goes to the <code>korabbi/</code> subfolder. On a Mac: Finder → Go → Connect to Server → <code>%s</code></p></div>""" % e(smb_path(DOCS_ROOT))
-    return page("Documents", intro + ("".join(blocks) or '<div class="card muted">No documents generated yet.</div>'))
+            blocks.append('<section class="ui-section"><header><h2>%s</h2><span class="muted" style="font-size:13px">%d posting%s</span></header>%s</section>'
+                          % (e(co), len(jobs_html), "" if len(jobs_html) == 1 else "s", "".join(jobs_html)))
+    head = """<div class="ui-head"><h1>Documents</h1><p>Every tailored CV, Resume and cover letter, grouped by company. When you regenerate,
+the old version is kept in the <code>korabbi/</code> subfolder. On a Mac: Finder → Go → Connect to Server → <code>%s</code></p></div>""" % e(smb_path(DOCS_ROOT))
+    empty = ('<section class="ui-section"><div class="ui-body ui-empty">No documents yet. On a posting in the Jobs list, '
+             'press “CV + Resume” to create the first one.</div></section>')
+    return page("Documents", '<div class="ui">%s%s</div>' % (head, "".join(blocks) or empty))
 
 
 def profile_page(flash="", prefill=None):
     current = prefill if prefill is not None else json.dumps(load_profile(), ensure_ascii=False, indent=2)
-    body = """<div class="card"><h2>CV profile (source facts)</h2><p class="muted">Claude works from this. Only what is listed here can go into the CV.
-The <code>contact</code> section is not sent to the API; it only goes into the PDF header. You can enter your phone number here.</p>
-<p><a href="/base-cv.pdf?photo=1" target="_blank"><button class="primary">⬇️ Base CV with photo (PDF)</button></a>
-<a href="/base-cv.pdf?photo=0" target="_blank"><button>⬇️ Base CV without photo (US)</button></a></p></div>
-<div class="card"><h2>Create the profile from your existing CV</h2>
-<p class="muted">The full text of your CV (including your contact details) is sent to the Anthropic API, and Claude processes it.
-The result is only a preview: check and fix it in the editor below; it is saved only with the Save button.
-It needs the API key (Settings → Claude API).</p>
-<form method="post" action="/profile/import-pdf" enctype="multipart/form-data" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input type="file" name="pdf" accept="application/pdf"><button class="primary">Process PDF</button></form>
-<form method="post" action="/profile/import" style="margin-top:10px">
-<textarea name="cv_text" style="min-height:140px" placeholder="…or paste the CV text here"></textarea><button class="primary">Process text</button></form></div>
-<div class="card"><h2>Editor</h2>
-<form method="post" action="/profile"><textarea name="profile" style="min-height:600px">%s</textarea><button class="primary">Save</button></form></div>""" % (
+    body = """<div class="ui"><div class="ui-head"><h1>CV profile</h1><p>The facts Claude works from: only what is here can go into a CV,
+cover letter or recruiter message. The <code>contact</code> part is never sent to the API; it only goes into the PDF header.</p>
+<div class="ui-btns" style="margin-top:12px"><a class="btn btn-sm btn-primary" href="/base-cv.pdf?photo=1" target="_blank">Base CV with photo (PDF)</a>
+<a class="btn btn-sm btn-outline" href="/base-cv.pdf?photo=0" target="_blank">Base CV without photo (for the US)</a></div></div>
+<section class="ui-section"><header><div><h2>Create it from your existing CV</h2><p class="ui-desc">Claude reads the CV (contact details included)
+and fills in the editor below. Nothing is saved until you check it and press Save. Needs the API key (Settings → Claude API).</p></div></header>
+<div class="ui-body"><div class="ui-grid">
+<form class="wide" method="post" action="/profile/import-pdf" enctype="multipart/form-data"><label for="pdf">From a PDF</label>
+<div class="join" style="width:100%%"><input class="file-input join-item" style="flex:1" type="file" id="pdf" name="pdf" accept="application/pdf">
+<button class="btn btn-primary join-item">Read the PDF</button></div></form>
+<form class="wide" method="post" action="/profile/import"><label for="cv_text">…or from text</label>
+<textarea class="textarea" id="cv_text" name="cv_text" rows="5" placeholder="Paste the text of your CV here"></textarea>
+<div style="margin-top:8px"><button class="btn btn-sm btn-primary btn-outline">Read the text</button></div></form>
+</div></div></section>
+<section class="ui-section"><header><div><h2>Editor</h2><p class="ui-desc">JSON: name, headline, contact, summary, skills, experience, languages, objective.</p></div></header>
+<form method="post" action="/profile"><div class="ui-body"><textarea class="textarea ui-mono" name="profile" rows="28" aria-label="CV profile (JSON)">%s</textarea></div>
+<div class="ui-foot"><span class="muted" style="font-size:13px">Saved only when you press Save.</span><button class="btn btn-primary">Save</button></div></form></section></div>""" % (
         e(current))
     return page("CV profile", body, flash)
 
