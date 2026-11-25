@@ -927,3 +927,83 @@ class EnrichAnySource(unittest.TestCase):
         self.assertIn("Unity", r["description"])
         self.assertEqual(r["work_mode"], "remote")
         self.assertGreater(r["score"], 2)
+
+
+class WorkModes(unittest.TestCase):
+    def test_text_rules_in_many_languages(self):
+        cases = [
+            ("", "", "Poste basé à Paris, en présentiel du lundi au vendredi.", "onsite"),
+            ("", "", "Vous bénéficiez de 2 jours de télétravail par semaine.", "hybrid"),
+            ("", "", "This role is fully remote within the EU.", "remote"),
+            ("", "", "Please note: no remote, the team works from our Lisbon office.", "onsite"),
+            ("", "", "Oferujemy pracę stacjonarną w biurze w Krakowie.", "onsite"),
+            ("", "", "Oferujemy praca zdalna z dowolnego miejsca.", "remote"),
+            ("", "", "Du arbetar på plats på vårt kontor i Stockholm.", "onsite"),
+            ("", "", "Wir bieten 2 Tage pro Woche im Büro, sonst Homeoffice.", "hybrid"),
+            ("", "", "Heti 2 nap home office, a többi napon irodában.", "hybrid"),
+            ("", "", "Perks: home office equipment budget. Our Remote Monitoring product is great.", "unknown"),
+            ("Unity Developer (Hybrid)", "Budapest", "", "hybrid"),
+            ("Mobile Engineer", "Hungary (Remote)", "", "remote"),
+        ]
+        for t, loc, d, want in cases:
+            got, ev = app.classify_mode_ex(t, loc, d)
+            self.assertEqual(got, want, d or t)
+            self.assertEqual(bool(ev), want != "unknown")
+
+    def test_mode_from_the_job_boards_own_page(self):
+        from unittest import mock
+        fourday = '<div><span><span>Onsite · Coventry, UK</span></span></div> other <span><span>Hybrid · London, UK</span></span>'
+        flexa = r'x":"i6l2r4"}]]},\"className\":\"mt-0.5\",\"size\":16}],\"Hybrid\"]}],[\"$\",\"div\"'
+        with mock.patch.object(app, "fetch", lambda u, **k: fourday):
+            self.assertEqual(app.mode_from_page("4dayweek", "u")[0], "onsite")   # the posting's own label, not the list below
+        with mock.patch.object(app, "fetch", lambda u, **k: flexa):
+            self.assertEqual(app.mode_from_page("flexa", "u")[0], "hybrid")
+        with mock.patch.object(app, "fetch", lambda u, **k: "<p>nothing</p>"):
+            self.assertEqual(app.mode_from_page("flexa", "u"), (None, ""))
+
+    def test_background_settling_order_and_manual_is_kept(self):
+        import cvgen
+        from unittest import mock
+        app.init_db()
+        app.migrate_db()
+        rows = [("flexa:1", "flexa", "Designer", "", "Nothing here"),
+                ("linkedin:2", "linkedin", "Engineer", "Paris", "Le poste est en présentiel à Paris."),
+                ("linkedin:3", "linkedin", "Programmer", "Paris", "Join our studio team. " * 20),
+                ("linkedin:4", "linkedin", "Artist", "Paris", "Join our studio team. " * 20)]
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            for jid, src, title, loc, d in rows:
+                con.execute("INSERT INTO jobs(id,source,title,location,url,description,score,status,first_seen,work_mode) "
+                            "VALUES(?,?,?,?,?,?,5,'new','2026-11-25','unknown')", (jid, src, title, loc, "https://x/" + jid, d))
+            con.execute("UPDATE jobs SET mode_src='manual' WHERE id='linkedin:4'")
+        cfg = app.load_config()
+        cfg["anthropic_api_key"] = "k"
+        flexa_page = r'\"size\":16}],\"Remote-first\"]'
+        claude_calls = []
+
+        def fake_claude(key, title, loc, d):
+            claude_calls.append(title)
+            return "onsite", "Join our studio team."
+        with mock.patch.object(app, "fetch", lambda u, **k: flexa_page), mock.patch.object(app.time, "sleep", lambda s: None), \
+                mock.patch.object(cvgen, "work_mode_from_text", fake_claude):
+            app.enrich_work_modes(cfg)
+        with app.db() as con:
+            got = {r["id"]: (r["work_mode"], r["mode_src"]) for r in con.execute("SELECT id, work_mode, mode_src FROM jobs")}
+        self.assertEqual(got["flexa:1"], ("remote", "page"))        # the board's own label
+        self.assertEqual(got["linkedin:2"], ("onsite", "text"))     # rules, no API call
+        self.assertEqual(got["linkedin:3"], ("onsite", "claude"))   # only the rest goes to Claude
+        self.assertEqual(got["linkedin:4"], ("unknown", "manual"))  # never touched
+        self.assertEqual(claude_calls, ["Programmer"])
+
+    def test_exact_mode_from_a_duplicate_settles_an_unknown_one(self):
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+            con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,work_mode,dupkey,urlkey) "
+                        "VALUES('linkedin:9','linkedin','Unity Dev','Acme','https://www.linkedin.com/jobs/view/9999999/',5,'new','2026-11-25',"
+                        "'unknown',?, 'li:9999999')", (app.dup_key("Unity Dev", "Acme", ""),))
+            row = app.find_duplicate(con, "Unity Dev", "", "https://www.linkedin.com/comm/jobs/view/9999999/?x=1")
+            app.merge_into(con, row, "mail", {"work_mode": "hybrid"})
+            r = con.execute("SELECT work_mode, mode_src FROM jobs WHERE id='linkedin:9'").fetchone()
+        self.assertEqual((r["work_mode"], r["mode_src"]), ("hybrid", "source"))

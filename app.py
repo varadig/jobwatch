@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "min_score": 4,          # below this score a posting is hidden from the list by default
     "notify_min_score": 7,   # from this score on, a notification is sent
     "notify_work_modes": ["remote", "unknown"],   # no notification for hybrid/on-site postings
+    "mode_claude": True,     # Claude reads the postings whose work mode the page and the rules cannot settle
     "default_work_filter": "remote_unknown",
     "public_url": "http://localhost:%d/" % PORT,
     "anthropic_api_key": "",
@@ -176,7 +177,8 @@ def migrate_db():
             for r in con.execute("SELECT id, source, title, location, description FROM jobs").fetchall():
                 m = "remote" if r["source"] == "remotive" else classify_mode(r["title"], r["location"], r["description"])
                 con.execute("UPDATE jobs SET work_mode=? WHERE id=?", (m, r["id"]))
-        for col in ("urlkey", "also_sources", "dup_of"):
+        # mode_src: where the work mode comes from (source / page / text / claude / manual); mode_note: the evidence
+        for col in ("urlkey", "also_sources", "dup_of", "mode_src", "mode_note", "mode_checked"):
             if col not in cols:
                 con.execute("ALTER TABLE jobs ADD COLUMN %s TEXT" % col)
         con.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(urlkey)")
@@ -284,6 +286,11 @@ def merge_into(con, row, source, it):
     con.execute("UPDATE jobs SET also_sources=?, company=CASE WHEN COALESCE(company,'')='' THEN ? ELSE company END, "
                 "description=CASE WHEN COALESCE(description,'')='' THEN ? ELSE description END WHERE id=?",
                 (",".join(also), it.get("company") or "", it.get("description") or "", row["id"]))
+    # an exact work mode from the other source (e.g. "(Hybrid)" in a LinkedIn alert e-mail) settles an unknown one
+    if it.get("work_mode") in ("remote", "hybrid", "onsite"):
+        con.execute("UPDATE jobs SET work_mode=?, mode_src='source', mode_note=? WHERE id=? AND "
+                    "COALESCE(work_mode,'unknown')='unknown' AND COALESCE(mode_src,'')!='manual'",
+                    (it["work_mode"], "from " + SOURCES_INFO.get(source, (source,))[0], row["id"]))
 
 
 def dedupe_existing(con):
@@ -316,39 +323,66 @@ def dedupe_existing(con):
     return hidden
 
 
-WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 On-site", "unknown": "❔ Unknown"}
+WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 On-site", "unknown": "❔ Not stated"}
 WT_LINKEDIN = {"2": "remote", "3": "hybrid", "1": "onsite"}
 
 
-RE_HYB = re.compile(r"\bhybrid\b|hibrid|teilweise remote|\b\d\s*(?:-\s*\d\s*)?days?\s*(?:a|per)\s*week\s*(?:in|at|from)\s*(?:the|our)?\s*office|"
-                    r"(?:in|at|from)\s*(?:the|our)\s*office\s*\d\s*(?:-\s*\d\s*)?days", re.I)
-RE_ONS = re.compile(r"\bon-?site\b|\bin-office\b|office-based|fully in[- ]office|\birodai\b|vor ort|"
-                    r"work(?:ing)? from (?:our|the) (?:office|studio)|relocat(?:e|ion) to", re.I)
-RE_REM_STRONG = re.compile(r"fully remote|100\s*% remote|remote-first|remote first|\bfully distributed|work from anywhere|"
-                           r"remote work is possible|remote (?:position|role|job|opportunity)|work(?:ing)? remotely|"
-                           r"távmunka|teljesen remote", re.I)
-RE_REM_TL = re.compile(r"\bremote\b|anywhere|home office|\bwfh\b", re.I)
+# Work-mode wording in the languages the postings come in (en, hu, de, fr, es, it, pl, sv, nl).
+RE_HYB = re.compile(
+    r"\bhybrid\w*|\bhibrid\w*|\bhybride\b|\bhíbrid[oa]\b|\bibrid[oa]\b|\bhybrydow\w*|teilweise remote|"
+    r"\b\d\s*(?:-\s*\d\s*)?days?\s*(?:a|per|each)\s*week\s*(?:in|at|from)\s*(?:the|our)?\s*(?:office|studio)|"
+    r"(?:in|at|from)\s*(?:the|our)\s*(?:office|studio)\s*\d\s*(?:-\s*\d\s*)?days|"
+    r"\d\s*(?:-\s*\d\s*)?(?:jours?|days?)\s*(?:de\s*)?(?:télétravail|remote|home ?office)|télétravail\s*(?:partiel|possible|\d)|"
+    r"possibilité de télétravail|\d\s*tage?\s*(?:pro woche\s*)?(?:im büro|vor ort|homeoffice|home office)|homeoffice[- ]möglichkeit|"
+    r"home office lehetőség|heti\s*\d\s*nap|teletrabajo parcial|smart working|flexible (?:office|home) (?:days|working)", re.I)
+RE_ONS = re.compile(
+    r"\bon-?site\b|\bonsite\b|\bin-office\b|office-based|studio-based|fully in[- ]office|"
+    r"\birodai\b|irodában|helyszíni munka|vor ort|präsenz\w*|\bsur site\b|\ben présentiel\b|présentiel|"
+    r"\bpresencial\b|in sede|stacjonarn\w*|w biurze|på plats|på kontoret|op kantoor|"
+    r"work(?:ing)? from (?:our|the) (?:office|studio)|relocat(?:e|ion) to|"
+    r"\b(?:no|not a|not)[- ]remote\b|remote (?:work )?(?:is )?not (?:possible|available|an option|offered)|"
+    r"this (?:role|position) is not remote", re.I)
+RE_REM_STRONG = re.compile(
+    r"fully remote|full[- ]remote|100\s*%\s*remote|remote[- ]first|\bfully distributed|work from anywhere|"
+    r"remote work is possible|remote (?:position|role|job|opportunity)|work(?:ing)? remotely|"
+    r"távmunka|teljesen remote|100\s*%\s*(?:télétravail|homeoffice|home office)|full télétravail|télétravail complet|"
+    r"vollständig remote|komplett remote|praca zdalna|w pełni zdaln\w*|totalmente remoto|en remoto|100\s*%\s*remoto|"
+    r"helt på distans|distansarbete", re.I)
+RE_REM_TL = re.compile(r"\bremote\b|anywhere|home office|\bwfh\b|télétravail|zdaln\w*|remoto", re.I)
+RE_NOT_REMOTE = re.compile(r"\b(?:no|not a|not)[- ]remote\b|remote (?:work )?(?:is )?not (?:possible|available|an option|offered)|"
+                           r"this (?:role|position) is not remote", re.I)
+
+
+def _evidence(text, m):
+    a, b = max(0, m.start() - 50), min(len(text), m.end() + 50)
+    return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
+
+
+def classify_mode_ex(title="", location="", description=""):
+    """(work mode, evidence quote). Title/location are strong signals; in the description only unambiguous
+    phrases count; "no remote" style negations mean on-site."""
+    tl = " ".join(x or "" for x in (title, location))
+    for rx, mode in ((RE_HYB, "hybrid"), (RE_NOT_REMOTE, "onsite"), (re.compile(r"\bon-?site\b|in-office|\bonsite\b", re.I), "onsite"),
+                     (RE_REM_TL, "remote")):
+        m = rx.search(tl)
+        if m:
+            return mode, _evidence(tl, m)
+    d = description or ""
+    neg = RE_NOT_REMOTE.search(d)
+    if neg:
+        return "onsite", _evidence(d, neg)
+    rem, hyb, ons = RE_REM_STRONG.search(d), RE_HYB.search(d), RE_ONS.search(d)
+    if rem and not hyb:
+        return "remote", _evidence(d, rem)
+    if hyb:
+        return "hybrid", _evidence(d, hyb)
+    if ons:
+        return "onsite", _evidence(d, ons)
+    return "unknown", ""
 
 
 def classify_mode(title="", location="", description=""):
-    """Work mode. Title/location are strong signals; in the description only unambiguous phrases count."""
-    tl = " ".join(x or "" for x in (title, location))
-    if RE_HYB.search(tl):
-        return "hybrid"
-    if re.search(r"\bon-?site\b|in-office", tl, re.I):
-        return "onsite"
-    if RE_REM_TL.search(tl):
-        return "remote"
-    d = description or ""
-    if RE_REM_STRONG.search(d) and not RE_HYB.search(d):
-        return "remote"
-    if RE_HYB.search(d):
-        return "hybrid"
-    if RE_ONS.search(d):
-        return "onsite"
-    if RE_REM_STRONG.search(d):
-        return "remote"
-    return "unknown"
+    return classify_mode_ex(title, location, description)[0]
 
 
 def norm_mode(v):
@@ -949,7 +983,8 @@ def src_mail(cfg):
                     continue
                 out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
                             "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
-                            "url": url, "posted": parsedate_iso(msg.get("Date")), "description": ""})
+                            "url": url, "posted": parsedate_iso(msg.get("Date")), "description": "",
+                            "work_mode": j.get("work_mode") if j.get("work_mode") in ("remote", "hybrid", "onsite") else None})
             done.append((msgid, len(jobs)))
     cfg.setdefault("_mail_done", []).extend(done)
     if errs:
@@ -1000,7 +1035,8 @@ def job_from_page(url):
             job.update(title=strip_tags(n.get("title") or ""), company=org.get("name") or "",
                        location=", ".join(x for x in place + [remote] if x),
                        description=strip_tags(html.unescape(n.get("description") or ""))[:8000],
-                       logo=(logo.get("url") if isinstance(logo, dict) else logo) or "", posted=n.get("datePosted") or "")
+                       logo=(logo.get("url") if isinstance(logo, dict) else logo) or "", posted=n.get("datePosted") or "",
+                       work_mode="remote" if remote else None)
             return job
     meta = lambda prop: (lambda mm: html.unescape(mm.group(1)).strip() if mm else "")(
         re.search(r'<meta[^>]+(?:property|name)="%s"[^>]+content="([^"]*)"' % prop, pg, re.I))
@@ -1028,7 +1064,11 @@ def add_job_by_link(url):
     with CFG_LOCK:
         cfg = load_config()
     sc, hits = score_job(cfg, it)
-    wm = classify_mode(it["title"], it["location"], it["description"])
+    if it.get("work_mode") == "remote":   # the page's structured data says TELECOMMUTE
+        wm, msrc, mnote = "remote", "source", "from the posting page (structured data)"
+    else:
+        wm, mnote = classify_mode_ex(it["title"], it["location"], it["description"])
+        msrc = "text" if wm != "unknown" else None
     jid, ts = "manual:" + it["ext_id"], now_iso()
     with db() as con:
         remember_logo(con, it["company"], it.get("logo"))
@@ -1037,9 +1077,12 @@ def add_job_by_link(url):
             merge_into(con, same, "manual", it)
             return same["id"], "This posting is already in the list (from %s)." % SOURCES_INFO.get(same["source"], (same["source"],))[0]
         con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
-                    "first_seen,last_seen,status,notified,work_mode,urlkey) VALUES(?,'manual',?,?,?,?,?,?,?,?,?,?,?,'new',1,?,?)",
+                    "first_seen,last_seen,status,notified,work_mode,urlkey,mode_src,mode_note) "
+                    "VALUES(?,'manual',?,?,?,?,?,?,?,?,?,?,?,'new',1,?,?,?,?)",
                     (jid, it["title"][:200], it["company"][:120], it["location"][:200], it["url"], it["posted"], it["description"],
-                     sc, ", ".join(hits), dup_key(it["title"], it["company"], it["url"]), ts, ts, wm, url_key(it["url"])))
+                     sc, ", ".join(hits), dup_key(it["title"], it["company"], it["url"]), ts, ts, wm, url_key(it["url"]), msrc, mnote))
+    if wm == "unknown":
+        threading.Thread(target=enrich_work_modes, args=(cfg,), daemon=True).start()
     threading.Thread(target=fetch_logos, daemon=True).start()
     return jid, "Added: %s (%d points)." % (it["title"][:80], sc)
 
@@ -1111,7 +1154,7 @@ def enrich_linkedin(con, items, limit=60):
         n += 1
         if d:
             it["description"] = d
-            it["work_mode"] = classify_mode(it["title"], it["location"], d)
+            it["work_mode"], it["mode_note"] = classify_mode_ex(it["title"], it["location"], d)
         time.sleep(6)
     return n
 
@@ -1298,14 +1341,122 @@ def enrich_pending_linkedin(cfg, limit=60):
                     continue
                 jid = it["row_id"]
                 sc, hits = score_job(cfg, it)
-                con.execute("UPDATE jobs SET description=?, work_mode=?, score=?, matched=? WHERE id=?",
-                            (it["description"], it["work_mode"], sc, ", ".join(hits), jid))
+                con.execute("UPDATE jobs SET description=?, score=?, matched=? WHERE id=?",
+                            (it["description"], sc, ", ".join(hits), jid))
+                if it.get("work_mode", "unknown") != "unknown":  # the text decides only where nothing exact is known
+                    con.execute("UPDATE jobs SET work_mode=?, mode_src='text', mode_note=? WHERE id=? AND "
+                                "COALESCE(mode_src,'') NOT IN ('manual','source','page')", (it["work_mode"], it.get("mode_note"), jid))
         log.info("LinkedIn descriptions: %d updated", sum(1 for it in items if it.get("description")))
     except Exception:
         log.exception("LinkedIn background enrichment failed")
     finally:
         STATE["enrich"] = None
         ENRICH_LOCK.release()
+    threading.Thread(target=enrich_work_modes, args=(cfg,), daemon=True).start()  # descriptions arrived: settle the rest
+
+
+# ---------------------------------------------------------------- settling unknown work modes
+MODE_LOCK = threading.Lock()
+MODE_CLAUDE_PER_RUN = 40
+FLEXA_MODE = {"On-site": "onsite", "Hybrid": "hybrid", "Remote-first": "remote", "Remote": "remote", "Field-based": "onsite",
+              "Work from anywhere": "remote"}
+FOURDAY_MODE = {"remote": "remote", "hybrid": "hybrid", "onsite": "onsite", "on-site": "onsite", "on site": "onsite",
+                "office": "onsite", "in-office": "onsite", "in office": "onsite"}
+
+
+def mode_why(r):
+    src, note = r.get("mode_src") or "", r.get("mode_note") or ""
+    if src == "manual":
+        return "Set by you."
+    if src in ("source", "page"):
+        return "Exact, %s." % (note or "from the source")
+    if src == "text":
+        return "From the posting text: %s" % note
+    if src == "claude":
+        return "Claude read the posting: %s" % note
+    if (r.get("work_mode") or "unknown") == "unknown":
+        return "The posting does not say (or it was not checked yet). Set it here if you know it."
+    return "From the posting text."
+
+
+def mode_picker(r):
+    """The work-mode chip on a card: shows where the value comes from, and opens a menu to set it by hand."""
+    wm = r.get("work_mode") or "unknown"
+    src = r.get("mode_src") or ""
+    mark = {"manual": " ✎", "claude": " ✦"}.get(src, "")
+    qid = e(urllib.parse.quote(r["id"], safe=""))
+    opts = "".join('<button class="btn btn-xs btn-ghost%s" name="work_mode" value="%s">%s</button>' % (
+        " btn-active" if k == wm and src == "manual" else "", k, e(WORK_MODES[k])) for k in ("remote", "hybrid", "onsite"))
+    return ('<details class="wm-pick"><summary class="chip wm-%s" title="%s">%s%s ▾</summary>'
+            '<form class="wm-menu" method="post" action="/job/%s"><div class="muted">%s</div>%s'
+            '<button class="btn btn-xs btn-ghost" name="work_mode" value="auto" title="Let jobwatch decide again">↺ Automatic</button>'
+            '</form></details>') % (e(wm), e(mode_why(r)), e(WORK_MODES.get(wm, wm)), mark, qid, e(mode_why(r)), opts)
+
+
+def mode_from_page(source, url):
+    """The work mode a job board states on the posting's own page (4dayweek, Flexa): (mode, note) or (None, "")."""
+    if source == "4dayweek":
+        pg = fetch(url, timeout=20)
+        m = re.search(r"<span><span>([A-Za-z -]{3,20}?) · ([^<]{1,80})</span>", pg)
+        if m and m.group(1).strip().lower() in FOURDAY_MODE:
+            return FOURDAY_MODE[m.group(1).strip().lower()], "4dayweek: “%s · %s”" % (m.group(1).strip(), html.unescape(m.group(2)))
+    elif source == "flexa":
+        pg = fetch(url, timeout=20).replace('\\"', '"')
+        m = re.search(r'"size":16\}\],"(%s)"\]' % "|".join(map(re.escape, FLEXA_MODE)), pg)
+        if m:
+            return FLEXA_MODE[m.group(1)], "Flexa: “%s”" % m.group(1)
+    return None, ""
+
+
+def enrich_work_modes(cfg, limit=80):
+    """Background job: settles postings whose work mode is unknown — first from the job board's own page
+    (4dayweek, Flexa), then from the text in many languages, then (if turned on) Claude reads the posting.
+    A manual choice is never touched. Each posting is checked once (again after 3 days if still unknown)."""
+    if not MODE_LOCK.acquire(blocking=False):
+        return
+    try:
+        import cvgen
+        old = datetime.fromtimestamp(time.time() - 3 * 86400, timezone.utc).isoformat()
+        with db() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT id, source, url, title, location, description FROM jobs WHERE dup_of IS NULL AND "
+                "COALESCE(work_mode,'unknown')='unknown' AND COALESCE(mode_src,'')!='manual' AND "
+                "(mode_checked IS NULL OR mode_checked < ?) ORDER BY first_seen DESC LIMIT ?", (old, limit))]
+        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+        use_claude = cfg.get("mode_claude", True) and key
+        settled, asked = 0, 0
+        for r in rows:
+            mode, src, note = None, None, ""
+            if r["source"] in ("4dayweek", "flexa"):
+                try:
+                    mode, note = mode_from_page(r["source"], r["url"])
+                    src = "page" if mode else None
+                except Exception as ex:
+                    log.info("Work mode page %s: %s", r["url"], ex)
+                time.sleep(1)
+            if not mode:
+                m2, n2 = classify_mode_ex(r["title"], r["location"], r["description"])
+                if m2 != "unknown":
+                    mode, src, note = m2, "text", n2
+            if not mode and use_claude and len(r["description"] or "") > 200 and asked < MODE_CLAUDE_PER_RUN:
+                asked += 1
+                try:
+                    m3, n3 = cvgen.work_mode_from_text(key, r["title"], r["location"], r["description"])
+                    if m3 != "unknown":
+                        mode, src, note = m3, "claude", n3
+                except Exception as ex:
+                    log.info("Work mode (Claude) %s: %s", r["id"], ex)
+            with db() as con:
+                if mode:
+                    settled += 1
+                    con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=?, mode_checked=? WHERE id=? AND "
+                                "COALESCE(mode_src,'')!='manual'", (mode, src, note[:300], now_iso(), r["id"]))
+                else:
+                    con.execute("UPDATE jobs SET mode_checked=? WHERE id=?", (now_iso(), r["id"]))
+        if rows:
+            log.info("Work modes: %d of %d unknown settled (%d read by Claude)", settled, len(rows), asked)
+    finally:
+        MODE_LOCK.release()
 
 
 def run_all(force=False, only=None, custom_ids=None):
@@ -1356,17 +1507,22 @@ def run_all(force=False, only=None, custom_ids=None):
                     sc, hits = score_job(cfg, it)
                     # without an employer the title alone is not enough to call two postings the same
                     dup = dup_key(it["title"], it["company"], it["url"])
-                    wm = it.get("work_mode") or classify_mode(it["title"], it["location"], it.get("description"))
-                    ex_row = con.execute("SELECT id FROM jobs WHERE id=?", (jid,)).fetchone()
+                    if it.get("work_mode") in ("remote", "hybrid", "onsite"):   # the source says it: exact
+                        wm, msrc, mnote = it["work_mode"], "source", "from " + SOURCES_INFO.get(name, (name,))[0]
+                    else:
+                        wm, mnote = classify_mode_ex(it["title"], it["location"], it.get("description"))
+                        msrc = "text" if wm != "unknown" else None
+                    ex_row = con.execute("SELECT id, mode_src FROM jobs WHERE id=?", (jid,)).fetchone()
                     if ex_row:
+                        keep = (ex_row["mode_src"] or "") in ("manual", "source", "page")  # never overwrite what is exact
                         if it.get("description") and name == "linkedin":
                             sc2, hits2 = score_job(cfg, it)
-                            con.execute("UPDATE jobs SET last_seen=?, work_mode=?, description=?, score=?, matched=? WHERE id=?",
-                                        (ts, wm, it["description"], sc2, ", ".join(hits2), jid))
-                        elif it.get("work_mode"):  # an exact value from the source overrides the estimate
-                            con.execute("UPDATE jobs SET last_seen=?, work_mode=? WHERE id=?", (ts, wm, jid))
+                            con.execute("UPDATE jobs SET last_seen=?, description=?, score=?, matched=? WHERE id=?",
+                                        (ts, it["description"], sc2, ", ".join(hits2), jid))
                         else:
                             con.execute("UPDATE jobs SET last_seen=? WHERE id=?", (ts, jid))
+                        if wm != "unknown" and (msrc == "source" or not keep) and (ex_row["mode_src"] or "") != "manual":
+                            con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=? WHERE id=?", (wm, msrc, mnote, jid))
                         continue
                     same = find_duplicate(con, it["title"], it["company"], it["url"])
                     if same:
@@ -1376,9 +1532,11 @@ def run_all(force=False, only=None, custom_ids=None):
                                      and wm in cfg.get("notify_work_modes", ["remote", "unknown"])) else 1
                     con.execute(
                         "INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,"
-                        "dupkey,first_seen,last_seen,status,notified,work_mode,urlkey) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?)",
+                        "dupkey,first_seen,last_seen,status,notified,work_mode,urlkey,mode_src,mode_note) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?)",
                         (jid, name, it["title"], it["company"], it["location"], it["url"], it["posted"],
-                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, notified, wm, url_key(it["url"])))
+                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, notified, wm, url_key(it["url"]),
+                         msrc, mnote))
                     new += 1
                     if not notified:
                         to_notify.append(dict(id=jid, source=name, score=sc, **{
@@ -1410,6 +1568,7 @@ def run_all(force=False, only=None, custom_ids=None):
             # descriptions for LinkedIn postings come later, in the background, so the list is not held up
             threading.Thread(target=enrich_pending_linkedin, args=(cfg,), daemon=True).start()
         threading.Thread(target=fetch_logos, daemon=True).start()
+        threading.Thread(target=enrich_work_modes, args=(cfg,), daemon=True).start()
     finally:
         STATE["running"] = False
         STATE["last_run"] = now_iso()
@@ -1506,6 +1665,11 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
 .ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
 .ui-addjob{margin-top:12px;width:100%;max-width:620px}.ui-addjob input{flex:1}
+details.wm-pick{display:inline-block;position:relative}details.wm-pick>summary{list-style:none;cursor:pointer}
+details.wm-pick>summary::-webkit-details-marker{display:none}
+.wm-menu{position:absolute;z-index:6;top:calc(100% + 4px);left:0;min-width:230px;max-width:320px;display:flex;flex-direction:column;
+  align-items:stretch;gap:2px;padding:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.wm-menu .muted{font-size:12px;line-height:1.35;padding:2px 4px 6px;white-space:normal}.wm-menu .btn{justify-content:flex-start}
 .job-head{display:flex;gap:12px;align-items:center}.job-head>div{min-width:0}
 .logo{flex:0 0 auto;border-radius:9px;object-fit:contain;background:#fff;border:1px solid var(--line)}
 .logo.ph{display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;
@@ -1894,8 +2058,7 @@ def jobs_page(q):
         sc = r["score"]
         cls = "s-hi" if sc >= cfg["notify_min_score"] else ("s-mid" if sc >= cfg["min_score"] else "")
         qid = e(urllib.parse.quote(r["id"], safe=""))
-        chips = ['<span class="chip wm-%s">%s</span>' % (e(r["work_mode"] or "unknown"),
-                                                         e(WORK_MODES.get(r["work_mode"] or "unknown", "")))]
+        chips = [mode_picker(r)]
         if r["location"] and r["location"].strip().lower() not in ("remote", "(remote)", "anywhere"):
             chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:60]))
         if r["_closed"]:
@@ -2186,6 +2349,10 @@ def settings_page(flash=""):
     search = ui_sec("search", "Job search", "Which sites are searched, and how often.",
         '<div class="ui-grid"><div class="wide"><label>Sources</label><div class="ui-checks">%s</div></div>' % src_boxes
         + ui_field("interval", "Refresh every (minutes)", cfg["interval_minutes"], "number", "At least 15.", ' min="15"')
+        + '<div><label>Work mode (remote / hybrid / on-site)</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
+          'class="toggle toggle-sm toggle-primary" name="mode_claude"%s> Claude reads the postings the rules cannot settle</label>'
+          '<span class="help">First the job board\'s own data and the posting text (in many languages) decide; Claude only reads '
+          'what is still unknown, about ¼ cent per posting. You can always set it by hand on the card.</span></div>' % chk(cfg.get("mode_claude", True))
         + ta("linkedin_searches", "LinkedIn searches", "\n".join(cfg["linkedin_searches"]), 5,
              "One per line: <code>keywords | location</code>. Postings from the last 7 days; the work mode comes from the posting text.")
         + ta("studios", "Company job boards", "\n".join(cfg.get("studios") or []), 6,
@@ -2275,6 +2442,8 @@ def save_settings(f):
         if g("smtp_pass"):
             cfg["email"]["password"] = g("smtp_pass").replace(" ", "")
         cfg["interval_minutes"] = max(15, int(g("interval", "60") or 60))
+        if "interval" in f:
+            cfg["mode_claude"] = "mode_claude" in f
         cfg["min_score"] = int(g("min_score", "4") or 4)
         cfg["notify_min_score"] = int(g("notify_min_score", "7") or 7)
         cfg["notify_work_modes"] = [k for k in WORK_MODES if ("nwm_" + k) in f]
@@ -3323,6 +3492,16 @@ class Handler(BaseHTTPRequestHandler):
                 if st in STATUS_LABEL:
                     with db() as con:
                         con.execute("UPDATE jobs SET status=? WHERE id=?", (st, jid))
+                wm = f.get("work_mode")
+                if wm in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten
+                    with db() as con:
+                        con.execute("UPDATE jobs SET work_mode=?, mode_src='manual', mode_note='set by you' WHERE id=?", (wm, jid))
+                elif wm == "auto":                           # back to automatic: decided again in the background
+                    with db() as con:
+                        con.execute("UPDATE jobs SET work_mode='unknown', mode_src=NULL, mode_note=NULL, mode_checked=NULL WHERE id=?", (jid,))
+                    with CFG_LOCK:
+                        cfg_ = load_config()
+                    threading.Thread(target=enrich_work_modes, args=(cfg_,), daemon=True).start()
                 return self.redirect(self.back())
             if u.path == "/profile":
                 try:

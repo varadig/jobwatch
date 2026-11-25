@@ -215,8 +215,9 @@ MAIL_JOBS_SCHEMA = {
     "type": "object",
     "properties": {"jobs": {"type": "array", "items": {
         "type": "object",
-        "properties": {"title": _STR, "company": _STR, "location": _STR, "url": _STR},
-        "required": ["title", "company", "location", "url"], "additionalProperties": False}}},
+        "properties": {"title": _STR, "company": _STR, "location": _STR, "url": _STR,
+                       "work_mode": {"type": "string", "enum": ["remote", "hybrid", "onsite", "unknown"]}},
+        "required": ["title", "company", "location", "url", "work_mode"], "additionalProperties": False}}},
     "required": ["jobs"],
     "additionalProperties": False,
 }
@@ -225,8 +226,60 @@ MAIL_JOBS_SYSTEM = """You read one job alert e-mail (from a job board, a recruit
 Rules:
 - Only real job postings the e-mail recommends. Not newsletters, tips, the sender's own careers page, "see all jobs" links, settings, surveys or ads.
 - title: the job title as written. company: the hiring company ("" if not given). location: as written, including remote/hybrid if stated ("" if not given).
+- work_mode: exactly as the e-mail states it for that posting, e.g. "Budapest (Hybrid)" -> hybrid, "(On-site)" -> onsite, "Remote" -> remote. If the e-mail does not state it for that posting, "unknown". Never guess from the city alone.
 - url: the link that opens that posting, copied exactly from the <links> list (the link whose text or position belongs to that posting). If the e-mail has no link for a posting, use "".
 - Return an empty list if the e-mail recommends no postings."""
+
+
+# ---------------------------------------------------------------- work mode of a posting
+WORK_MODE_SCHEMA = {
+    "type": "object",
+    "properties": {"work_mode": {"type": "string", "enum": ["remote", "hybrid", "onsite", "unknown"]}, "evidence": _STR},
+    "required": ["work_mode", "evidence"],
+    "additionalProperties": False,
+}
+WORK_MODE_SYSTEM = """You decide where the work of one job posting is done. The posting may be in any language.
+
+- remote: fully remote, remote-first, work from anywhere or from home with no regular office days.
+- hybrid: a mix of office and home work (regular office days, "x days a week in the office", "flexible home office", partial télétravail…).
+- onsite: the work is done at the office, studio or site, with no remote option (for example "office-based", "in our Paris studio, on-site", "no remote", "présentiel").
+- unknown: the posting does not say. Do not guess from a city name or a company address alone, and do not count perks like "home office equipment" or remote-related products as the work mode.
+
+evidence: the short quote (max 140 characters, in the posting's language) that decides it; "" for unknown."""
+
+
+def work_mode_from_text(api_key, title, location, description):
+    """Claude API call: (work mode, evidence quote) from the posting text, for postings the rules could not decide."""
+    import anthropic
+
+    user = "<posting>\nTitle: %s\nLocation: %s\n\n%s\n</posting>" % (title, location or "-", (description or "")[:12000])
+    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
+    try:
+        resp = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": WORK_MODE_SCHEMA}},
+            system=WORK_MODE_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+    except anthropic.AuthenticationError:
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
+    except anthropic.RateLimitError:
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
+    except anthropic.APIStatusError as e:
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
+    except anthropic.APIConnectionError:
+        raise CVError("Cannot reach the Claude API (network error).")
+    if resp.stop_reason in ("refusal", "max_tokens"):
+        raise CVError("The model did not answer (%s)." % resp.stop_reason)
+    try:
+        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
+    except ValueError:
+        raise CVError("The model's response is not valid JSON.")
+    mode = data.get("work_mode") if data.get("work_mode") in ("remote", "hybrid", "onsite") else "unknown"
+    return mode, (data.get("evidence") or "")[:200] if mode != "unknown" else ""
 
 
 def jobs_from_email(api_key, subject, sender, text, links):
