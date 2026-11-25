@@ -478,15 +478,15 @@ class Outreach(unittest.TestCase):
         self.assertEqual([(r["status"], r["message"]) for r in rows[-2:]], [("draft", "Hello Anna"), ("draft", "Hello Bob")])
         html = app.outreach_page({})
         self.assertIn("Hello Anna", html)
-        self.assertIn("🔗 Open profile", html)
+        self.assertIn("Open profile", html)
         oid = rows[-2]["id"]
         self.assertEqual(app.outreach_action(oid, {"act": "save", "message": "edited"}), "Saved.")
         self.assertIn("Marked as sent", app.outreach_action(oid, {"act": "sent", "message": "edited"}))
         html = app.outreach_page({})
-        self.assertIn("Sent messages (1)", html)
-        self.assertEqual(html.count("<details"), 1)
+        self.assertIn("1 sent", html)
+        self.assertEqual(html.count("<dialog"), 1)
         self.assertEqual(app.outreach_action(oid, {"act": "unsent"}), "Moved back to drafts.")
-        self.assertNotIn("Sent messages", app.outreach_page({}))
+        self.assertNotIn("<dialog", app.outreach_page({}))
         app.outreach_action(oid, {"act": "sent"})
         with app.db() as con:
             r = con.execute("SELECT status, message, sent_at FROM outreach WHERE id=?", (oid,)).fetchone()
@@ -608,3 +608,13 @@ class OutreachSpecific(unittest.TestCase):
             t = app.resolve_role("https://www.linkedin.com/jobs/view/8888888/", waits=(0, 0))
         self.assertIn(app.ROLE_UNREAD, t)
         self.assertEqual(len(calls), 3)  # first try + 2 retries
+
+
+class LinkedInHeadless(unittest.TestCase):
+    def test_location_in_place_of_a_headline_is_not_a_title(self):
+        from unittest import mock
+        pg = ('<meta property="og:title" content="Rita Tóth - Budapest, Budapest, Hungary | Professional Profile | LinkedIn">'
+              '<meta property="og:description" content="Experience: Amiqus · Location: Budapest, Budapest, Hungary · 500+ connections on LinkedIn.">')
+        with mock.patch.object(app, "fetch", lambda u, **k: pg):
+            r = app.linkedin_preview("https://www.linkedin.com/in/rita-toth/")
+        self.assertEqual((r["name"], r["title"]), ("Rita Tóth", "@ Amiqus"))

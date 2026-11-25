@@ -1050,6 +1050,54 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
 @media (max-width:700px){.job{grid-template-columns:42px 1fr}.acts{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;min-width:0}
 .acts .icons{justify-content:flex-start}.score{width:42px;height:42px}.bucket{top:88px}.row-chips .lbl{width:100%}}
+/* shared page building blocks (ui-*) and the Recruiters page (rc-*) */
+.rc{max-width:900px;margin:0 auto}
+.ui-head{margin:4px 0 18px}.ui-head h1{font-size:22px;font-weight:700;margin:0}
+.ui-head p{margin:4px 0 0;color:var(--muted);max-width:70ch}
+.ui-stats{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.ui-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:18px}
+.ui-section>header{position:static;background:none;display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:14px 18px;border-bottom:1px solid var(--line)}
+.ui-section>header h2{font-size:16px;font-weight:650;margin:0}
+.ui-body{padding:16px 18px}
+.ui-step{display:flex;gap:12px;margin-bottom:20px}.ui-step:last-child{margin-bottom:0}
+.ui-num{flex:0 0 26px;height:26px;border-radius:99px;background:var(--acc-soft);color:var(--acc);font-weight:700;
+  display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:1px}
+.ui-step>div{flex:1;min-width:0}.ui-step h3{font-size:14.5px;font-weight:650;margin:2px 0 10px}
+.ui-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px}.ui-grid .wide{grid-column:1/-1}
+.ui-grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 14px}
+.ui label{display:block;font-weight:600;font-size:13px;margin:0 0 4px}
+.ui .help{display:block;font-weight:400;color:var(--muted);font-size:12.5px;margin-top:3px}
+.ui input.input,.ui select.select{width:100%}
+.ui textarea.textarea{width:100%;font-family:inherit;font-size:14.5px;line-height:1.55;min-height:120px}
+.rc-people{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.rc-people table td,.rc-people table th{font-size:13.5px;vertical-align:middle}
+.rc-people .empty{padding:14px;color:var(--muted);font-size:13.5px;text-align:center}
+.ui-hint{min-height:20px;font-size:13px;color:var(--muted);margin-top:6px}
+.ui-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:14px 18px;border-top:1px solid var(--line);background:var(--soft);border-radius:0 0 var(--radius) var(--radius)}
+.ui-more summary{cursor:pointer;font-weight:600;font-size:13.5px;color:var(--acc);margin:4px 0}
+.ui-more[open] summary{margin-bottom:12px}
+.rc-draft{border-top:1px solid var(--line);padding:16px 18px}.rc-draft:first-child{border-top:0}
+.rc-who{display:flex;gap:12px;align-items:flex-start}
+.rc-avatar{flex:0 0 38px;height:38px;border-radius:99px;background:var(--acc-soft);color:var(--acc);font-weight:700;
+  display:flex;align-items:center;justify-content:center;font-size:14px}
+.rc-who .name{font-weight:650;font-size:15px;line-height:1.3}.rc-who .sub{color:var(--muted);font-size:13px}
+.rc-who .badges{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.rc-role{margin:8px 0 0 50px;font-size:13px;color:var(--muted)}
+.rc-fields{margin:12px 0 0 50px}.rc-fields>div{margin-bottom:10px}
+.rc-count{text-align:right;font-size:12px;color:var(--muted);margin-top:2px}.rc-count.over{color:var(--bad);font-weight:600}
+.rc-actions{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 50px}
+.rc-actions>div{display:flex;gap:6px;flex-wrap:wrap}
+.rc-sent tbody tr{cursor:pointer}.rc-sent tbody tr:hover{background:var(--soft)}
+.rc-sent td.when{white-space:nowrap;color:var(--muted)}
+.rc-modal{max-width:680px;width:92vw}.rc-modal h3{font-size:18px;font-weight:700;margin:0}
+.rc-modal .sub{color:var(--muted);font-size:13.5px;margin:2px 0 14px}
+.rc-modal .modal-action{justify-content:space-between;flex-wrap:wrap}
+.rc-modal .modal-action>div{display:flex;gap:6px;flex-wrap:wrap}
+.rc-alert{margin:10px 0 0 50px}
+@media (max-width:700px){.ui-grid,.ui-grid3{grid-template-columns:1fr}.rc-role,.rc-fields,.rc-actions,.rc-alert{margin-left:0}
+  .rc-who .badges{display:none}.rc-sent .hide-sm{display:none}}
 """
 
 
@@ -1804,15 +1852,91 @@ def outreach_signature(prof):
     return " · ".join(x for x in (c.get("phone"), c.get("email"), c.get("linkedin"), c.get("portfolio")) if x)
 
 
+OUTREACH_CSS = ""  # the styles are in CSS (shared ui-* blocks + rc-* for this page)
+
 OUTREACH_JS = """<script>
 function ocount(id, lim) { var t = document.getElementById('om' + id), c = document.getElementById('on' + id);
-  c.textContent = t.value.length + ' / ' + lim + ' characters'; c.style.color = t.value.length > lim ? '#d33' : ''; }
+  if (!c) return; c.textContent = t.value.length + ' / ' + lim + ' characters';
+  c.className = 'rc-count' + (t.value.length > lim ? ' over' : ''); }
 function ocopy(id, subj) {  // subj: copy the subject line instead of the message
   var t = document.getElementById((subj ? 'os' : 'om') + id), b = document.getElementById((subj ? 'ocs' : 'oc') + id), ok = false;
-  t.focus(); t.select(); try { ok = document.execCommand('copy'); } catch (err) {}
+  var label = b.textContent; t.focus(); t.select(); try { ok = document.execCommand('copy'); } catch (err) {}
   if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t.value); ok = true; }
-  b.textContent = ok ? '✅ Copied' : 'Selected: press Ctrl+C'; }
+  b.textContent = ok ? '✓ Copied' : 'Press Ctrl+C'; setTimeout(function () { b.textContent = label; }, 1800); }
+function oview(id) { document.getElementById('dlg' + id).showModal(); }
 </script>"""
+
+OUTREACH_FORM_JS = """<script>
+var RL = [];
+function rval(id) { return document.getElementById(id).value.trim(); }
+function rcell(tr, text, cls) { var td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
+function rdraw() {
+  var body = document.getElementById('rlist'), empty = document.getElementById('rempty'), table = document.getElementById('rtable');
+  body.innerHTML = '';
+  RL.forEach(function (r, i) {
+    var tr = document.createElement('tr');
+    rcell(tr, r.name + (r.about ? '  ℹ️' : ''));
+    rcell(tr, r.title || '—', 'hide-sm');
+    rcell(tr, r.role ? (r.role.length > 48 ? r.role.slice(0, 48) + '…' : r.role) : '—', 'hide-sm');
+    rcell(tr, r.kind === 'agency' ? 'Agency' : r.kind === 'inhouse' ? 'In-house' : 'Auto');
+    var td = document.createElement('td'), b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-ghost btn-xs'; b.textContent = 'Remove'; b.setAttribute('aria-label', 'Remove ' + r.name);
+    b.onclick = function () { RL.splice(i, 1); rdraw(); }; td.style.textAlign = 'right'; td.appendChild(b); tr.appendChild(td);
+    body.appendChild(tr);
+  });
+  table.style.display = RL.length ? '' : 'none'; empty.style.display = RL.length ? 'none' : '';
+  document.getElementById('rjson').value = JSON.stringify(RL);
+  var go = document.getElementById('rgo'); go.disabled = !RL.length;
+  go.textContent = RL.length ? 'Write ' + RL.length + ' message' + (RL.length === 1 ? '' : 's') : 'Write messages';
+}
+var RLOOK = null;
+function rlookup() {  // LinkedIn link -> name + title from the profile's public link preview
+  var url = rval('r_contact'), hint = document.getElementById('rhint');
+  if (!/linkedin\\.com\\/in\\//i.test(url)) return Promise.resolve();
+  hint.textContent = 'Reading the profile…';
+  RLOOK = fetch('/outreach/lookup?url=' + encodeURIComponent(url)).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d.ok) { hint.textContent = d.error || ''; return; }
+    if (rval('r_contact') === url) document.getElementById('r_contact').value = d.url;
+    if (!rval('r_name')) document.getElementById('r_name').value = d.name || '';
+    if (!rval('r_title')) document.getElementById('r_title').value = d.title || '';
+    document.getElementById('r_about').value = d.about || '';
+    hint.textContent = d.from === 'profile' ? '✓ Filled in from the profile. Check it, then add the person.'
+      : 'The profile is not public: the name was guessed from the link. Check it and add the title by hand.';
+  }).catch(function () { hint.textContent = 'Could not read the link. Fill in the name by hand.'; })
+    .then(function () { RLOOK = null; });
+  return RLOOK;
+}
+function radd() {
+  if (!rval('r_name') && /linkedin\\.com\\/in\\//i.test(rval('r_contact'))) {  // only the link was given
+    (RLOOK || rlookup()).then(function () { if (rval('r_name')) radd(); });
+    return false;
+  }
+  if (!rval('r_name')) { document.getElementById('rhint').textContent = 'Give a LinkedIn link or a name first.';
+    document.getElementById('r_contact').focus(); return false; }
+  RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value,
+           role: rval('r_role'), about: rval('r_about')});
+  ['r_name', 'r_title', 'r_contact', 'r_kind', 'r_role', 'r_about'].forEach(function (id) { document.getElementById(id).value = ''; });
+  document.getElementById('rhint').textContent = '';
+  rdraw(); document.getElementById('r_contact').focus(); return true;
+}
+function renter(ev) { if (ev.key === 'Enter') { ev.preventDefault(); radd(); } }
+function rsubmit() {  // a filled-in but not yet added recruiter counts too
+  if (rval('r_name')) radd();
+  if (!RL.length) { document.getElementById('rhint').textContent = 'Add at least one recruiter.'; return false; }
+  return true;
+}
+function rchannel() {  // the introducer field matters only for introduction requests
+  var intro = document.getElementById('channel').value === 'linkedin_intro';
+  document.getElementById('viawrap').style.display = intro ? '' : 'none';
+  if (intro) document.getElementById('rmore').open = true;
+}
+rdraw(); rchannel();
+</script>"""
+
+
+def outreach_initials(name):
+    parts = [p for p in re.split(r"\s+", name or "") if p]
+    return e("".join(p[0] for p in parts[:2]).upper() or "?")
 
 
 def outreach_page(q, flash=""):
@@ -1828,165 +1952,143 @@ def outreach_page(q, flash=""):
         if picked and not any(j["id"] == picked for j in jobs):
             extra = con.execute("SELECT id, title, company FROM jobs WHERE id=?", (picked,)).fetchone()
             jobs = ([extra] if extra else []) + list(jobs)
-    job_opts = '<option value="">— no specific posting (general message) —</option>' + "".join(
+    job_opts = '<option value="">None: a general message</option>' + "".join(
         '<option value="%s"%s>%s – %s</option>' % (e(j["id"]), " selected" if j["id"] == picked else "",
                                                    e(j["title"]), e(j["company"] or "?")) for j in jobs)
-    ch_opts = "".join('<option value="%s">%s (max %d characters)</option>' % (k, e(v[0]), v[1])
-                      for k, v in cvgen.OUTREACH_CHANNELS.items())
-    form = """<div class="card"><h2>✉️ Message recruiters</h2>
-<p class="muted">Claude writes a short, personal first message to each recruiter from your CV profile (your contact details are not sent to the API).
-LinkedIn does not allow sending messages from other programs, so for LinkedIn you copy the text and open the recruiter's profile with one click; e-mails can be sent from here.</p>
-<form method="post" action="/outreach/generate" onsubmit="return rsubmit()">
-<h3>1. Recruiters</h3>
-<div class="row" id="radd">
-<div style="flex:2 1 320px"><label>LinkedIn profile link (name and title fill in by themselves) or e-mail</label><input id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)" onpaste="setTimeout(rlookup, 0)" onchange="rlookup()" style="width:100%%"></div>
-<div><label>Name *</label><input id="r_name" placeholder="Anna Kovács" onkeydown="renter(event)"></div>
-<div><label>Title @ company</label><input id="r_title" placeholder="Talent Acquisition @ Supercell" onkeydown="renter(event)"></div>
-<div style="flex:2 1 320px"><label>Role they hire for (optional): LinkedIn job link, other job page, or a few words</label><input id="r_role" placeholder="https://www.linkedin.com/jobs/view/… or “Senior Unity Developer, mobile, Helsinki”" onkeydown="renter(event)" style="width:100%%"></div>
-<input type="hidden" id="r_about">
-<div><label>Recruiter works</label><select id="r_kind"><option value="">automatic (from the title)</option><option value="inhouse">in-house: hires for their own company</option><option value="agency">agency / freelance: hires for clients</option></select></div>
-<div style="align-self:end"><button type="button" onclick="radd()">➕ Add</button></div></div>
-<p class="muted" id="rhint"></p>
-<ul id="rlist" style="list-style:none;padding:0;margin:8px 0"></ul>
-<input type="hidden" name="recruiters_json" id="rjson" value="[]">
-<h3>2. Message</h3>
-<div class="row"><div><label>Posting (optional)</label><select name="job_id" style="max-width:100%%">%s</select></div>
-<div><label>Channel</label><select name="channel">%s</select></div>
-<div><label>Language</label><select name="language"><option value="auto">automatic</option><option value="en">English</option><option value="hu">Hungarian</option><option value="de">German</option></select></div></div>
-<label>Mutual connection who could introduce you (only for the “ask a mutual connection” channel): <code>Name | how you know each other</code></label>
-<input name="via" style="width:100%%" placeholder="Péter Nagy | we worked together at Gameloft 2015–2017">
-<p class="muted">On LinkedIn, open the recruiter's profile and click “mutual connections” to see who knows both of you.</p>
-<label>Note for Claude (optional, e.g. “LinkedIn suggested them for the Unity Developer role”)</label><input name="note" style="width:100%%">
-<p><button class="primary" id="rgo">✨ Write messages (Claude)</button> <span class="muted">About 1–3 cents per message.</span></p></form></div>
-<script>
-var RL = [];
-function rval(id) { return document.getElementById(id).value.trim(); }
-function rdraw() {
-  var ul = document.getElementById('rlist'); ul.innerHTML = '';
-  RL.forEach(function (r, i) {
-    var li = document.createElement('li'); li.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #8883';
-    var t = document.createElement('span'); t.style.flex = '1';
-    t.textContent = r.name + (r.title ? ' · ' + r.title : '') + (r.contact ? ' · ' + r.contact : '') +
-      (r.kind ? (r.kind === 'agency' ? ' · agency' : ' · in-house') : '') +
-      (r.role ? ' · 🎯 ' + (r.role.length > 60 ? r.role.slice(0, 60) + '…' : r.role) : '') + (r.about ? ' · ℹ️ profile read' : '');
-    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm'; b.textContent = '✕';
-    b.title = 'Remove'; b.onclick = function () { RL.splice(i, 1); rdraw(); };
-    li.appendChild(t); li.appendChild(b); ul.appendChild(li);
-  });
-  document.getElementById('rjson').value = JSON.stringify(RL);
-  document.getElementById('rgo').textContent = '✨ Write ' + (RL.length || '') + ' message' + (RL.length === 1 ? '' : 's') + ' (Claude)';
-  document.getElementById('rhint').textContent = RL.length ? '' : 'Fill in the fields and press “Add” (or Enter) for each recruiter.';
-}
-var RLOOK = null;
-function rlookup() {  // LinkedIn link -> name + title from the profile's public link preview
-  var url = rval('r_contact'), hint = document.getElementById('rhint');
-  if (!/linkedin\\.com\\/in\\//i.test(url)) return Promise.resolve();
-  hint.textContent = '⏳ Reading the profile link…';
-  RLOOK = fetch('/outreach/lookup?url=' + encodeURIComponent(url)).then(function (r) { return r.json(); }).then(function (d) {
-    if (!d.ok) { hint.textContent = d.error || ''; return; }
-    if (rval('r_contact') === url) document.getElementById('r_contact').value = d.url;
-    if (!rval('r_name')) document.getElementById('r_name').value = d.name || '';
-    if (!rval('r_title')) document.getElementById('r_title').value = d.title || '';
-    document.getElementById('r_about').value = d.about || '';
-    hint.textContent = d.from === 'profile' ? '✅ Filled in from the profile. Check it, then press Add.'
-      : 'The profile is not public, so only the name was guessed from the link: check it and add the title by hand.';
-  }).catch(function () { hint.textContent = 'Could not read the link: fill in the name by hand.'; })
-    .then(function () { RLOOK = null; });
-  return RLOOK;
-}
-function radd() {
-  if (!rval('r_name') && /linkedin\\.com\\/in\\//i.test(rval('r_contact'))) {  // only the link was given
-    (RLOOK || rlookup()).then(function () { if (rval('r_name')) radd(); });
-    return false;
-  }
-  if (!rval('r_name')) { document.getElementById('r_name').focus(); return false; }
-  RL.push({name: rval('r_name'), title: rval('r_title'), contact: rval('r_contact'), kind: document.getElementById('r_kind').value,
-           role: rval('r_role'), about: rval('r_about')});
-  ['r_name', 'r_title', 'r_contact', 'r_kind', 'r_role', 'r_about'].forEach(function (id) { document.getElementById(id).value = ''; });
-  rdraw(); document.getElementById('r_name').focus(); return true;
-}
-function renter(ev) { if (ev.key === 'Enter') { ev.preventDefault(); radd(); } }
-function rsubmit() {  // a filled-in but not yet added recruiter counts too
-  if (rval('r_name')) radd();
-  if (!RL.length) { document.getElementById('rhint').textContent = 'Add at least one recruiter.'; return false; }
-  return true;
-}
-rdraw();
-</script>""" % (job_opts, ch_opts)
-    cards, sent = [], []
-    for r in rows:
+    ch_opts = "".join('<option value="%s">%s</option>' % (k, e(v[0])) for k, v in cvgen.OUTREACH_CHANNELS.items())
+    drafts = [r for r in rows if r["status"] != "sent"]
+    sent = [r for r in rows if r["status"] == "sent"]
+
+    head = """<div class="ui-head"><h1>Recruiters</h1>
+<p>Claude writes a short, personal first message to each recruiter, based on your CV profile and the role they hire for.
+LinkedIn does not allow sending from other programs: copy the message and open the profile with one click. E-mails can be sent from here.</p>
+<div class="ui-stats"><span class="badge badge-soft badge-primary">%d draft%s</span><span class="badge badge-soft badge-success">%d sent</span></div></div>""" % (
+        len(drafts), "" if len(drafts) == 1 else "s", len(sent))
+
+    form = """<section class="ui-section" aria-labelledby="new-h"><header><h2 id="new-h">New messages</h2></header>
+<form method="post" action="/outreach/generate" onsubmit="return rsubmit()"><div class="ui-body">
+<div class="ui-step"><span class="ui-num">1</span><div><h3>Who do you write to?</h3>
+<div class="ui-grid">
+<div class="wide"><label for="r_contact">LinkedIn profile link or e-mail</label>
+<input class="input" id="r_contact" placeholder="https://www.linkedin.com/in/…" onkeydown="renter(event)" onpaste="setTimeout(rlookup, 0)" onchange="rlookup()" autocomplete="off">
+<span class="help">Paste a LinkedIn link and the name and title fill in by themselves.</span></div>
+<div><label for="r_name">Name</label><input class="input" id="r_name" placeholder="Anna Kovács" onkeydown="renter(event)" autocomplete="off"></div>
+<div><label for="r_title">Title and company</label><input class="input" id="r_title" placeholder="Talent Acquisition @ Supercell" onkeydown="renter(event)" autocomplete="off"></div>
+<div class="wide"><label for="r_role">Role they hire for <span class="help" style="display:inline">(optional)</span></label>
+<input class="input" id="r_role" placeholder="LinkedIn job link, another job page, or a few words" onkeydown="renter(event)" autocomplete="off">
+<span class="help">Makes the message specific to that role. Tip: the “Meet the hiring team” box on a LinkedIn posting shows who hires for it.</span></div>
+<div><label for="r_kind">Recruiter works</label><select class="select" id="r_kind"><option value="">Decide from the title</option>
+<option value="inhouse">In-house: hires for their own company</option><option value="agency">Agency or freelance: hires for clients</option></select></div>
+<div style="align-self:end"><button type="button" class="btn btn-primary btn-outline" onclick="radd()">Add to the list</button></div>
+</div>
+<input type="hidden" id="r_about"><div class="ui-hint" id="rhint" role="status" aria-live="polite"></div>
+<div class="rc-people"><div class="empty" id="rempty">No recruiters yet. Add them one by one above (Enter works too).</div>
+<table class="table table-sm" id="rtable"><thead><tr><th>Name</th><th class="hide-sm">Title</th><th class="hide-sm">Role</th><th>Type</th><th></th></tr></thead>
+<tbody id="rlist"></tbody></table></div>
+<input type="hidden" name="recruiters_json" id="rjson" value="[]"></div></div>
+<div class="ui-step"><span class="ui-num">2</span><div><h3>Message</h3>
+<div class="ui-grid3">
+<div><label for="channel">Channel</label><select class="select" name="channel" id="channel" onchange="rchannel()">%s</select></div>
+<div><label for="language">Language</label><select class="select" name="language" id="language"><option value="auto">Automatic</option>
+<option value="en">English</option><option value="hu">Hungarian</option><option value="de">German</option></select></div>
+<div><label for="job_id">Posting for everyone</label><select class="select" name="job_id" id="job_id">%s</select></div>
+</div>
+<details class="ui-more" id="rmore"><summary>More options</summary><div class="ui-grid">
+<div class="wide" id="viawrap"><label for="via">Mutual connection who introduces you</label>
+<input class="input" name="via" id="via" placeholder="Péter Nagy | we worked together at Gameloft 2015–2017" autocomplete="off">
+<span class="help">On the recruiter's LinkedIn profile, “mutual connections” shows who knows both of you.</span></div>
+<div class="wide"><label for="note">Note for Claude</label><input class="input" name="note" id="note" placeholder="e.g. LinkedIn suggested them for the Unity Developer role" autocomplete="off"></div>
+</div></details></div></div>
+</div>
+<div class="ui-foot"><span class="muted" style="font-size:13px">About 1–3 cents per message. Your contact details are not sent to the API.</span>
+<button class="btn btn-primary" id="rgo">Write messages</button></div></form></section>""" % (ch_opts, job_opts)
+
+    draft_html = []
+    for r in drafts:
         label, limit, _ = cvgen.OUTREACH_CHANNELS.get(r["channel"], ("?", 1000, ""))
-        oid = r["id"]
-        if r["status"] == "sent":
-            sent.append(outreach_sent_row(r, label))
-            continue
-        status = {"running": "⏳ writing…", "draft": "draft", "sent": "✅ sent %s" % fmt_dt(r["sent_at"]),
-                  "error": "❌ error"}.get(r["status"], r["status"])
-        head = '<div class="jt"><b>%s</b>%s%s</div><div class="chips"><span class="chip">%s</span>%s<span class="chip">%s</span></div>' % (
-            e(r["name"]), (" · " + e(r["title"])) if r["title"] else "",
-            (' <span class="muted">— via %s (send the message to them)</span>' % e(r["via"])) if r["via"] else "", e(label),
-            (('<span class="chip">🎯 %s</span>' % e(re.sub(r"^Title: |\n.*", "", r["role_text"] or r["role_ref"], flags=re.S)[:80]))
-             if ROLE_UNREAD not in (r["role_text"] or "") else
-             '<span class="chip" style="color:#d33" title="LinkedIn limits requests right now. Paste the posting text '
-             'into the role field instead and write the message again.">⚠️ the posting could not be read: the message is not tailored to it</span>')
-            if r["role_ref"] else
-            ('<span class="chip">📌 %s – %s</span>' % (e(r["job_title"]), e(r["job_company"] or "?"))) if r["job_title"] else "",
-            e(status))
+        oid, role = r["id"], outreach_role_label(r)
+        badge = {"running": '<span class="badge badge-soft badge-info"><span class="loading loading-spinner loading-xs"></span> Writing</span>',
+                 "error": '<span class="badge badge-soft badge-error">Error</span>',
+                 "draft": '<span class="badge badge-soft badge-primary">Draft</span>'}.get(r["status"], "")
+        who = """<div class="rc-who"><span class="rc-avatar" aria-hidden="true">%s</span><div><div class="name">%s</div><div class="sub">%s</div></div>
+<div class="badges"><span class="badge badge-ghost">%s</span>%s</div></div>""" % (
+            outreach_initials(r["name"]), e(r["name"]), e(r["title"] or ""), e(label), badge)
+        if r["via"]:
+            who += '<div class="rc-role">Goes to <b>%s</b>, who introduces you.</div>' % e(r["via"])
+        if role:
+            who += '<div class="rc-role">Role: %s</div>' % e(role)
+        if r["role_ref"] and ROLE_UNREAD in (r["role_text"] or ""):
+            who += ('<div role="alert" class="alert alert-warning alert-soft rc-alert"><span>The posting could not be read (LinkedIn limits requests), '
+                    'so this message is not tailored to it. Paste the posting text into “Role they hire for” and write it again.</span></div>')
         if r["status"] == "running":
-            cards.append('<div class="card">%s<p class="muted">Claude is writing the message…</p></div>' % head)
+            draft_html.append('<article class="rc-draft">%s<p class="rc-role">Claude is writing the message…</p></article>' % who)
             continue
         if r["status"] == "error":
-            cards.append('<div class="card">%s<p class="err">%s</p><form method="post" action="/outreach/%d">'
-                         '<button name="act" value="regen">🔄 Try again</button> <button name="act" value="delete">🗑 Delete</button></form></div>'
-                         % (head, e(r["error"]), oid))
+            draft_html.append("""<article class="rc-draft">%s<div role="alert" class="alert alert-error alert-soft rc-alert"><span>%s</span></div>
+<form method="post" action="/outreach/%d" class="rc-actions"><div><button class="btn btn-sm btn-primary" name="act" value="regen">Try again</button></div>
+<div><button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></form></article>""" % (who, e(r["error"]), oid))
             continue
         is_mail = "@" in (r["contact"] or "") and not (r["contact"] or "").startswith("http")
-        open_btn = ('<a class="btn" href="%s" target="_blank" rel="noopener noreferrer">🔗 Open profile</a>' % e(safe_url(r["contact"]))
+        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile ↗</a>' % e(safe_url(r["contact"]))
                     if (r["contact"] or "").startswith("http") else "")
-        send_btn = ('<button name="act" value="send" title="Send to %s with the e-mail settings">✉️ Send e-mail</button>' % e(r["contact"])
-                    if is_mail and r["channel"] == "email" else "")
-        subj = ('<label>Subject</label><div style="display:flex;gap:6px"><input id="os%d" name="subject" value="%s" style="flex:1">'
-                '<button type="button" id="ocs%d" onclick="ocopy(%d, 1)">📋 Copy subject</button></div>'
-                % (oid, e(r["subject"] or ""), oid, oid))
-        cards.append("""<div class="card">%s<form method="post" action="/outreach/%d">%s
-<textarea id="om%d" name="message" style="min-height:%dpx" oninput="ocount(%d,%d)">%s</textarea>
-<div class="muted" id="on%d"></div><script>ocount(%d,%d)</script>
-<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy message</button>%s%s
-<button name="act" value="save">💾 Save edits</button><button name="act" value="sent">✅ Mark as sent</button>
-<button name="act" value="regen">🔄 Rewrite</button><button name="act" value="delete">🗑 Delete</button></p></form></div>""" % (
-            head, oid, subj, oid, 90 if limit <= 300 else 200, oid, limit, e(r["message"] or ""),
-            oid, oid, limit, oid, oid, open_btn, send_btn))
-    sent_card = ('<div class="card"><h2>✅ Sent messages (%d)</h2><p class="muted">Click a name to see the message.</p>%s</div>'
-                 % (len(sent), "".join(sent))) if sent else ""
+        send_btn = ('<button class="btn btn-sm btn-outline" name="act" value="send" title="Send to %s with the e-mail settings">Send e-mail</button>'
+                    % e(r["contact"]) if is_mail and r["channel"] == "email" else "")
+        draft_html.append("""<article class="rc-draft">%s<form method="post" action="/outreach/%d"><div class="rc-fields">
+<div><label for="os%d">Subject</label><div class="join" style="width:100%%"><input class="input join-item" id="os%d" name="subject" value="%s" style="flex:1">
+<button type="button" class="btn join-item" id="ocs%d" onclick="ocopy(%d, 1)">Copy</button></div></div>
+<div><label for="om%d">Message</label><textarea class="textarea" id="om%d" name="message" rows="%d" oninput="ocount(%d,%d)">%s</textarea>
+<div class="rc-count" id="on%d"></div><script>ocount(%d,%d)</script></div></div>
+<div class="rc-actions"><div><button type="button" class="btn btn-sm btn-primary" id="oc%d" onclick="ocopy(%d)">Copy message</button>%s%s
+<button class="btn btn-sm btn-success btn-soft" name="act" value="sent">Mark as sent</button></div>
+<div><button class="btn btn-sm btn-ghost" name="act" value="save">Save edits</button><button class="btn btn-sm btn-ghost" name="act" value="regen">Rewrite</button>
+<button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></div></form></article>""" % (
+            who, oid, oid, oid, e(r["subject"] or ""), oid, oid, oid, oid, 4 if limit <= 300 else 9, oid, limit,
+            e(r["message"] or ""), oid, oid, limit, oid, oid, open_btn, send_btn))
+    drafts_sec = ('<section class="ui-section" aria-labelledby="dr-h"><header><h2 id="dr-h">Drafts</h2>'
+                  '<span class="muted" style="font-size:13px">Edit, copy, send, then mark as sent.</span></header>%s</section>'
+                  % "".join(draft_html)) if drafts else ""
+
+    sent_rows, dialogs = [], []
+    for r in sent:
+        label = cvgen.OUTREACH_CHANNELS.get(r["channel"], ("?",))[0]
+        oid, role = r["id"], outreach_role_label(r)
+        sent_rows.append("""<tr onclick="oview(%d)"><td><button type="button" class="link link-hover" style="font-weight:600;text-align:left"
+onclick="event.stopPropagation(); oview(%d)">%s</button><div class="muted" style="font-size:12.5px">%s</div></td>
+<td class="hide-sm">%s</td><td class="hide-sm">%s</td><td class="when">%s</td></tr>""" % (
+            oid, oid, e(r["name"]), e(r["title"] or ""), e(role or "—"), e(label), e(fmt_dt(r["sent_at"]))))
+        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile ↗</a>' % e(safe_url(r["contact"]))
+                    if (r["contact"] or "").startswith("http") else "")
+        dialogs.append("""<dialog class="modal" id="dlg%d" aria-labelledby="dlgt%d"><div class="modal-box rc-modal ui">
+<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost" style="position:absolute;right:10px;top:10px" aria-label="Close">✕</button></form>
+<h3 id="dlgt%d">%s</h3><div class="sub">%s%s · %s · sent %s</div>
+<label for="os%d">Subject</label><div class="join" style="width:100%%;margin-bottom:12px"><input class="input join-item" id="os%d" value="%s" readonly style="flex:1">
+<button type="button" class="btn join-item" id="ocs%d" onclick="ocopy(%d, 1)">Copy</button></div>
+<label for="om%d">Message</label><textarea class="textarea" id="om%d" rows="10" readonly>%s</textarea>
+<form method="post" action="/outreach/%d" class="modal-action"><div><button type="button" class="btn btn-sm btn-primary" id="oc%d" onclick="ocopy(%d)">Copy message</button>%s</div>
+<div><button class="btn btn-sm btn-ghost" name="act" value="unsent">Move back to drafts</button>
+<button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></form></div>
+<form method="dialog" class="modal-backdrop"><button class="" aria-label="Close">close</button></form></dialog>""" % (
+            oid, oid, oid, e(r["name"]), e(r["title"] or ""), (" · " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
+            oid, oid, e(r["subject"] or ""), oid, oid, oid, oid, e(r["message"] or ""), oid, oid, oid, open_btn))
+    sent_sec = ("""<section class="ui-section" aria-labelledby="se-h"><header><h2 id="se-h">Sent</h2>
+<span class="muted" style="font-size:13px">Select a row to see the message.</span></header>
+<div style="overflow-x:auto"><table class="table rc-sent"><thead><tr><th>Recruiter</th><th class="hide-sm">Role</th><th class="hide-sm">Channel</th><th>Sent</th></tr></thead>
+<tbody>%s</tbody></table></div></section>%s""" % ("".join(sent_rows), "".join(dialogs))) if sent else ""
+
     busy = any(r["status"] == "running" for r in rows)
-    return page("Recruiters", OUTREACH_JS + form + "".join(cards) + sent_card, flash, refresh=3 if busy else 0)
+    body = '<div class="ui rc">%s%s%s%s%s</div>%s' % (head, form, drafts_sec, sent_sec, OUTREACH_JS, OUTREACH_FORM_JS)
+    return page("Recruiters", body, flash, refresh=3 if busy else 0)
 
 
 def outreach_role_label(r):
     """Short name of the role a message is about: the recruiter's own role, else the chosen posting."""
     if r["role_ref"]:
+        if ROLE_UNREAD in (r["role_text"] or ""):
+            return ""
         return re.sub(r"^Title: |\n.*", "", r["role_text"] or r["role_ref"], flags=re.S)[:80]
     if r["job_title"]:
         return "%s – %s" % (r["job_title"], r["job_company"] or "?")
     return ""
-
-
-def outreach_sent_row(r, label):
-    """One collapsed line in the "Sent messages" list; the message opens on click."""
-    oid, role = r["id"], outreach_role_label(r)
-    open_btn = ('<a class="btn" href="%s" target="_blank" rel="noopener noreferrer">🔗 Open profile</a>' % e(safe_url(r["contact"]))
-                if (r["contact"] or "").startswith("http") else "")
-    return """<details style="border-bottom:1px solid #8883;padding:6px 0"><summary style="cursor:pointer">
-<b>%s</b>%s%s <span class="muted">· %s · %s</span></summary>
-<div style="padding:8px 0 4px 18px"><form method="post" action="/outreach/%d">
-<label>Subject</label><div style="display:flex;gap:6px"><input id="os%d" value="%s" readonly style="flex:1">
-<button type="button" id="ocs%d" onclick="ocopy(%d, 1)">📋 Copy subject</button></div>
-<textarea id="om%d" readonly style="min-height:160px">%s</textarea>
-<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy message</button>%s
-<button name="act" value="unsent">↩ Back to drafts</button><button name="act" value="delete">🗑 Delete</button></p></form></div></details>""" % (
-        e(r["name"]), (' <span class="muted">· %s</span>' % e(r["title"])) if r["title"] else "",
-        (" · 🎯 " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
-        oid, oid, e(r["subject"] or ""), oid, oid, oid, e(r["message"] or ""), oid, oid, open_btn)
 
 
 def outreach_action(oid, f):
@@ -2061,7 +2163,16 @@ def linkedin_preview(url):
     # "headline · about text · Experience: X · Education: Y · Location: Z · 500 connections … View … profile …"
     about = re.split(r"\s·\s*\d[\d,+]*\s+(?:connections|followers)|View [^·]{0,80}profile on LinkedIn",
                      html.unescape(d.group(1)) if d else "")[0].strip(" ·")
-    return {"ok": True, "url": clean, "name": name.strip() or guess["name"], "title": headline.strip(),
+    # a profile without a headline gets "<location> | Professional Profile" in the title: that is not a job title
+    headline = re.sub(r"\s*\|\s*Professional Profile\s*$", "", headline, flags=re.I).strip()
+    loc = re.search(r"Location:\s*([^·]+)", about)
+    if loc and headline.lower() == loc.group(1).strip().lower() or re.fullmatch(r"[^,]+(,[^,]+){1,2}", headline) and \
+            not re.search(r"\b(at|@|recruit|talent|hr|hiring|manager|partner|consultant|lead|head)\b", headline, re.I):
+        headline = ""
+    exp = re.search(r"Experience:\s*([^·]+)", about)
+    if not headline and exp:
+        headline = "@ " + exp.group(1).strip()  # at least the current company
+    return {"ok": True, "url": clean, "name": name.strip() or guess["name"], "title": headline,
             "about": about[:1500], "from": "profile"}
 
 
