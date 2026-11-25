@@ -1913,10 +1913,13 @@ function rsubmit() {  // a filled-in but not yet added recruiter counts too
 }
 rdraw();
 </script>""" % (job_opts, ch_opts)
-    cards = []
+    cards, sent = [], []
     for r in rows:
         label, limit, _ = cvgen.OUTREACH_CHANNELS.get(r["channel"], ("?", 1000, ""))
         oid = r["id"]
+        if r["status"] == "sent":
+            sent.append(outreach_sent_row(r, label))
+            continue
         status = {"running": "⏳ writing…", "draft": "draft", "sent": "✅ sent %s" % fmt_dt(r["sent_at"]),
                   "error": "❌ error"}.get(r["status"], r["status"])
         head = '<div class="jt"><b>%s</b>%s%s</div><div class="chips"><span class="chip">%s</span>%s<span class="chip">%s</span></div>' % (
@@ -1953,8 +1956,37 @@ rdraw();
 <button name="act" value="regen">🔄 Rewrite</button><button name="act" value="delete">🗑 Delete</button></p></form></div>""" % (
             head, oid, subj, oid, 90 if limit <= 300 else 200, oid, limit, e(r["message"] or ""),
             oid, oid, limit, oid, oid, open_btn, send_btn))
+    sent_card = ('<div class="card"><h2>✅ Sent messages (%d)</h2><p class="muted">Click a name to see the message.</p>%s</div>'
+                 % (len(sent), "".join(sent))) if sent else ""
     busy = any(r["status"] == "running" for r in rows)
-    return page("Recruiters", OUTREACH_JS + form + "".join(cards), flash, refresh=3 if busy else 0)
+    return page("Recruiters", OUTREACH_JS + form + "".join(cards) + sent_card, flash, refresh=3 if busy else 0)
+
+
+def outreach_role_label(r):
+    """Short name of the role a message is about: the recruiter's own role, else the chosen posting."""
+    if r["role_ref"]:
+        return re.sub(r"^Title: |\n.*", "", r["role_text"] or r["role_ref"], flags=re.S)[:80]
+    if r["job_title"]:
+        return "%s – %s" % (r["job_title"], r["job_company"] or "?")
+    return ""
+
+
+def outreach_sent_row(r, label):
+    """One collapsed line in the "Sent messages" list; the message opens on click."""
+    oid, role = r["id"], outreach_role_label(r)
+    open_btn = ('<a class="btn" href="%s" target="_blank" rel="noopener noreferrer">🔗 Open profile</a>' % e(safe_url(r["contact"]))
+                if (r["contact"] or "").startswith("http") else "")
+    return """<details style="border-bottom:1px solid #8883;padding:6px 0"><summary style="cursor:pointer">
+<b>%s</b>%s%s <span class="muted">· %s · %s</span></summary>
+<div style="padding:8px 0 4px 18px"><form method="post" action="/outreach/%d">
+<label>Subject</label><div style="display:flex;gap:6px"><input id="os%d" value="%s" readonly style="flex:1">
+<button type="button" id="ocs%d" onclick="ocopy(%d, 1)">📋 Copy subject</button></div>
+<textarea id="om%d" readonly style="min-height:160px">%s</textarea>
+<p style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" id="oc%d" onclick="ocopy(%d)">📋 Copy message</button>%s
+<button name="act" value="unsent">↩ Back to drafts</button><button name="act" value="delete">🗑 Delete</button></p></form></div></details>""" % (
+        e(r["name"]), (' <span class="muted">· %s</span>' % e(r["title"])) if r["title"] else "",
+        (" · 🎯 " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
+        oid, oid, e(r["subject"] or ""), oid, oid, oid, e(r["message"] or ""), oid, oid, open_btn)
 
 
 def outreach_action(oid, f):
@@ -1972,7 +2004,10 @@ def outreach_action(oid, f):
                         (f.get("message", "").strip(), f.get("subject", r["subject"] or "").strip(), oid))
         if act == "sent":
             con.execute("UPDATE outreach SET status='sent', sent_at=? WHERE id=?", (now_iso(), oid))
-            return "Marked as sent."
+            return "Marked as sent, moved to the list at the bottom."
+        if act == "unsent":
+            con.execute("UPDATE outreach SET status='draft', sent_at=NULL WHERE id=?", (oid,))
+            return "Moved back to drafts."
         if act == "regen":
             con.execute("UPDATE outreach SET status='running', error=NULL WHERE id=?", (oid,))
     if act == "regen":

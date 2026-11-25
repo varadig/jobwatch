@@ -481,7 +481,13 @@ class Outreach(unittest.TestCase):
         self.assertIn("🔗 Open profile", html)
         oid = rows[-2]["id"]
         self.assertEqual(app.outreach_action(oid, {"act": "save", "message": "edited"}), "Saved.")
-        self.assertEqual(app.outreach_action(oid, {"act": "sent", "message": "edited"}), "Marked as sent.")
+        self.assertIn("Marked as sent", app.outreach_action(oid, {"act": "sent", "message": "edited"}))
+        html = app.outreach_page({})
+        self.assertIn("Sent messages (1)", html)
+        self.assertEqual(html.count("<details"), 1)
+        self.assertEqual(app.outreach_action(oid, {"act": "unsent"}), "Moved back to drafts.")
+        self.assertNotIn("Sent messages", app.outreach_page({}))
+        app.outreach_action(oid, {"act": "sent"})
         with app.db() as con:
             r = con.execute("SELECT status, message, sent_at FROM outreach WHERE id=?", (oid,)).fetchone()
         self.assertEqual((r["status"], r["message"]), ("sent", "edited"))
