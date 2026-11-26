@@ -2289,10 +2289,30 @@ def page(title, body, flash="", refresh=0):
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
 <div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">🔔 Test push</button></form>
-<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">↻ Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form></div></div></header>
-<main>%s%s</main></body></html>"""
+<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">↻ Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form>
+<button type="button" class="btn btn-sm btn-ghost text-error" onclick="document.getElementById('clear_dlg').showModal()">🗑 Clear cache</button></div></div></header>
+<main>%s%s</main>%s</body></html>"""
             % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, nav, running,
-               '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body)))
+               '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body), CLEAR_DIALOG))
+
+
+CLEAR_DIALOG = """<dialog id="clear_dlg" class="modal" aria-labelledby="clear_h"><form method="post" action="/reset-jobs" class="modal-box">
+<h3 id="clear_h" class="text-lg font-bold">Clear the job cache?</h3>
+<p class="py-2">All the postings found so far are deleted, with the source status and the list of alert e-mails already read.</p>
+<p class="text-sm opacity-80">Kept: your settings, CV profile, documents and recruiter messages; the postings you made a CV for stay in
+the list, marked applied.</p>
+<label class="label mt-3" style="gap:8px;cursor:pointer"><input type="checkbox" class="checkbox checkbox-sm" name="refetch" value="1" checked>
+Search again right away</label>
+<div class="modal-action"><button type="button" class="btn btn-ghost" onclick="this.closest('dialog').close()" autofocus>Cancel</button>
+<button class="btn btn-error" name="reset" value="1">Clear cache</button></div></form>
+<form method="dialog" class="modal-backdrop"><button>close</button></form></dialog>"""
+
+
+def with_msg(path, msg):
+    """path (a local URL) with ?msg= set to msg."""
+    u = urllib.parse.urlparse(path if path.startswith("/") and not path.startswith("//") else "/")
+    q = [(k, v) for k, v in urllib.parse.parse_qsl(u.query) if k != "msg"] + [("msg", msg)]
+    return u.path + "?" + urllib.parse.urlencode(q)
 
 
 def parse_dt(s):
@@ -2934,13 +2954,12 @@ def settings_page(flash=""):
         '<div class="ui-grid">' + ui_field("public_url", "Web address of this app", cfg.get("public_url", ""), "url",
                                            "Used for the link in notifications.", wide=True) + '</div>')
 
-    confirm = ("return confirm('Delete all found jobs and the source status? "
-               "Settings, profile, CVs and documents are kept.')")
     danger = ui_sec("danger", "Maintenance", "",
-        '<form method="post" action="/reset-jobs" class="ui-danger" onsubmit="%s"><div><b>Reset the job cache</b>'
+        '<div class="ui-danger"><div><b>Reset the job cache</b>'
         '<span class="help">Deletes the found postings; settings, profile, CVs and documents are kept, and the postings you made a CV for stay in the list (marked applied). '
         'The next refresh starts from scratch.</span></div>'
-        '<button class="btn btn-sm btn-error btn-outline" name="reset" value="1">Reset job cache</button></form>' % confirm)
+        '<button type="button" class="btn btn-sm btn-error btn-outline" onclick="document.getElementById(\'clear_dlg\').showModal()">'
+        'Reset job cache…</button></div>')
 
     nav = "".join('<a href="#%s">%s</a>' % (a, l) for a, l in SETTINGS_NAV)
     body = ('<div class="ui"><div class="ui-head"><h1>Settings</h1><p>Notifications, job sources, scoring and API keys. '
@@ -4256,8 +4275,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.profile_import_text(f.get("cv_text", ""))
             if u.path == "/reset-jobs":
                 reset_job_cache()
-                return self.redirect("/settings?msg=" + urllib.parse.quote(
-                    "Job cache cleared; the postings you made a CV for stay, marked applied. Press Refresh to fetch again."))
+                if f.get("refetch"):
+                    threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
+                    msg = "Job cache cleared and a new search started: the list fills up again in a few minutes."
+                else:
+                    msg = "Job cache cleared. Press Refresh all to fetch again."
+                return self.redirect(with_msg(self.back(), msg + " The postings you made a CV for stay, marked applied."))
             if u.path == "/run":
                 only, cids = run_selection(f)
                 if only is None and not cids and not f.get("all") and ("one" in f or "selected" in f):

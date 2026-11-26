@@ -486,9 +486,9 @@ class Outreach(unittest.TestCase):
         self.assertIn("Marked as sent", app.outreach_action(oid, {"act": "sent", "message": "edited"}))
         html = app.outreach_page({})
         self.assertIn("1 sent", html)
-        self.assertEqual(html.count("<dialog"), 1)
+        self.assertEqual(html.count("<dialog") - html.count('<dialog id="clear_dlg"'), 1)  # + the clear-cache one on every page
         self.assertEqual(app.outreach_action(oid, {"act": "unsent"}), "Moved back to drafts.")
-        self.assertNotIn("<dialog", app.outreach_page({}))
+        self.assertNotIn("<dialog", app.outreach_page({}).replace(app.CLEAR_DIALOG, ""))
         app.outreach_action(oid, {"act": "sent"})
         with app.db() as con:
             r = con.execute("SELECT status, message, sent_at FROM outreach WHERE id=?", (oid,)).fetchone()
@@ -1291,3 +1291,16 @@ class CvPostingsStay(unittest.TestCase):
         with app.db() as con:
             con.execute("DELETE FROM cvs")
             con.execute("DELETE FROM jobs")
+
+
+class ClearCacheButton(unittest.TestCase):
+    def test_every_page_has_the_button_and_the_dialog(self):
+        h = app.page("X", "<p>x</p>")
+        self.assertIn("Clear cache</button>", h)
+        self.assertIn('<dialog id="clear_dlg"', h)
+        self.assertIn('action="/reset-jobs"', h)
+        self.assertNotIn("confirm(", app.settings_page())   # no browser confirm any more
+
+    def test_back_with_message(self):
+        self.assertEqual(app.with_msg("/?work=all&msg=old", "Done"), "/?work=all&msg=Done")
+        self.assertEqual(app.with_msg("//evil.example/x", "Hi"), "/?msg=Hi")
