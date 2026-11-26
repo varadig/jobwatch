@@ -1330,6 +1330,11 @@ class DecisionsSurviveReset(unittest.TestCase):
                 app.set_job_status(con, "meetfrank:1", "hidden")
                 app.set_job_status(con, "meetfrank:2", "saved")
             app.reset_job_cache()
+            run({"meetfrank"})      # mark all new as seen survives a reset too
+            with app.db() as con:
+                for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
+                    app.set_job_status(con, r["id"], "seen")
+            app.reset_job_cache()
             run({"flexa"})          # the same posting from another source
             run({"meetfrank"})
         with app.db() as con:
@@ -1340,3 +1345,24 @@ class DecisionsSurviveReset(unittest.TestCase):
             self.assertIsNone(app.remembered_status(con, "meetfrank:1", app.url_key(items[0]["url"]), ""))
             for t in ("jobs", "job_marks"):
                 con.execute("DELETE FROM %s" % t)
+
+
+class SeenIsRemembered(unittest.TestCase):
+    def test_seen_survives_and_new_again_forgets(self):
+        app.init_db()
+        app.migrate_db()
+        url = "https://gamma.example/jobs/9"
+        with app.db() as con:
+            con.execute("DELETE FROM job_marks")
+            con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
+                        "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'new','x',?,?)",
+                        (url, app.url_key(url), app.dup_key("Tools Programmer", "Gamma", url)))
+            app.set_job_status(con, "rss:9", "seen")
+            con.execute("DELETE FROM jobs WHERE id='rss:9'")                  # a cache reset
+            self.assertEqual(app.remembered_status(con, "flexa:x", app.url_key(url), ""), "seen")
+            con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
+                        "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'seen','x',?,?)",
+                        (url, app.url_key(url), app.dup_key("Tools Programmer", "Gamma", url)))
+            app.set_job_status(con, "rss:9", "new")                           # "Mark new again"
+            self.assertIsNone(app.remembered_status(con, "rss:9", app.url_key(url), ""))
+            con.execute("DELETE FROM jobs WHERE id='rss:9'")

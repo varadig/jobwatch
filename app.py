@@ -443,7 +443,7 @@ def migrate_db():
             if n:
                 log.info("Duplicates: %d posting(s) hidden", n)
             con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dedupe','1')")
-        # remember the decisions already in the list (hidden, saved, applied) so a cache reset keeps them
+        # remember the decisions already in the list (hidden, saved, applied, seen) so a cache reset keeps them
         for r in con.execute("SELECT id, status, title, company, urlkey, dupkey FROM jobs WHERE status IN (%s)"
                              % ",".join("?" * len(KEPT_STATUSES)), KEPT_STATUSES).fetchall():
             con.executemany("INSERT OR IGNORE INTO job_marks(k, status, title, company, at) VALUES(?,?,?,?,?)",
@@ -629,9 +629,9 @@ def dup_key(title, company, url):
     return norm(GENDER_TAGS.sub(" ", title or "")) + "|" + (norm_company(company) or url_key(url))
 
 
-# Your decisions on postings (hidden, saved, applied) are kept apart from the job cache, keyed by the posting's id,
+# Your decisions on postings (hidden, saved, applied, seen) are kept apart from the job cache, keyed by the posting's id,
 # link and title + company: after a cache reset or a new search the same posting, from any source, gets them back.
-KEPT_STATUSES = ("hidden", "saved", "applied")
+KEPT_STATUSES = ("hidden", "saved", "applied", "seen")
 
 
 def mark_keys(jid, urlkey, dupkey):
@@ -4209,7 +4209,7 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as con:
                     r = con.execute("SELECT url,status FROM jobs WHERE id=?", (jid,)).fetchone()
                     if r and r["status"] == "new":
-                        con.execute("UPDATE jobs SET status='seen' WHERE id=?", (jid,))
+                        set_job_status(con, jid, "seen")
                 return self.redirect(safe_url(r["url"]) if r else "/")
             if u.path == "/profile":
                 return self.send_html(profile_page(q.get("msg", "")))
@@ -4436,7 +4436,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.redirect("/?msg=" + urllib.parse.quote(msg))
             if u.path == "/mark-all-seen":
                 with db() as con:
-                    con.execute("UPDATE jobs SET status='seen' WHERE status='new'")
+                    for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
+                        set_job_status(con, r["id"], "seen")
                 return self.redirect(self.back())
             if u.path == "/settings":
                 msg = urllib.parse.quote(saved_message(save_settings(f)))
