@@ -1143,7 +1143,11 @@ class ChipScoring(unittest.TestCase):
 
 class Presets(unittest.TestCase):
     def test_save_switch_and_templates(self):
+        from unittest import mock
         app.init_db()
+        patcher = mock.patch.object(app, "search_again", lambda: 0)  # no real fetching in the tests
+        patcher.start()
+        self.addCleanup(patcher.stop)
         cfg = app.load_config()
         cfg["search_terms"] = ["unity developer"]
         cfg["scoring"]["interests"] = ["unity"]
@@ -1161,3 +1165,47 @@ class Presets(unittest.TestCase):
         self.assertEqual((cfg["search_terms"], cfg["scoring"]["interests"], cfg["active_preset"]), (["unity developer"], ["unity"], "Unity"))
         self.assertIn("deleted", app.preset_action({"preset_do": "delete", "preset_pick": "Unity"}))
         self.assertEqual(app.load_config()["active_preset"], "")
+
+
+class NewSearch(unittest.TestCase):
+    def test_clear_keeps_what_you_worked_with(self):
+        app.init_db()
+        with app.db() as con:
+            for t in ("jobs", "cvs", "outreach"):
+                con.execute("DELETE FROM %s" % t)
+            rows = [("linkedin:1", "linkedin", "new"), ("linkedin:2", "linkedin", "saved"), ("flexa:3", "flexa", "seen"),
+                    ("flexa:4", "flexa", "hidden"), ("mail:5", "mail", "new"), ("manual:6", "manual", "new"),
+                    ("studios:7", "studios", "new"), ("studios:8", "studios", "new")]
+            for jid, src, st in rows:
+                con.execute("INSERT INTO jobs(id,source,title,url,score,status,first_seen) VALUES(?,?,?,?,5,?,'x')", (jid, src, jid, "u", st))
+            con.execute("INSERT INTO cvs(job_id,status) VALUES('studios:7','done')")
+            con.execute("INSERT INTO outreach(job_id,name) VALUES('studios:8','A')")
+            con.execute("UPDATE jobs SET dup_of='linkedin:1' WHERE id='mail:5'")
+        self.assertEqual(app.clear_for_new_search(), 2)
+        with app.db() as con:
+            left = {r[0] for r in con.execute("SELECT id FROM jobs")}
+            self.assertIsNone(con.execute("SELECT dup_of FROM jobs WHERE id='mail:5'").fetchone()[0])  # shown again
+        self.assertEqual(left, {"linkedin:2", "flexa:4", "mail:5", "manual:6", "studios:7", "studios:8"})
+
+    def test_only_a_search_change_searches_again(self):
+        from unittest import mock
+        app.init_db()
+        cfg = app.load_config()
+        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))  # the other tests share this config
+        cfg["presets"], cfg["active_preset"] = {}, ""
+        app.save_config(cfg)
+        form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "search_locations": "European Union",
+                "sc_interests": "unity", "min_score": "4", "src_linkedin": "on"}
+        calls = []
+        with mock.patch.object(app, "search_again", lambda: calls.append(1) or 0):
+            app.save_settings(form)                               # first save may change the search
+            calls.clear()
+            self.assertFalse(app.save_settings(dict(form, sc_interests="unity\ngame")))  # scoring only
+            self.assertEqual(calls, [])
+            self.assertTrue(app.save_settings(dict(form, search_terms="game designer")))
+            self.assertEqual(calls, [1])
+
+    def test_settings_page_has_the_leave_dialog(self):
+        h = app.settings_page()
+        self.assertIn('id="leave_dlg"', h)
+        self.assertIn('id="settings_next"', h)

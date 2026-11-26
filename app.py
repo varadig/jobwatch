@@ -202,18 +202,28 @@ def preset_action(f):
     """Settings → Presets buttons. Returns the message to show."""
     act, pick = f.get("preset_do", ""), f.get("preset_pick", "")
     if act == "save":
-        if "ntfy_server" in f:  # sent with the settings form: what is on the screen counts
-            save_settings(f)
         name = re.sub(r"\s+", " ", f.get("preset_name", "")).strip()[:60]
         if not name:
             return "Give the preset a name."
+        changed = False
+        if "ntfy_server" in f:  # sent with the settings form: what is on the screen counts
+            with CFG_LOCK:
+                old = load_config()
+            changed = save_settings(f)
         with CFG_LOCK:
             cfg = load_config()
+            if "ntfy_server" in f and old.get("active_preset") in (old.get("presets") or {}) and old["active_preset"] != name:
+                cfg["presets"][old["active_preset"]] = old["presets"][old["active_preset"]]  # the edits go to the new one only
             cfg.setdefault("presets", {})[name] = preset_of(cfg)
             cfg["active_preset"] = name
             save_config(cfg)
-        return "Saved as preset “%s”." % name
+        return "Saved as preset “%s”." % name + (" The search changed, so the postings found so far were cleared (%s) and "
+                                                 "a new search started." % KEPT_ON_NEW_SEARCH if changed else "")
     if act == "load":
+        pre = ""
+        if f.get("save_first") and "ntfy_server" in f:  # "Save, then switch" from the unsaved-changes dialog
+            save_settings(f)
+            pre = "Your changes were saved. "
         if pick.startswith("tpl:"):
             preset, name = template_presets().get(pick[4:]), "%s (template)" % pick[4:]
         else:
@@ -223,12 +233,18 @@ def preset_action(f):
             return "Pick a preset first."
         with CFG_LOCK:
             cfg = load_config()
+            before = search_signature(cfg)
             apply_preset(cfg, preset)
             cfg["active_preset"] = "" if pick.startswith("tpl:") else pick
             save_config(cfg)
+            changed = search_signature(cfg) != before
         rescore_all()
-        return ("Switched to “%s”, postings re-scored. Refresh the sources (Sources page) to search with it."
-                + (" Save it under a name of your own to keep your changes." if pick.startswith("tpl:") else "")) % name
+        if changed:
+            search_again()
+        return (pre + "Switched to “%s”. " % name
+                + ("The search changed, so the postings found so far were cleared (%s) and a new search started." % KEPT_ON_NEW_SEARCH
+                   if changed else "Postings re-scored.")
+                + (" Save it under a name of your own to keep your changes." if pick.startswith("tpl:") else ""))
     if act == "delete":
         with CFG_LOCK:
             cfg = load_config()
@@ -1203,6 +1219,40 @@ def src_mail(cfg):
         if not out:
             raise RuntimeError("; ".join(errs))
     return out
+
+
+# Settings that decide WHAT is fetched. When one changes, the postings found so far are cleared and fetched again.
+SEARCH_SETTINGS = ("sources", "search_terms", "search_locations", "search_filter", "studios", "rss_feeds", "custom_sources")
+KEPT_ON_NEW_SEARCH = "kept: saved, applied and hidden postings, the ones with a CV or a recruiter message, e-mail alerts and the ones added by hand"
+
+
+def search_signature(cfg):
+    return json.dumps({k: cfg.get(k) for k in SEARCH_SETTINGS}, sort_keys=True, ensure_ascii=False)
+
+
+def clear_for_new_search():
+    """Deletes the postings the old search found, except what you worked with, and forgets the source state
+    (so the first run after it seeds without a flood of notifications). Returns how many were deleted."""
+    with db() as con:
+        n = con.execute(
+            "DELETE FROM jobs WHERE source NOT IN ('mail','manual') AND COALESCE(status,'new') IN ('new','seen') "
+            "AND id NOT IN (SELECT job_id FROM cvs WHERE job_id IS NOT NULL) "
+            "AND id NOT IN (SELECT job_id FROM outreach WHERE job_id IS NOT NULL)").rowcount
+        con.execute("UPDATE jobs SET dup_of=NULL WHERE dup_of IS NOT NULL AND dup_of NOT IN (SELECT id FROM jobs)")
+        con.execute("DELETE FROM source_state WHERE source NOT IN ('mail')")
+    return n
+
+
+def search_again():
+    """Clears the old results and fetches every source again, in the background (after a running refresh)."""
+    n = clear_for_new_search()
+
+    def go():
+        while RUN_LOCK.locked():
+            time.sleep(2)
+        run_all(force=True)
+    threading.Thread(target=go, daemon=True).start()
+    return n
 
 
 def reset_job_cache():
@@ -2770,17 +2820,26 @@ def settings_page(flash=""):
             'Changes take effect after you save.</p></div>'
             '<div class="ui-layout"><nav class="ui-side" aria-label="Settings sections">%s</nav><div>'
             '<form method="post" action="/settings" id="settings">%s%s%s%s%s%s%s'
-            '<div class="ui-savebar"><span class="muted">Saving re-scores every posting.</span>'
-            '<button class="btn btn-primary">Save changes</button></div></form>%s</div></div></div>') % (
-        nav, presets, notify, search, own, scoring, claude, general, danger)
+            '<input type="hidden" name="next" id="settings_next" value="">'
+            '<div class="ui-savebar"><span class="muted" id="savebar_note" aria-live="polite">Saving re-scores every posting.</span>'
+            '<button class="btn btn-primary" id="settings_save">Save changes</button></div></form>%s</div></div></div>'
+            '<dialog id="leave_dlg" class="modal" aria-labelledby="leave_h"><div class="modal-box"><h3 id="leave_h" '
+            'class="text-lg font-bold">Save your changes?</h3><p id="leave_what" class="py-2"></p><p id="leave_search" '
+            'class="text-sm opacity-80" hidden>The search changed: saving clears the postings found so far and searches again '
+            'with the new settings (%s).</p><div class="modal-action"><button type="button" class="btn btn-ghost" '
+            'id="leave_stay">Stay here</button><button type="button" class="btn btn-outline" id="leave_discard">Don\'t save'
+            '</button><button type="button" class="btn btn-primary" id="leave_save">Save</button></div></div>'
+            '<form method="dialog" class="modal-backdrop"><button>close</button></form></dialog>') % (
+        nav, presets, notify, search, own, scoring, claude, general, danger, e(KEPT_ON_NEW_SEARCH))
     return page("Settings", body + CHIPS_JS % json.dumps(
-        {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}), flash)
+        {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}) + LEAVE_JS, flash)
 
 
 def save_settings(f):
     g = lambda k, d="": f.get(k, d)
     with CFG_LOCK:
         cfg = load_config()
+        before = search_signature(cfg)
         cfg["ntfy"].update(enabled="ntfy_enabled" in f, server=g("ntfy_server", "https://ntfy.sh").strip() or "https://ntfy.sh",
                            topic=re.sub(r"[^A-Za-z0-9_-]", "", g("ntfy_topic")) or cfg["ntfy"]["topic"])
         cfg["email"].update(enabled="email_enabled" in f, smtp_host=g("smtp_host").strip(),
@@ -2821,7 +2880,16 @@ def save_settings(f):
         if cfg.get("active_preset") in (cfg.get("presets") or {}):
             cfg["presets"][cfg["active_preset"]] = preset_of(cfg)  # the active preset follows your edits
         save_config(cfg)
+        changed = search_signature(cfg) != before
     rescore_all()
+    if changed:
+        search_again()
+    return changed
+
+
+def saved_message(search_changed):
+    return ("Saved. The search changed, so the postings found so far were cleared (%s) and a new search started: "
+            "the list fills up again in a few minutes." % KEPT_ON_NEW_SEARCH) if search_changed else "Saved, postings re-scored."
 
 
 # ---------------------------------------------------------------- CV
@@ -3127,6 +3195,88 @@ function calc() {
 }
 tr.addEventListener("input", calc); document.addEventListener("chips", calc);
 document.querySelectorAll("#min_score,#notify_min_score").forEach(function (el) { el.addEventListener("input", calc); });
+})();</script>"""
+
+# Settings: notices unsaved changes; leaving the page or switching a preset asks first.
+LEAVE_JS = """<script>(function () {
+var form = document.getElementById("settings"), dlg = document.getElementById("leave_dlg");
+if (!form || !dlg) return;
+var SEARCH = ["search", "own"], SKIP = /^(preset_pick|preset_name|preset_do|what|next|save_first)$/;
+function snap() {
+  var out = {};
+  form.querySelectorAll("section.ui-section").forEach(function (sec) {
+    var v = [];
+    sec.querySelectorAll("input,select,textarea").forEach(function (el) {
+      if (!el.name || SKIP.test(el.name) || el.type === "button" || el.type === "submit") return;
+      v.push(el.name + "=" + (el.type === "checkbox" || el.type === "radio" ? el.checked : el.value));
+    });
+    out[sec.id] = v.join("\\u0001");
+  });
+  return out;
+}
+var base = snap(), leaving = false, pending = null;
+function dirty() {
+  var now = snap(), out = [];
+  Object.keys(now).forEach(function (k) { if (now[k] !== base[k]) out.push(k); });
+  return out;
+}
+function title(id) { var h = document.getElementById(id + "-h"); return h ? h.textContent : id; }
+var note = document.getElementById("savebar_note"), note0 = note.textContent;
+function update() {
+  var d = dirty();
+  if (!d.length) { note.textContent = note0; return; }
+  note.textContent = "Unsaved changes: " + d.map(title).join(", ") +
+    (d.some(function (x) { return SEARCH.indexOf(x) >= 0; }) ? ". The search changed: saving clears the found postings and searches again." : ".");
+}
+form.addEventListener("input", update); form.addEventListener("change", update); document.addEventListener("chips", update);
+form.addEventListener("submit", function () { leaving = true; });
+window.addEventListener("beforeunload", function (ev) { if (!leaving && dirty().length) { ev.preventDefault(); ev.returnValue = ""; } });
+function ask(onSave, onDiscard, saveLabel, discardLabel) {
+  var d = dirty();
+  document.getElementById("leave_what").textContent = "You changed: " + d.map(title).join(", ") + ".";
+  document.getElementById("leave_search").hidden = !d.some(function (x) { return SEARCH.indexOf(x) >= 0; });
+  document.getElementById("leave_save").textContent = saveLabel;
+  document.getElementById("leave_discard").textContent = discardLabel;
+  pending = {save: onSave, discard: onDiscard};
+  dlg.showModal();
+}
+document.getElementById("leave_stay").onclick = function () { pending = null; dlg.close(); };
+document.getElementById("leave_save").onclick = function () { var p = pending; dlg.close(); if (p) { leaving = true; p.save(); } };
+document.getElementById("leave_discard").onclick = function () { var p = pending; dlg.close(); if (p) { leaving = true; p.discard(); } };
+// links and other forms that leave the page
+document.addEventListener("click", function (ev) {
+  var a = ev.target.closest("a[href]");
+  if (!a || ev.defaultPrevented || ev.ctrlKey || ev.metaKey || ev.shiftKey || a.target === "_blank") return;
+  var href = a.getAttribute("href");
+  if (!href || href.charAt(0) === "#" || !dirty().length) return;
+  ev.preventDefault();
+  ask(function () { document.getElementById("settings_next").value = a.pathname + a.search;
+                    form.requestSubmit(document.getElementById("settings_save")); },
+      function () { location.href = a.href; }, "Save and continue", "Don't save");
+}, true);
+document.querySelectorAll("form").forEach(function (f) {
+  if (f === form || f.method === "dialog") return;
+  f.addEventListener("submit", function (ev) {
+    if (leaving || !dirty().length) return;
+    ev.preventDefault();
+    var sub = ev.submitter;
+    ask(function () { document.getElementById("settings_next").value = "/settings";
+                      form.requestSubmit(document.getElementById("settings_save")); },
+        function () { leaving = true; f.requestSubmit(sub || undefined); }, "Save (stay here)", "Don't save, continue");
+  });
+});
+// switching a preset replaces the settings: offer to save them first
+form.addEventListener("submit", function (ev) {
+  var b = ev.submitter;
+  if (!b || b.name !== "preset_do" || b.value !== "load" || pending === "go" || !dirty().length) return;
+  ev.preventDefault(); leaving = false;
+  function go(saveFirst) {
+    var h = form.querySelector("input[name=save_first]");
+    if (!h) { h = document.createElement("input"); h.type = "hidden"; h.name = "save_first"; form.append(h); }
+    h.value = saveFirst ? "1" : ""; pending = "go"; leaving = true; form.requestSubmit(b);
+  }
+  ask(function () { go(true); }, function () { go(false); }, "Save, then switch", "Switch without saving");
+});
 })();</script>"""
 
 OUTREACH_JS = """<script>
@@ -4056,8 +4206,11 @@ class Handler(BaseHTTPRequestHandler):
                     con.execute("UPDATE jobs SET status='seen' WHERE status='new'")
                 return self.redirect(self.back())
             if u.path == "/settings":
-                save_settings(f)
-                return self.redirect("/settings?msg=" + urllib.parse.quote("Saved, postings re-scored."))
+                msg = urllib.parse.quote(saved_message(save_settings(f)))
+                nxt = f.get("next", "")
+                if nxt.startswith("/") and not nxt.startswith("//"):  # saved from the "unsaved changes" dialog
+                    return self.redirect(nxt + ("&" if "?" in nxt else "?") + "msg=" + msg)
+                return self.redirect("/settings?msg=" + msg)
             if u.path == "/preset":
                 return self.redirect("/settings?msg=" + urllib.parse.quote(preset_action(f) or "Nothing to do.") + "#presets")
             if u.path == "/test":
