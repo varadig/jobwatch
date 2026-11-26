@@ -2241,6 +2241,13 @@ article.job[data-href]:hover{box-shadow:0 0 0 1px color-mix(in oklab,var(--acc) 
 .jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
 .wm-quick{display:inline-flex;align-items:center;gap:1px;font-size:12px;color:var(--muted)}.wm-quick span{margin:0 3px 0 2px}
 .modal-backdrop button{display:block;width:100%;height:100%;opacity:0;cursor:default}
+article.job.busy{opacity:.55;transition:opacity .15s}
+article.job.leaving{opacity:0;transform:translateX(32px);height:0!important;min-height:0;margin-bottom:0;padding-top:0;padding-bottom:0;
+  border-width:0;overflow:hidden;pointer-events:none;
+  transition:opacity .22s ease,transform .26s ease,height .3s ease .1s,margin .3s ease .1s,padding .3s ease .1s,border-width .3s ease .1s}
+article.job.updated{animation:jw-flash .9s ease}
+@keyframes jw-flash{0%{box-shadow:0 0 0 2px var(--acc)}100%{box-shadow:0 0 0 0 transparent}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .jd-modal{width:min(940px,94vw);max-width:940px;max-height:90vh;padding:18px 20px;background:var(--bg)}
 .jd-modal .jd{margin:0}.jd-modal .ui-section:last-child{margin-bottom:0}.jd-close{position:absolute;right:12px;top:12px;z-index:2}
 .jd-modal .jd-head{padding-right:34px}
@@ -2865,37 +2872,100 @@ def job_page(jid, back="/", flash=""):
 
 
 # Jobs page: a card (or its title) opens the posting in a dialog; Ctrl/Cmd or middle click opens its own page in a new
-# tab. Its buttons, links, menus and forms keep working. A status button in the dialog closes it and refreshes the list.
+# tab. The buttons (on a card or in the dialog) save in the background, without reloading the page: a card that no
+# longer fits the filters slides away, the others are updated in place, and the counters follow.
 JOB_MODAL = """<dialog id="job_dlg" class="modal" aria-labelledby="jd-title"><div class="modal-box jd-modal">
 <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">✕</button></form>
 <div id="job_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
+<div id="jw_live" class="sr-only" aria-live="polite"></div>
 <script>(function () {
-var dlg = document.getElementById("job_dlg"), body = document.getElementById("job_dlg_body"), changed = false, cur = null;
-var y = sessionStorage.getItem("jw_scroll");
-if (y !== null) { sessionStorage.removeItem("jw_scroll"); window.scrollTo(0, +y); }
+var dlg = document.getElementById("job_dlg"), body = document.getElementById("job_dlg_body"), live = document.getElementById("jw_live");
+var changed = false, cur = null, curCard = null;
+var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+// ---- updating the list in place
+function swapCounts(doc) {
+  [".stats", ".listhead"].forEach(function (sel) {
+    var a = document.querySelector(sel), b = doc.querySelector(sel);
+    if (a && b) a.replaceWith(document.importNode(b, true));
+  });
+  var A = document.querySelectorAll(".ui-filters .row-chips"), B = doc.querySelectorAll(".ui-filters .row-chips");
+  if (A.length === B.length) A.forEach(function (x, i) { x.replaceWith(document.importNode(B[i], true)); });
+}
+function bucketOf(el) {
+  while (el && !(el.classList && el.classList.contains("bucket"))) el = el.previousElementSibling;
+  return el;
+}
+function fixBucket(b) {
+  if (!b) return;
+  var n = 0, x = b.nextElementSibling;
+  while (x && !x.classList.contains("bucket")) { if (x.matches("article.job")) n++; x = x.nextElementSibling; }
+  if (!n) b.remove(); else { var sp = b.querySelector("span"); if (sp) sp.textContent = "\\u00b7 " + n; }
+}
+function leave(card) {
+  var b = bucketOf(card);
+  function done() { card.remove(); fixBucket(b); }
+  if (reduce) return done();
+  card.style.height = card.offsetHeight + "px";
+  void card.offsetHeight;
+  card.classList.add("leaving");
+  setTimeout(done, 420);
+}
+function refreshCard(card, what) {
+  if (!card || !card.isConnected) return;
+  var href = card.dataset.href, title = (card.querySelector(".jt a") || {}).textContent || "";
+  card.classList.add("busy");
+  fetch(location.href, {cache: "no-store"}).then(function (r) { return r.text(); }).then(function (h) {
+    var doc = new DOMParser().parseFromString(h, "text/html");
+    swapCounts(doc);
+    var fresh = doc.querySelector('article.job[data-href="' + href + '"]');
+    if (fresh) {
+      fresh = document.importNode(fresh, true);
+      card.replaceWith(fresh);
+      if (!reduce) { fresh.classList.add("updated"); setTimeout(function () { fresh.classList.remove("updated"); }, 900); }
+    } else leave(card);
+    if (what) live.textContent = title + ": " + what;
+  }).catch(function () { location.reload(); });
+}
+var LABEL = {hidden: "hidden", seen: "marked seen", saved: "saved", applied: "marked applied", "new": "marked new"};
+function post(form, submitter) {
+  var fd = new FormData(form, submitter);
+  return fetch(form.action, {method: "POST", body: new URLSearchParams(fd)}).then(function () { return fd; });
+}
+// buttons on the cards
+document.addEventListener("submit", function (ev) {
+  var form = ev.target, card = form.closest && form.closest("article.job[data-href]");
+  if (!card || dlg.contains(form) || (form.method || "").toLowerCase() !== "post") return;
+  ev.preventDefault();
+  var d = form.closest("details"); if (d) d.open = false;
+  post(form, ev.submitter).then(function (fd) {
+    refreshCard(card, LABEL[fd.get("status")] || (fd.get("work_mode") ? "work mode set" : ""));
+  });
+}, true);
+// ---- the dialog
 function load(href) {
   cur = href;
   return fetch(href + "?partial=1").then(function (r) { if (!r.ok) throw r; return r.text(); })
     .then(function (h) { body.innerHTML = h; if (window.jdLoadPreview) window.jdLoadPreview(body); });
 }
 function open(href, card) {
-  if (card && card.classList.contains("st-new")) changed = true;   // opening marks it seen
+  curCard = card; changed = !!(card && card.classList.contains("st-new"));   // opening marks it seen
   body.innerHTML = '<p class="muted" style="padding:20px">Loading\\u2026</p>';
   dlg.showModal();
   load(href).catch(function () { location.href = href; });
 }
+var lastStatus = "";
 dlg.addEventListener("close", function () {
   body.innerHTML = "";
-  if (changed) { changed = false; sessionStorage.setItem("jw_scroll", String(window.scrollY)); location.reload(); }
+  if (changed) { changed = false; refreshCard(curCard, LABEL[lastStatus] || ""); }
+  lastStatus = "";
 });
 body.addEventListener("submit", function (ev) {
   var f = ev.target;
-  if (!f.action || f.method !== "post") return;
+  if (!f.action || (f.method || "").toLowerCase() !== "post") return;
   ev.preventDefault();
-  var fd = new FormData(f, ev.submitter);
-  fetch(f.action, {method: "POST", body: new URLSearchParams(fd)}).then(function () {
+  post(f, ev.submitter).then(function (fd) {
     changed = true;
-    if (fd.has("status")) dlg.close(); else load(cur);   // status: done with it; work mode: show the update
+    if (fd.has("status")) { lastStatus = fd.get("status"); dlg.close(); } else load(cur);   // status: done; work mode: show it
   });
 });
 function cardOf(ev) {
