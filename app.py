@@ -2240,6 +2240,7 @@ article.job[data-href]{cursor:pointer;transition:box-shadow .12s}
 article.job[data-href]:hover{box-shadow:0 0 0 1px color-mix(in oklab,var(--acc) 50%,transparent),0 3px 12px rgba(0,0,0,.10)}
 .jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
 .wm-quick{display:inline-flex;align-items:center;gap:1px;font-size:12px;color:var(--muted)}.wm-quick span{margin:0 3px 0 2px}
+.modal-backdrop button{display:block;width:100%;height:100%;opacity:0;cursor:default}
 .jd-modal{width:min(940px,94vw);max-width:940px;max-height:90vh;padding:18px 20px;background:var(--bg)}
 .jd-modal .jd{margin:0}.jd-modal .ui-section:last-child{margin-bottom:0}.jd-close{position:absolute;right:12px;top:12px;z-index:2}
 .jd-modal .jd-head{padding-right:34px}
@@ -2377,7 +2378,13 @@ def page(title, body, flash="", refresh=0):
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
     running = '<span class="badge badge-soft badge-warning">⏳ refresh running…</span>' if STATE["running"] else ""
     return ("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
-<script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";</script>
+<script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+(function () {  // a click outside an open dialog's box closes it (only if the press started outside too: not while selecting text)
+  var downOut = false;
+  function outside(ev) { var d = ev.target.closest && ev.target.closest("dialog[open]"); return d && !ev.target.closest(".modal-box") ? d : null; }
+  document.addEventListener("pointerdown", function (ev) { downOut = !!outside(ev); }, true);
+  document.addEventListener("click", function (ev) { var d = outside(ev); if (d && downOut) { ev.preventDefault(); d.close(); } downOut = false; }, true);
+})();</script>
 <title>%s · jobwatch</title>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
@@ -4008,7 +4015,7 @@ onclick="event.stopPropagation(); oview(%d)">%s</button><div class="muted" style
 <form method="post" action="/outreach/%d" class="modal-action"><div><button type="button" class="btn btn-sm btn-primary" id="oc%d" onclick="ocopy(%d)">Copy message</button>%s</div>
 <div><button class="btn btn-sm btn-ghost" name="act" value="unsent">Move back to drafts</button>
 <button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></form></div>
-<form method="dialog" class="modal-backdrop"><button class="" aria-label="Close">close</button></form></dialog>""" % (
+<form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>""" % (
             oid, oid, oid, e(r["name"]), e(r["title"] or ""), (" · " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
             oid, oid, e(r["subject"] or ""), oid, oid, oid, oid, e(r["message"] or ""), oid, oid, oid, open_btn))
     sent_sec = ("""<section class="ui-section" aria-labelledby="se-h"><header><h2 id="se-h">Sent</h2>
