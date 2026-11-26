@@ -2240,6 +2240,9 @@ article.job[data-href]{cursor:pointer;transition:box-shadow .12s}
 article.job[data-href]:hover{box-shadow:0 0 0 1px color-mix(in oklab,var(--acc) 50%,transparent),0 3px 12px rgba(0,0,0,.10)}
 .jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
 .wm-quick{display:inline-flex;align-items:center;gap:1px;font-size:12px;color:var(--muted)}.wm-quick span{margin:0 3px 0 2px}
+.jd-modal{width:min(940px,94vw);max-width:940px;max-height:90vh;padding:18px 20px;background:var(--bg)}
+.jd-modal .jd{margin:0}.jd-modal .ui-section:last-child{margin-bottom:0}.jd-close{position:absolute;right:12px;top:12px;z-index:2}
+.jd-modal .jd-head{padding-right:34px}
 .jd-head{display:flex;gap:14px;align-items:center}.jd-t{min-width:0;flex:1}.jd-head h1{font-size:22px;font-weight:700;margin:0;line-height:1.25}
 .jd-score{flex:0 0 auto}.jd .chips{margin-top:12px}
 .jd-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:14px}.jd-status{display:flex;flex-wrap:wrap;gap:4px}
@@ -2395,7 +2398,7 @@ the list, marked applied.</p>
 Search again right away</label>
 <div class="modal-action"><button type="button" class="btn btn-ghost" onclick="this.closest('dialog').close()" autofocus>Cancel</button>
 <button class="btn btn-error" name="reset" value="1">Clear cache</button></div></form>
-<form method="dialog" class="modal-backdrop"><button>close</button></form></dialog>"""
+<form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>"""
 
 
 def with_msg(path, msg):
@@ -2674,7 +2677,7 @@ def jobs_page(q):
            '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
            'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
            '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
-    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)) + CARD_CLICK_JS,
+    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)) + JD_PREVIEW_JS + JOB_MODAL,
                 q.get("msg", ""), refresh=3 if busy else 0)
 
 
@@ -2778,8 +2781,9 @@ def posting_preview(jid):
     return clean
 
 
-def job_page(jid, back="/", flash=""):
-    """One posting in detail: its data, your status and documents, and the full posting text."""
+def job_detail_html(jid, back="/", modal=False):
+    """(title, HTML) of one posting in detail: its data, your status and documents, and the full posting text.
+    modal: the content of the dialog on the Jobs page (no back link). Opening it marks a new posting seen."""
     with db() as con:
         r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         if r and r["status"] == "new":
@@ -2787,8 +2791,8 @@ def job_page(jid, back="/", flash=""):
             r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         has_cv = bool(r and con.execute("SELECT 1 FROM cvs WHERE job_id=? AND status='done'", (jid,)).fetchone())
     if not r:
-        return page("Not found", '<div class="ui"><a class="btn btn-sm btn-ghost" href="/">← Jobs</a><section class="ui-section">'
-                                 '<div class="ui-body ui-empty">This posting is not in the list any more.</div></section></div>')
+        return None, ('<div class="ui">%s<section class="ui-section"><div class="ui-body ui-empty">This posting is not in '
+                      'the list any more.</div></section></div>') % ("" if modal else '<a class="btn btn-sm btn-ghost" href="/">← Jobs</a>')
     r = dict(r)
     with CFG_LOCK:
         cfg = load_config()
@@ -2812,51 +2816,100 @@ def job_page(jid, back="/", flash=""):
               '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
     text = r["desc_html"] or clean_posting_html(r["description"] or "")
     loading = not r["desc_html"]
-    body = ('<div class="ui jd"><a class="btn btn-sm btn-ghost" href="%s">← Back to the list</a>'
-            '<section class="ui-section"><div class="ui-body"><div class="jd-head">%s<div class="jd-t"><h1>%s</h1>'
+    body = ('<div class="ui jd">%s'
+            '<section class="ui-section"><div class="ui-body"><div class="jd-head">%s<div class="jd-t"><h1 id="jd-title">%s</h1>'
             '<div class="co"><b>%s</b> <span class="src">· %s</span></div></div>'
             '<div class="score %s jd-score" title="Score against your CV">%d<small>pts</small></div></div>'
             '<div class="chips">%s</div>'
             '<div class="jd-acts">%s<a class="btn btn-sm btn-outline" href="/open/%s" target="_blank" rel="noopener noreferrer">'
-            'Open the original ↗</a><form method="post" action="/job/%s" class="jd-status">%s</form></div>'
+            'Open the original ↗</a><form method="post" action="/job/%s" class="jd-status">'
+            '<input type="hidden" name="next" value="%s">%s</form></div>'
             '<details class="why"><summary>Why this score?</summary>%s</details></div></section>'
             '<section class="ui-section" aria-labelledby="jd-post-h"><header><div><h2 id="jd-post-h">The posting</h2>'
-            '<p class="ui-desc" id="jd-src">%s</p></div></header><div class="ui-body"><div class="jd-text" id="jd-text">%s</div>'
+            '<p class="ui-desc" id="jd-src">%s</p></div></header><div class="ui-body"><div class="jd-text" id="jd-text"%s>%s</div>'
             '</div></section></div>') % (
-        e(back), logo_html(r["company"], logo_files(), 56), e(r["title"]), e(r["company"] or "?"),
-        e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, qid, acts,
+        "" if modal else '<a class="btn btn-sm btn-ghost" href="%s">← Back to the list</a>' % e(back),
+        logo_html(r["company"], logo_files(), 56), e(r["title"]), e(r["company"] or "?"),
+        e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, qid, e(back), acts,
         e(r["matched"] or "-"),
         "Loading the full posting from its page…" if loading else "From the posting's own page.",
+        ' data-preview="/job/%s/preview"' % qid if loading else "",
         text or '<p class="muted">No text stored for this posting yet.</p>')
-    if loading:
-        body += ("""<script>(function () {
-var box = document.getElementById("jd-text"), src = document.getElementById("jd-src");
-fetch("/job/%s/preview").then(function (r) { return r.ok ? r.text() : ""; }).then(function (h) {
-  if (h) { box.innerHTML = h; src.textContent = "From the posting's own page."; }
-  else src.textContent = "The full posting could not be read from its page (it may need a login); this is the text jobwatch has. Use “Open the original ↗”.";
-}).catch(function () { src.textContent = "The full posting could not be loaded; this is the text jobwatch has."; });
-})();</script>""" % qid)
-    return page(r["title"][:60], body, flash)
+    return r["title"], body
 
 
-# The whole card opens the posting's page; its buttons, links, menus and forms keep working as before.
-# (The title link stays the keyboard way in; Ctrl/Cmd or middle click opens it in a new tab.)
-CARD_CLICK_JS = """<script>(function () {
-function target(ev) {
+# Loads the full posting into a detail view (the page, or the dialog on the Jobs page).
+JD_PREVIEW_JS = """<script>(function () {
+window.jdLoadPreview = function (root) {
+  var box = root.querySelector("#jd-text[data-preview]"), src = root.querySelector("#jd-src");
+  if (!box) return;
+  fetch(box.dataset.preview).then(function (r) { return r.ok ? r.text() : ""; }).then(function (h) {
+    if (h) { box.innerHTML = h; src.textContent = "From the posting's own page."; }
+    else src.textContent = "The full posting could not be read from its page (it may need a login); this is the text jobwatch has. Use \\u201cOpen the original \\u2197\\u201d.";
+  }).catch(function () { src.textContent = "The full posting could not be loaded; this is the text jobwatch has."; });
+};
+})();</script>"""
+
+
+def job_page(jid, back="/", flash=""):
+    """The posting's own page (opened in a new tab, or from a link)."""
+    title, body = job_detail_html(jid, back)
+    return page((title or "Not found")[:60], body + JD_PREVIEW_JS + "<script>jdLoadPreview(document)</script>", flash)
+
+
+# Jobs page: a card (or its title) opens the posting in a dialog; Ctrl/Cmd or middle click opens its own page in a new
+# tab. Its buttons, links, menus and forms keep working. A status button in the dialog closes it and refreshes the list.
+JOB_MODAL = """<dialog id="job_dlg" class="modal" aria-labelledby="jd-title"><div class="modal-box jd-modal">
+<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">✕</button></form>
+<div id="job_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
+<script>(function () {
+var dlg = document.getElementById("job_dlg"), body = document.getElementById("job_dlg_body"), changed = false, cur = null;
+var y = sessionStorage.getItem("jw_scroll");
+if (y !== null) { sessionStorage.removeItem("jw_scroll"); window.scrollTo(0, +y); }
+function load(href) {
+  cur = href;
+  return fetch(href + "?partial=1").then(function (r) { if (!r.ok) throw r; return r.text(); })
+    .then(function (h) { body.innerHTML = h; if (window.jdLoadPreview) window.jdLoadPreview(body); });
+}
+function open(href, card) {
+  if (card && card.classList.contains("st-new")) changed = true;   // opening marks it seen
+  body.innerHTML = '<p class="muted" style="padding:20px">Loading\\u2026</p>';
+  dlg.showModal();
+  load(href).catch(function () { location.href = href; });
+}
+dlg.addEventListener("close", function () {
+  body.innerHTML = "";
+  if (changed) { changed = false; sessionStorage.setItem("jw_scroll", String(window.scrollY)); location.reload(); }
+});
+body.addEventListener("submit", function (ev) {
+  var f = ev.target;
+  if (!f.action || f.method !== "post") return;
+  ev.preventDefault();
+  var fd = new FormData(f, ev.submitter);
+  fetch(f.action, {method: "POST", body: new URLSearchParams(fd)}).then(function () {
+    changed = true;
+    if (fd.has("status")) dlg.close(); else load(cur);   // status: done with it; work mode: show the update
+  });
+});
+function cardOf(ev) {
+  var a = ev.target.closest('.jt a[href^="/job/"]');
+  if (a) return {card: a.closest("article.job"), link: true};
   var card = ev.target.closest("article.job[data-href]");
   if (!card || ev.target.closest("a,button,summary,details,form,input,select,textarea,label")) return null;
   if (String(window.getSelection && window.getSelection()).trim()) return null;   // selecting text, not clicking
-  return card;
+  return {card: card, link: false};
 }
 document.addEventListener("click", function (ev) {
-  var card = target(ev);
-  if (!card || ev.button !== 0) return;
-  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) window.open(card.dataset.href, "_blank");
-  else location.href = card.dataset.href;
+  if (ev.button !== 0 || dlg.contains(ev.target)) return;
+  var t = cardOf(ev);
+  if (!t || !t.card) return;
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { if (!t.link) window.open(t.card.dataset.href, "_blank"); return; }
+  ev.preventDefault();
+  open(t.card.dataset.href, t.card);
 });
 document.addEventListener("auxclick", function (ev) {
-  var card = target(ev);
-  if (card && ev.button === 1) { ev.preventDefault(); window.open(card.dataset.href, "_blank"); }
+  var t = cardOf(ev);
+  if (t && t.card && !t.link && ev.button === 1) { ev.preventDefault(); window.open(t.card.dataset.href, "_blank"); }
 });
 })();</script>"""
 
@@ -3248,7 +3301,7 @@ def settings_page(flash=""):
             'with the new settings (%s).</p><div class="modal-action"><button type="button" class="btn btn-ghost" '
             'id="leave_stay">Stay here</button><button type="button" class="btn btn-outline" id="leave_discard">Don\'t save'
             '</button><button type="button" class="btn btn-primary" id="leave_save">Save</button></div></div>'
-            '<form method="dialog" class="modal-backdrop"><button>close</button></form></dialog>') % (
+            '<form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>') % (
         nav, presets, notify, search, own, scoring, claude, general, danger, e(KEPT_ON_NEW_SEARCH))
     return page("Settings", body + CHIPS_JS % json.dumps(
         {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}) + LEAVE_JS, flash)
@@ -4482,6 +4535,8 @@ class Handler(BaseHTTPRequestHandler):
                 if m.group(2):
                     h = posting_preview(jid)
                     return self.send_html(h or "", 200 if h else 404)
+                if q.get("partial"):
+                    return self.send_html(job_detail_html(jid, modal=True)[1])
                 back = self.back()
                 return self.send_html(job_page(jid, back if not back.startswith("/job/") else "/", q.get("msg", "")))
             m = re.match(r"^/cv/([^/]+?)(?:/(cv|resume|letter)\.pdf)?$", u.path)
@@ -4592,6 +4647,9 @@ class Handler(BaseHTTPRequestHandler):
                     with CFG_LOCK:
                         cfg_ = load_config()
                     threading.Thread(target=enrich_work_modes, args=(cfg_,), daemon=True).start()
+                nxt = f.get("next", "")
+                if st in ("hidden", "seen") and nxt.startswith("/") and not nxt.startswith("//") and not nxt.startswith("/job/"):
+                    return self.redirect(nxt)   # done with it on its page: back to the list
                 return self.redirect(self.back())
             if u.path == "/profile":
                 try:

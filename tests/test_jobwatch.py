@@ -1400,12 +1400,21 @@ class ManualModeAndDetailPage(unittest.TestCase):
 
     def test_detail_page_marks_seen_and_shows_the_text(self):
         h = app.job_page("rss:5", "/?work=all")
-        self.assertIn("<h1>Unity Dev</h1>", h)
+        self.assertIn('<h1 id="jd-title">Unity Dev</h1>', h)
         self.assertIn("We use Unity.", h)
         self.assertIn('href="/?work=all"', h)
         self.assertIn("/job/rss%3A5/preview", h)
         with app.db() as con:
             self.assertEqual(con.execute("SELECT status FROM jobs WHERE id='rss:5'").fetchone()[0], "seen")
+
+    def test_dialog_content_and_jobs_page_modal(self):
+        title, h = app.job_detail_html("rss:5", modal=True)
+        self.assertEqual(title, "Unity Dev")
+        self.assertNotIn("Back to the list", h)
+        self.assertIn('name="next"', h)
+        jobs = app.jobs_page({"work": "all", "min": "-99", "status": "all"})
+        self.assertIn('<dialog id="job_dlg"', jobs)
+        self.assertIn('data-href="/job/rss%3A5"', jobs)
 
     def test_posting_html_is_cleaned(self):
         raw = '<div><h2>About</h2><p onclick="x()">Hi <a href="javascript:alert(1)">there</a></p><script>bad()</script><ul><li>C#</li></ul></div>'
