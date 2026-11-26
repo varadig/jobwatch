@@ -2236,6 +2236,8 @@ details.wm-pick>summary::-webkit-details-marker{display:none}
 .chip button{border:0;background:none;padding:0 5px;border-radius:99px;cursor:pointer;color:var(--muted);font-size:15px;line-height:20px}
 .chip button:hover,.chip button:focus-visible{background:var(--line);color:var(--fg)}.chip.dragging{opacity:.4}
 .chip.over{outline:2px solid var(--acc)}
+article.job[data-href]{cursor:pointer;transition:box-shadow .12s}
+article.job[data-href]:hover{box-shadow:0 0 0 1px color-mix(in oklab,var(--acc) 50%,transparent),0 3px 12px rgba(0,0,0,.10)}
 .jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
 .wm-quick{display:inline-flex;align-items:center;gap:1px;font-size:12px;color:var(--muted)}.wm-quick span{margin:0 3px 0 2px}
 .jd-head{display:flex;gap:14px;align-items:center}.jd-t{min-width:0;flex:1}.jd-head h1{font-size:22px;font-weight:700;margin:0;line-height:1.25}
@@ -2654,12 +2656,12 @@ def jobs_page(q):
             ("hidden", "🚫", "Hide"), ("new", "↺", "Mark new again")) if s_ != r["status"])
         cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if r["id"] in has_cv else
                   '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
-        cards.append("""<article class="job st-%s%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
+        cards.append("""<article class="job st-%s%s" data-href="/job/%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
 <div><div class="job-head">%s<div><div class="jt"><a href="/job/%s">%s</a> <a class="ext" href="/open/%s" target="_blank" rel="noopener noreferrer" title="Open the original posting" aria-label="Open the original posting">↗</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div></div></div><div class="chips">%s</div>
 <details class="why"><summary>Why this score?</summary>%s</details></div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
-            e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", cls, sc,
+            e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", qid, cls, sc,
             logo_html(r["company"], logos), qid, e(r["title"]), qid, e(r["company"] or "?"),
             e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
@@ -2672,7 +2674,7 @@ def jobs_page(q):
            '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
            'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
            '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
-    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)),
+    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)) + CARD_CLICK_JS,
                 q.get("msg", ""), refresh=3 if busy else 0)
 
 
@@ -2835,6 +2837,28 @@ fetch("/job/%s/preview").then(function (r) { return r.ok ? r.text() : ""; }).the
 }).catch(function () { src.textContent = "The full posting could not be loaded; this is the text jobwatch has."; });
 })();</script>""" % qid)
     return page(r["title"][:60], body, flash)
+
+
+# The whole card opens the posting's page; its buttons, links, menus and forms keep working as before.
+# (The title link stays the keyboard way in; Ctrl/Cmd or middle click opens it in a new tab.)
+CARD_CLICK_JS = """<script>(function () {
+function target(ev) {
+  var card = ev.target.closest("article.job[data-href]");
+  if (!card || ev.target.closest("a,button,summary,details,form,input,select,textarea,label")) return null;
+  if (String(window.getSelection && window.getSelection()).trim()) return null;   // selecting text, not clicking
+  return card;
+}
+document.addEventListener("click", function (ev) {
+  var card = target(ev);
+  if (!card || ev.button !== 0) return;
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) window.open(card.dataset.href, "_blank");
+  else location.href = card.dataset.href;
+});
+document.addEventListener("auxclick", function (ev) {
+  var card = target(ev);
+  if (card && ev.button === 1) { ev.preventDefault(); window.open(card.dataset.href, "_blank"); }
+});
+})();</script>"""
 
 
 def run_selection(f):
