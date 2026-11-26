@@ -1,0 +1,95 @@
+{
+  "interval_minutes": 60,
+  "min_score": 4,
+  "notify_min_score": 7,
+  "notify_work_modes": [
+    "remote",
+    "unknown"
+  ],
+  "default_work_filter": "remote_unknown",
+  "sources": {
+    "linkedin": true,
+    "meetfrank": true,
+    "4dayweek": true,
+    "flexa": true,
+    "remotive": true,
+    "studios": false,
+    "rss": true
+  },
+  "search_terms": [
+    "node.js developer | Hungary",
+    "node.js developer | European Union",
+    "backend developer node.js",
+    "typescript backend developer",
+    "full stack developer node.js",
+    "node.js engineer | Worldwide"
+  ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
+  "scoring": {
+    "interests": [
+      "node.js / nodejs / node js",
+      "backend / back-end",
+      "typescript",
+      "full stack / fullstack / full-stack",
+      "senior",
+      "javascript",
+      "developer / engineer",
+      "game / games / gaming / igaming",
+      "real-time / realtime"
+    ],
+    "desc": [
+      "node.js / nodejs",
+      "typescript",
+      "express / nestjs / fastify",
+      "postgresql / mongodb / redis",
+      "docker / kubernetes / aws",
+      "websocket / websockets",
+      "rest / graphql",
+      "microservices"
+    ],
+    "less": [
+      "junior",
+      "php",
+      "java",
+      ".net / c#",
+      "frontend / front-end",
+      "react native"
+    ],
+    "never": [
+      "product manager",
+      "project manager",
+      "producer",
+      "marketing",
+      "sales",
+      "recruiter",
+      "intern",
+      "internship",
+      "trainee",
+      "student",
+      "qa / tester",
+      "support"
+    ],
+    "loc_good": [
+      "hungary / magyarország",
+      "european union / europe / emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "united states / usa",
+      "india",
+      "china"
+    ]
+  },
+  "rss_feeds": [],
+  "studios": [],
+  "_about": "Node.js / TypeScript backend and full-stack profile (Node.js, TypeScript, APIs, real-time services). Game and iGaming backends get a small extra."
+}

@@ -1,0 +1,112 @@
+{
+  "interval_minutes": 60,
+  "min_score": 4,
+  "notify_min_score": 7,
+  "notify_work_modes": [
+    "remote",
+    "unknown"
+  ],
+  "default_work_filter": "remote_unknown",
+  "sources": {
+    "linkedin": true,
+    "meetfrank": true,
+    "4dayweek": true,
+    "flexa": true,
+    "remotive": true,
+    "studios": true,
+    "rss": true
+  },
+  "search_terms": [
+    "graphic designer | Hungary",
+    "graphic designer",
+    "visual designer",
+    "ui artist",
+    "2d artist",
+    "motion designer"
+  ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
+  "scoring": {
+    "interests": [
+      "graphic designer",
+      "visual designer",
+      "ui artist / game ui artist",
+      "ui designer / ui/ux designer",
+      "2d artist / 2d game artist",
+      "illustrator",
+      "motion designer / motion graphics",
+      "brand designer",
+      "senior",
+      "designer",
+      "game / games",
+      "mobile"
+    ],
+    "desc": [
+      "figma",
+      "photoshop / illustrator / adobe",
+      "after effects",
+      "branding / brand identity",
+      "game art / ui art",
+      "typography",
+      "spine"
+    ],
+    "less": [
+      "junior",
+      "3d artist",
+      "ux researcher",
+      "game designer",
+      "level designer",
+      "web developer",
+      "art director"
+    ],
+    "never": [
+      "software engineer",
+      "developer",
+      "programmer",
+      "product manager",
+      "project manager",
+      "sales",
+      "recruiter",
+      "intern",
+      "internship",
+      "trainee",
+      "student",
+      "interior designer",
+      "fashion designer",
+      "instructional designer",
+      "print operator"
+    ],
+    "loc_good": [
+      "hungary / magyarország",
+      "european union / europe / emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "united states / usa",
+      "india",
+      "china"
+    ]
+  },
+  "rss_feeds": [],
+  "studios": [
+    "ashby | thatgamecompany | thatgamecompany",
+    "ashby | badrobotgames | Bad Robot Games",
+    "ashby | believer | The Believer Company",
+    "ashby | SecondDinner | Second Dinner",
+    "ashby | gardens | Gardens Interactive",
+    "lever | theorycraftgames | Theorycraft Games",
+    "greenhouse | gravitywell | Gravity Well",
+    "bamboohr | seriesai | Series AI",
+    "bamboohr | void | Void Interactive",
+    "smartrecruiters | OdysseyInteractive | Odyssey Interactive"
+  ],
+  "_about": "Graphic and visual design profile (graphic, visual, UI and 2D game art, illustration, motion). Developer and other non-design roles are pushed down or hidden."
+}

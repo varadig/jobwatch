@@ -1,0 +1,106 @@
+{
+  "interval_minutes": 60,
+  "min_score": 4,
+  "notify_min_score": 7,
+  "notify_work_modes": [
+    "remote",
+    "unknown"
+  ],
+  "default_work_filter": "remote_unknown",
+  "sources": {
+    "linkedin": true,
+    "meetfrank": true,
+    "4dayweek": true,
+    "flexa": true,
+    "remotive": true,
+    "studios": true,
+    "rss": true
+  },
+  "search_terms": [
+    "actionscript",
+    "flash developer",
+    "adobe air developer",
+    "as3 developer",
+    "html5 game developer | European Union",
+    "slot game developer"
+  ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
+  "scoring": {
+    "interests": [
+      "actionscript / as3",
+      "flash",
+      "adobe air / harman air",
+      "adobe animate",
+      "html5 game / html5 games",
+      "haxe",
+      "game developer / game programmer",
+      "senior",
+      "developer / engineer",
+      "slot / casino / igaming",
+      "typescript"
+    ],
+    "desc": [
+      "actionscript / as3",
+      "adobe air",
+      "starling / feathers",
+      "flash",
+      "html5",
+      "pixi / pixijs",
+      "casino / slot / igaming"
+    ],
+    "less": [
+      "junior",
+      "backend",
+      "java",
+      "php"
+    ],
+    "never": [
+      "product manager",
+      "project manager",
+      "producer",
+      "marketing",
+      "sales",
+      "recruiter",
+      "intern",
+      "internship",
+      "trainee",
+      "student",
+      "qa / tester",
+      "support",
+      "firmware / embedded / flash memory / nand"
+    ],
+    "loc_good": [
+      "hungary / magyarország",
+      "european union / europe / emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "united states / usa",
+      "india",
+      "china"
+    ]
+  },
+  "rss_feeds": [],
+  "studios": [
+    "ashby | thatgamecompany | thatgamecompany",
+    "ashby | badrobotgames | Bad Robot Games",
+    "ashby | believer | The Believer Company",
+    "ashby | SecondDinner | Second Dinner",
+    "ashby | gardens | Gardens Interactive",
+    "lever | theorycraftgames | Theorycraft Games",
+    "greenhouse | gravitywell | Gravity Well",
+    "bamboohr | seriesai | Series AI",
+    "bamboohr | void | Void Interactive",
+    "smartrecruiters | OdysseyInteractive | Odyssey Interactive"
+  ],
+  "_about": "ActionScript / Flash and Adobe AIR profile, with the HTML5 game roles that replaced Flash (Haxe, TypeScript, PixiJS). Few ActionScript postings exist today; most are legacy or casino and slot games."
+}

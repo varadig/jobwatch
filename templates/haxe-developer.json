@@ -1,0 +1,104 @@
+{
+  "interval_minutes": 60,
+  "min_score": 4,
+  "notify_min_score": 7,
+  "notify_work_modes": [
+    "remote",
+    "unknown"
+  ],
+  "default_work_filter": "remote_unknown",
+  "sources": {
+    "linkedin": true,
+    "meetfrank": true,
+    "4dayweek": true,
+    "flexa": true,
+    "remotive": true,
+    "studios": true,
+    "rss": true
+  },
+  "search_terms": [
+    "haxe",
+    "haxe developer",
+    "openfl",
+    "html5 game developer | European Union",
+    "typescript game developer | European Union",
+    "slot game developer html5"
+  ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
+  "scoring": {
+    "interests": [
+      "haxe",
+      "openfl / haxeflixel / heaps / kha",
+      "html5 game / html5 games",
+      "typescript",
+      "game developer / game programmer",
+      "senior",
+      "developer / engineer",
+      "slot / casino / igaming",
+      "mobile"
+    ],
+    "desc": [
+      "haxe",
+      "openfl",
+      "html5",
+      "typescript",
+      "pixi / pixijs / phaser",
+      "webgl",
+      "casino / slot / igaming"
+    ],
+    "less": [
+      "junior",
+      "backend",
+      "java",
+      "php",
+      "unreal"
+    ],
+    "never": [
+      "product manager",
+      "project manager",
+      "producer",
+      "marketing",
+      "sales",
+      "recruiter",
+      "intern",
+      "internship",
+      "trainee",
+      "student",
+      "qa / tester",
+      "support"
+    ],
+    "loc_good": [
+      "hungary / magyarország",
+      "european union / europe / emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "united states / usa",
+      "india",
+      "china"
+    ]
+  },
+  "rss_feeds": [],
+  "studios": [
+    "ashby | thatgamecompany | thatgamecompany",
+    "ashby | badrobotgames | Bad Robot Games",
+    "ashby | believer | The Believer Company",
+    "ashby | SecondDinner | Second Dinner",
+    "ashby | gardens | Gardens Interactive",
+    "lever | theorycraftgames | Theorycraft Games",
+    "greenhouse | gravitywell | Gravity Well",
+    "bamboohr | seriesai | Series AI",
+    "bamboohr | void | Void Interactive",
+    "smartrecruiters | OdysseyInteractive | Odyssey Interactive"
+  ],
+  "_about": "Haxe / HTML5 game development profile (Haxe, OpenFL, HaxeFlixel, Heaps, and the nearby TypeScript / HTML5 game work). Haxe postings are rare, so the HTML5 and TypeScript game roles are searched too."
+}
