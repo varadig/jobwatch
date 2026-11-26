@@ -16,16 +16,22 @@
     "studios": false,
     "rss": true
   },
-  "linkedin_searches": [
-    "project manager | Hungary | any",
-    "project manager | European Union | remote",
-    "product owner | European Union | remote",
-    "programme manager | Europe | remote"
+  "search_terms": [
+    "project manager | Hungary",
+    "project manager | European Union",
+    "product owner | European Union",
+    "programme manager | Europe"
   ],
-  "remotive_queries": [
-    "project manager",
-    "product owner"
+  "search_locations": [
+    "European Union"
   ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
   "rss_feeds": [],
   "studios": [],
   "title_keywords": {

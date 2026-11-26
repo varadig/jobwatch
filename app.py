@@ -47,7 +47,8 @@ SOURCES_INFO = {
     "mail": ("E-mail alerts", ""),
     "manual": ("Added by hand", ""),
 }
-FETCHED_SOURCES = [k for k in SOURCES_INFO if k != "manual"]  # "manual" is never fetched, only added from the Jobs page
+FETCHED_SOURCES = [k for k in SOURCES_INFO if k != "manual"]
+SEARCH_FILTERABLE = ["meetfrank", "4dayweek", "studios", "rss", "custom"]  # they list everything; the others search  # "manual" is never fetched, only added from the Jobs page
 UNSUPPORTED = [
     ("HiringCafe", "https://hiringcafe.com/", "Cloudflare blocks automated fetching (403)"),
     ("JobLeads", "https://www.jobleads.com/", "Cloudflare blocks automated fetching (403)"),
@@ -76,8 +77,11 @@ DEFAULT_CONFIG = {
     "mail_source": {"imap_host": "imap.gmail.com", "imap_port": 993, "username": "", "password": "",
                     "folder": "INBOX", "senders": ["jackandjill.ai", "jobalerts-noreply@linkedin.com"], "days": 7,
                     "use_claude": True},
-    "linkedin_searches": [],   # pl. "project manager | Hungary | any"
-    "remotive_queries": [],    # pl. ["project manager"]
+    # One search for every source: "keywords" or "keywords | location" per line. LinkedIn, Remotive and Flexa search
+    # with them; the sources that list everything keep only the postings that match a term (see search_filter).
+    "search_terms": [],        # e.g. "project manager | Hungary"
+    "search_locations": ["European Union"],  # LinkedIn locations for the terms without their own
+    "search_filter": {"meetfrank": True, "4dayweek": True, "studios": False, "rss": False, "custom": False},
     "rss_feeds": [],
     "custom_sources": [],      # own sources from Settings, see CUSTOM_TYPES
     "studios": [],            # "rendszer | azonosito | nev", pl. "ashby | acme | Acme"
@@ -105,10 +109,72 @@ def load_config():
                 cfg[k].update(v)
             else:
                 cfg[k] = v
+    changed = migrate_search(cfg)
     if not cfg["ntfy"].get("topic"):
         cfg["ntfy"]["topic"] = "jobwatch-" + secrets.token_hex(6)
+        changed = True
+    if changed:
         save_config(cfg)
     return cfg
+
+
+def migrate_search(cfg):
+    """The old per-source lists (linkedin_searches, remotive_queries) become the shared search_terms.
+    The LinkedIn lines keep their location; the work-mode part is dropped (LinkedIn ignores it)."""
+    if "linkedin_searches" not in cfg and "remotive_queries" not in cfg:
+        return False
+    old_li, old_q = cfg.pop("linkedin_searches", None) or [], cfg.pop("remotive_queries", None) or []
+    if not cfg.get("search_terms"):
+        terms, seen = [], set()
+        for line in old_li:
+            parts = [x.strip() for x in line.split("|")]
+            if parts[0]:
+                terms.append(parts[0] + (" | " + parts[1] if len(parts) > 1 and parts[1] else ""))
+                seen.add(parts[0].lower())
+        for q in old_q:
+            if q.strip() and q.strip().lower() not in seen:
+                terms.append(q.strip())
+                seen.add(q.strip().lower())
+        cfg["search_terms"] = terms
+    return True
+
+
+def search_entries(cfg):
+    """[(keywords, location or "")] from the search terms."""
+    out = []
+    for line in cfg.get("search_terms") or []:
+        parts = [x.strip() for x in line.split("|")]
+        if parts[0]:
+            out.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    return out
+
+
+def search_keywords(cfg):
+    """The distinct keywords (case-insensitive), in order."""
+    out, seen = [], set()
+    for kw, _ in search_entries(cfg):
+        if kw.lower() not in seen:
+            seen.add(kw.lower())
+            out.append(kw)
+    return out
+
+
+def linkedin_plan(cfg):
+    """[(keywords, location)]: a term with its own location is searched there, the others in each default location."""
+    locs = [l.strip() for l in cfg.get("search_locations") or [] if l.strip()] or ["European Union"]
+    out, seen = [], set()
+    for kw, loc in search_entries(cfg):
+        for l in ([loc] if loc else locs):
+            if (kw.lower(), l.lower()) not in seen:
+                seen.add((kw.lower(), l.lower()))
+                out.append((kw, l))
+    return out
+
+
+def matches_search(keywords, it):
+    """True if the title or description contains every word of at least one search term."""
+    text = " ".join((it.get("title") or "", it.get("description") or "")).lower()
+    return any(all(term_re(w).search(text) for w in kw.lower().split()) for kw in keywords)
 
 
 def save_config(cfg):
@@ -407,14 +473,8 @@ def strip_tags(s):
 
 def src_linkedin(cfg):
     out = []
-    for line in cfg["linkedin_searches"]:
+    for kw, loc in linkedin_plan(cfg):
         done_short = set()
-        parts = [p.strip() for p in line.split("|")]
-        if not parts or not parts[0]:
-            continue
-        kw = parts[0]
-        loc = parts[1] if len(parts) > 1 and parts[1] else "European Union"
-        mode = parts[2].lower() if len(parts) > 2 else "remote"
         wts = [""]  # the guest API ignores the work-type filter (f_WT); the mode is taken from the text
         for wt, start in [(w, st) for w in wts for st in (0, 25)]:
             if start and wt in done_short:
@@ -532,7 +592,7 @@ def src_4dayweek(cfg):
 
 def src_flexa(cfg):
     out, seen = [], set()
-    for q in cfg.get("remotive_queries", []):
+    for q in search_keywords(cfg):
         s = fetch("https://flexa.careers/jobs?" + urllib.parse.urlencode({"search": q}))
         for m in re.finditer(r'<a[^>]+href="/jobs/([a-z0-9-]+)"[^>]*>(.*?)</a>', s, re.S):
             slug, title = m.group(1), strip_tags(m.group(2))
@@ -551,7 +611,7 @@ def src_flexa(cfg):
 
 def src_remotive(cfg):
     out = []
-    for q in cfg.get("remotive_queries", []):
+    for q in search_keywords(cfg):
         data = json.loads(fetch("https://remotive.com/api/remote-jobs?" + urllib.parse.urlencode({"search": q})))
         for j in data.get("jobs", []):
             out.append({"ext_id": str(j.get("id")), "title": j.get("title", ""),
@@ -1567,7 +1627,8 @@ def run_all(force=False, only=None, custom_ids=None):
                 log.exception("Source error: %s", name)
                 items, err = [], "%s: %s" % (type(ex).__name__, ex)
             ts = now_iso()
-            new = 0
+            new = skipped = 0
+            kws = search_keywords(cfg) if (cfg.get("search_filter") or {}).get(name) else []
             with db() as con:
                 for it in items:
                     if not it.get("title") or not it.get("url", "").startswith("http"):
@@ -1593,6 +1654,9 @@ def run_all(force=False, only=None, custom_ids=None):
                             con.execute("UPDATE jobs SET last_seen=? WHERE id=?", (ts, jid))
                         if wm != "unknown" and (msrc == "source" or not keep) and (ex_row["mode_src"] or "") != "manual":
                             con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=? WHERE id=?", (wm, msrc, mnote, jid))
+                        continue
+                    if kws and not matches_search(kws, it):
+                        skipped += 1  # this source lists everything: keep only what matches a search term
                         continue
                     same = find_duplicate(con, it["title"], it["company"], it["url"])
                     if same:
@@ -1622,7 +1686,8 @@ def run_all(force=False, only=None, custom_ids=None):
             prog = STATE["progress"]
             prog["done"] += 1
             prog["sources"][name] = ("error" if err else "done") + " (%d)" % len(items)
-            log.info("%s: %d postings, %d new%s", name, len(items), new, " ERROR: " + err if err else "")
+            log.info("%s: %d postings, %d new%s%s", name, len(items), new,
+                     (", %d not matching the search" % skipped) if skipped else "", " ERROR: " + err if err else "")
         errs = notify_jobs(cfg, to_notify)
         if to_notify and not errs:
             with db() as con:
@@ -2382,6 +2447,8 @@ def settings_page(flash=""):
     filt = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
                    for k, l in (("remote", "Remote only"), ("remote_unknown", "Remote + unknown"),
                                 ("remote_hybrid", "Remote + hybrid"), ("all", "All")))
+    filt_boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="sf_%s"%s> %s</label>' % (
+        k, chk((cfg.get("search_filter") or {}).get(k)), e(SOURCES_INFO[k][0])) for k in SEARCH_FILTERABLE)
     set_badge = lambda on: '<span class="badge badge-soft badge-success">set</span>' if on else ""
 
     def ta(name, label, val, rows, help_="", wide=True):
@@ -2424,8 +2491,16 @@ def settings_page(flash=""):
           'class="toggle toggle-sm toggle-primary" name="mode_claude"%s> Claude reads the postings the rules cannot settle</label>'
           '<span class="help">First the job board\'s own data and the posting text (in many languages) decide; Claude only reads '
           'what is still unknown, about ¼ cent per posting. You can always set it by hand on the card.</span></div>' % chk(cfg.get("mode_claude", True))
-        + ta("linkedin_searches", "LinkedIn searches", "\n".join(cfg["linkedin_searches"]), 5,
-             "One per line: <code>keywords | location</code>. Postings from the last 7 days; the work mode comes from the posting text.")
+        + ta("search_terms", "What to search for", "\n".join(cfg.get("search_terms") or []), 7,
+             "One per line: keywords, optionally <code>| location</code> (e.g. <code>unity | Hungary</code>). Used by every "
+             "source: LinkedIn, Remotive and Flexa search with them, and the sites ticked below keep only the postings "
+             "that contain every word of a line. LinkedIn: postings from the last 7 days.")
+        + ta("search_locations", "Default locations (LinkedIn)", "\n".join(cfg.get("search_locations") or []), 3,
+             "For the lines without a location, one per line: e.g. <code>European Union</code>, <code>Hungary</code>, "
+             "<code>Worldwide</code>. Each such line is searched in every one, so keep the list short.", wide=False)
+        + '<div><label>Keep only matching postings from</label><div class="ui-checks">%s</div><span class="help">These '
+          'sites list all their jobs. Untick a hand-picked list (e.g. game studios) whose job titles vary; the '
+          'scoring still ranks those.</span></div>' % filt_boxes
         + ta("studios", "Company job boards", "\n".join(cfg.get("studios") or []), 6,
              "One per line: <code>ashby|lever|greenhouse|bamboohr|smartrecruiters | id | name</code>.")
         + ta("rss_feeds", "RSS feeds", "\n".join(cfg.get("rss_feeds") or []), 3, "One URL per line.") + '</div>')
@@ -2521,7 +2596,10 @@ def save_settings(f):
         cfg["default_work_filter"] = g("default_work_filter", "remote_unknown")
         cfg["public_url"] = g("public_url").strip()
         cfg["sources"] = {k: ("src_" + k) in f for k in FETCHED_SOURCES}
-        cfg["linkedin_searches"] = [l.strip() for l in g("linkedin_searches").splitlines() if l.strip()]
+        if "search_terms" in f:
+            cfg["search_terms"] = [l.strip() for l in g("search_terms").splitlines() if l.strip().strip("|").strip()]
+            cfg["search_locations"] = [l.strip() for l in g("search_locations").splitlines() if l.strip()]
+            cfg["search_filter"] = {k: ("sf_" + k) in f for k in SEARCH_FILTERABLE}
         cfg["studios"] = [l.strip() for l in g("studios").splitlines() if l.strip().count("|") >= 1]
         cfg["rss_feeds"] = [l.strip() for l in g("rss_feeds").splitlines() if l.strip().startswith("http")]
         cfg["custom_sources"] = parse_custom_sources(f, cfg.get("custom_sources"))

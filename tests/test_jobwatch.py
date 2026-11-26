@@ -81,7 +81,7 @@ class Scoring(unittest.TestCase):
     def test_defaults_are_generic(self):
         # The shipped defaults must not carry game-specific keywords any more.
         self.assertEqual(app.DEFAULT_CONFIG["title_keywords"], {})
-        self.assertEqual(app.DEFAULT_CONFIG["linkedin_searches"], [])
+        self.assertEqual(app.DEFAULT_CONFIG["search_terms"], [])
 
 
 class NewProfileTool(unittest.TestCase):
@@ -1062,3 +1062,50 @@ class ResetForgetsMails(unittest.TestCase):
         with app.db() as con:
             self.assertEqual(con.execute("SELECT COUNT(*) FROM mail_seen").fetchone()[0], 0)
             self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+
+
+class UnifiedSearch(unittest.TestCase):
+    def test_old_lists_become_one_search(self):
+        cfg = {"linkedin_searches": ["unity developer | European Union | remote", "unity | Hungary | any", "mobile engineer"],
+               "remotive_queries": ["unity", "game developer"]}
+        self.assertTrue(app.migrate_search(cfg))
+        self.assertEqual(cfg["search_terms"], ["unity developer | European Union", "unity | Hungary", "mobile engineer",
+                                               "game developer"])
+        self.assertNotIn("linkedin_searches", cfg)
+        self.assertNotIn("remotive_queries", cfg)
+        self.assertFalse(app.migrate_search(cfg))  # only once
+
+    def test_every_source_uses_the_terms(self):
+        cfg = {"search_terms": ["unity | Hungary", "game developer", "Unity"], "search_locations": ["European Union", "Worldwide"]}
+        self.assertEqual(app.search_keywords(cfg), ["unity", "game developer"])           # Remotive, Flexa
+        self.assertEqual(app.linkedin_plan(cfg), [("unity", "Hungary"), ("game developer", "European Union"),
+                                                  ("game developer", "Worldwide"), ("Unity", "European Union"),
+                                                  ("Unity", "Worldwide")])
+
+    def test_match_needs_every_word_of_a_term(self):
+        kws = ["game developer", "c#"]
+        self.assertTrue(app.matches_search(kws, {"title": "Senior Game Developer"}))
+        self.assertTrue(app.matches_search(kws, {"title": "Backend engineer", "description": "We use C# and .NET"}))
+        self.assertFalse(app.matches_search(kws, {"title": "Game Designer", "description": "Design levels for our studio"}))
+        self.assertFalse(app.matches_search(kws, {"title": "Gameplay programmer"}))
+
+    def test_listing_sources_keep_only_matches(self):
+        from unittest import mock
+        app.init_db()
+        with app.db() as con:
+            con.execute("DELETE FROM jobs")
+        cfg = app.load_config()
+        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        cfg["search_terms"] = ["unity"]
+        cfg["search_filter"] = {"meetfrank": True, "studios": False}
+        app.save_config(cfg)
+        items = [{"ext_id": "1", "title": "Unity Developer", "company": "A", "location": "", "url": "https://a/1", "posted": ""},
+                 {"ext_id": "2", "title": "Accountant", "company": "B", "location": "", "url": "https://b/2", "posted": ""}]
+        fake = {"meetfrank": lambda c: [dict(i) for i in items],
+                "studios": lambda c: [dict(i, ext_id="s" + i["ext_id"], company="S" + i["company"], url=i["url"] + "s") for i in items]}
+        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None), \
+                mock.patch.object(app, "notify_jobs", lambda c, j: []):
+            app.run_all(force=True, only={"meetfrank", "studios"})
+        with app.db() as con:
+            ids = {r[0] for r in con.execute("SELECT id FROM jobs")}
+        self.assertEqual(ids, {"meetfrank:1", "studios:s1", "studios:s2"})

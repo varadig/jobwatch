@@ -16,13 +16,24 @@
     "studios": true,
     "rss": true
   },
-  "linkedin_searches": [
-    "unity developer | European Union | remote",
-    "unity engineer | European Union | remote",
-    "game developer C# | European Union | remote",
-    "unity | Hungary | any",
-    "senior unity | Worldwide | remote"
+  "search_terms": [
+    "unity developer | European Union",
+    "unity engineer | European Union",
+    "game developer C# | European Union",
+    "unity | Hungary",
+    "senior unity | Worldwide",
+    "game developer"
   ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
   "rss_feeds": [],
   "studios": [
     "ashby | thatgamecompany | thatgamecompany",
@@ -129,9 +140,5 @@
     "devops": -3,
     "java": -3
   },
-  "remotive_queries": [
-    "unity",
-    "game developer"
-  ],
   "_about": "Unity / game development profile (Unity, C#, live ops, UI/tooling). Tuned for game studios in Europe, remote-first."
 }
