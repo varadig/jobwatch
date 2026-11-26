@@ -1736,3 +1736,29 @@ class InterviewMailFilter(unittest.TestCase):
             app.interview_from_mail(cfg, "hr@z.test", "Next steps", "", mail_with("Next steps", "hr@z.test",
                                                                                   "Could we talk tomorrow at 15:00?"), [])
             self.assertEqual(len(calls), 1)
+
+
+class ResearchSources(unittest.TestCase):
+    def test_citations_first_then_pages_read_then_search_results(self):
+        import cvgen
+        from types import SimpleNamespace as N
+        search = N(type="web_search_tool_result", content=[N(title="S1", url="https://s1.test"), N(title="S2", url="https://s2.test")])
+        fetch = N(type="web_fetch_tool_result", content=N(url="https://f.test", content=N(title="F")))
+        err = N(type="web_search_tool_result", content=N(error_code="max_uses_exceeded"))
+        plain = N(type="text", text="x", citations=None)
+        self.assertEqual(cvgen.research_sources([search, err, fetch, plain]),
+                         [("F", "https://f.test"), ("S1", "https://s1.test"), ("S2", "https://s2.test")])
+        cited = N(type="text", text="y", citations=[N(title="C", url="https://c.test"), N(title="C", url="https://c.test")])
+        self.assertEqual(cvgen.research_sources([search, fetch, cited]), [("C", "https://c.test")])
+
+    def test_a_paused_turn_is_continued_and_all_its_text_kept(self):
+        import cvgen
+        from types import SimpleNamespace as N
+        part1 = N(stop_reason="pause_turn", content=[N(type="text", text="## At a glance\n", citations=None)])
+        part2 = N(stop_reason="end_turn", content=[N(type="text", text="- Big studio", citations=None)])
+        seen = []
+        replies = iter([part1, part2])
+        with mock.patch.object(cvgen, "_call", lambda key, t, **kw: seen.append(kw["messages"]) or next(replies)):
+            text, _ = cvgen.company_research("k", "Acme")
+        self.assertEqual(text, "## At a glance\n- Big studio")
+        self.assertEqual(seen[1][1]["role"], "assistant")   # the paused part was sent back

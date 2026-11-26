@@ -402,6 +402,29 @@ Use these sections (## headings), each with short bullet points; leave a section
 Be factual: say "not found" rather than guess, and write the date of anything time-sensitive. No introduction and no closing remarks."""
 
 
+def research_sources(blocks):
+    """[(title, url)] the briefing rests on: the citations; without them the pages read, then the search results."""
+    cited, fetched, found = [], [], []
+    for b in blocks:
+        t = getattr(b, "type", "")
+        if t == "text":
+            for c in getattr(b, "citations", None) or []:
+                cited.append((getattr(c, "title", None), getattr(c, "url", None)))
+        elif t == "web_fetch_tool_result":
+            c = getattr(b, "content", None)
+            fetched.append((getattr(getattr(c, "content", None), "title", None), getattr(c, "url", None)))
+        elif t == "web_search_tool_result":
+            c = getattr(b, "content", None)
+            for r in c if isinstance(c, list) else []:   # an error is an object, not a list
+                found.append((getattr(r, "title", None), getattr(r, "url", None)))
+    out, seen = [], set()
+    for title, url in cited or (fetched + found[:12]):
+        if url and url.startswith("http") and url not in seen:
+            seen.add(url)
+            out.append((title or url, url))
+    return out
+
+
 def company_research(api_key, company, role="", posting="", people="", place="", candidate=""):
     """Claude API call with web search: an interview briefing about the company (markdown-like text) and the sources
     [(title, url)]. Server-side tools may pause a long turn (pause_turn); it is resumed a few times."""
@@ -413,25 +436,18 @@ def company_research(api_key, company, role="", posting="", people="", place="",
     tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 8},
              {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5}]
     messages = [{"role": "user", "content": user}]
+    blocks = []   # every part of the answer: a paused turn is continued, and the new response carries only the rest
     for _ in range(5):
         resp = _call(api_key, 600.0, max_tokens=16000, system=RESEARCH_SYSTEM, tools=tools,
                      output_config={"effort": "medium"}, messages=messages)
+        blocks.extend(resp.content)
         if resp.stop_reason != "pause_turn":
             break
-        messages = [messages[0], {"role": "assistant", "content": resp.content}]
+        messages = [messages[0], {"role": "assistant", "content": blocks}]
     if resp.stop_reason == "refusal":
         raise CVError("The model refused the request.")
-    text, sources, seen = [], [], set()
-    for b in resp.content:
-        if b.type != "text":
-            continue
-        text.append(b.text)
-        for c in getattr(b, "citations", None) or []:
-            url = getattr(c, "url", None)
-            if url and url not in seen:
-                seen.add(url)
-                sources.append((getattr(c, "title", None) or url, url))
-    out = "".join(text).strip()
+    out = "".join(b.text for b in blocks if b.type == "text").strip()
+    sources = research_sources(blocks)
     if not out:
         raise CVError("The research came back empty (%s)." % resp.stop_reason)
     return out, sources
