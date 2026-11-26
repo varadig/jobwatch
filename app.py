@@ -2369,6 +2369,22 @@ header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px 
 .brand{font-weight:700;font-size:16px;margin-right:6px;white-space:nowrap}
 nav.tabs{display:flex;gap:2px;flex-wrap:wrap}nav.tabs a{padding:6px 11px;border-radius:8px;color:var(--muted);font-weight:500}
 nav.tabs a:hover{background:var(--soft);text-decoration:none}nav.tabs a.on{background:var(--acc-soft);color:var(--acc)}
+.pp{position:relative}.pp-native{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.pp-btn{width:100%;text-align:left;cursor:pointer}
+.pp-list{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:30;margin:0;padding:4px;list-style:none;background:var(--card);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 10px 28px rgba(0,0,0,.25);max-height:340px;overflow-y:auto;
+  display:none}
+.pp-list.open{display:block}.pp-list:focus{outline:none}
+.pp-group{padding:8px 10px 4px;font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.pp-list [role=option]{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 10px;border-radius:8px;cursor:pointer;font-size:14px}
+.pp-list [role=option].act,.pp-list [role=option]:hover{background:var(--soft)}
+.pp-list [role=option][aria-selected=true] .pp-t{font-weight:650;color:var(--acc)}
+.pp-list [role=option].busy{opacity:.5;pointer-events:none}
+.pp-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pp-x{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;padding:0 6px;border:0;
+  border-radius:6px;background:none;color:var(--muted);cursor:pointer;font-size:12.5px}
+.pp-x:hover,.pp-x:focus-visible{background:color-mix(in oklab,var(--color-error) 16%,transparent);color:var(--color-error)}
+.pp-x.sure{background:var(--color-error);color:var(--color-error-content);font-weight:600}
 .rf-wrap{position:relative}
 .rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;width:max-content;max-width:calc(100vw - 32px);padding:10px 12px;background:var(--card);
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 10px 28px rgba(0,0,0,.25);
@@ -3648,7 +3664,10 @@ def settings_page(flash=""):
                      "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
                      "also updates the active preset.",
         '<p class="ui-lead" id="preset_state" aria-live="polite">In use: <b>%s</b></p><div class="ui-grid"><div>'
-        '<label for="preset_pick">Preset</label><select class="select" id="preset_pick" name="preset_pick">%s</select>'
+        '<label for="pp_btn">Preset</label><div class="pp" id="pp"><select class="pp-native" id="preset_pick" name="preset_pick" '
+        'tabindex="-1" aria-hidden="true">%s</select><button type="button" class="select pp-btn" id="pp_btn" aria-haspopup="listbox" '
+        'aria-expanded="false" aria-controls="pp_list"><span id="pp_label"></span></button>'
+        '<ul class="pp-list" id="pp_list" role="listbox" aria-label="Presets" tabindex="-1"></ul></div>'
         '<input type="hidden" name="active_preset_set" id="active_preset_set" value="%s">'
         '<div class="ui-inline">%s</div><span class="help">Picking one fills in Job search and Scoring below. Review it, '
         'then Save changes; leaving without saving asks first.</span></div>'
@@ -3658,9 +3677,9 @@ def settings_page(flash=""):
         'name (empty: “%s”); the picked preset stays as it was. Type an existing name to update that one.</span></div></div>'
         '<script type="application/json" id="preset_data">%s</script>' % (
             e(preset_label(active)) if active else "custom settings (no preset)", opts, e(active),
-            pbtn("delete", "Delete this preset", "btn-ghost text-error") if mine else "", e(NEW_PRESET),
+            "", e(NEW_PRESET),
             pbtn("rename", "Rename the preset in use") if active in mine else "", e(NEW_PRESET),
-            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/")))
+            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/"))) + PRESET_PICKER_JS % {"x": ic("close")}
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
@@ -4209,6 +4228,96 @@ pick.addEventListener("change", function () {
   update();
 });
 })();</script>"""
+
+# Settings → Presets: the preset list as a dropdown whose own presets have an ✕ to delete them (a second click confirms).
+# The hidden <select> stays the form field, so loading, saving and the unsaved-changes check work as before. Deleting is
+# a background request: the page is not reloaded, so unsaved settings are not lost.
+PRESET_PICKER_JS = """<script>(function () {
+var sel = document.getElementById("preset_pick"), btn = document.getElementById("pp_btn"), list = document.getElementById("pp_list");
+var label = document.getElementById("pp_label"), state = document.getElementById("preset_state");
+var X = '%(x)s', data = JSON.parse(document.getElementById("preset_data").textContent || "{}");
+function showLabel() { var o = sel.options[sel.selectedIndex]; label.textContent = o ? o.text : ""; }
+function build() {
+  list.innerHTML = "";
+  Array.prototype.forEach.call(sel.children, function (node) {
+    var opts = node.tagName === "OPTGROUP" ? node.children : [node];
+    if (node.tagName === "OPTGROUP") {
+      if (!opts.length) return;
+      var g = document.createElement("li"); g.className = "pp-group"; g.setAttribute("role", "presentation");
+      g.textContent = node.label; list.appendChild(g);
+    }
+    Array.prototype.forEach.call(opts, function (o) {
+      var li = document.createElement("li"), mine = node.tagName === "OPTGROUP" && o.value && o.value.indexOf("tpl:") !== 0;
+      li.setAttribute("role", "option"); li.dataset.value = o.value; li.id = "pp_o" + list.children.length;
+      li.setAttribute("aria-selected", o.selected ? "true" : "false");
+      var t = document.createElement("span"); t.className = "pp-t"; t.textContent = o.text; li.appendChild(t);
+      if (mine) {
+        var x = document.createElement("button"); x.type = "button"; x.className = "pp-x"; x.innerHTML = X;
+        x.setAttribute("aria-label", "Delete preset " + o.text); x.title = "Delete this preset";
+        li.appendChild(x);
+      }
+      list.appendChild(li);
+    });
+  });
+}
+function items() { return Array.prototype.slice.call(list.querySelectorAll("[role=option]")); }
+function setActive(li) {
+  items().forEach(function (x) { x.classList.toggle("act", x === li); });
+  if (li) { list.setAttribute("aria-activedescendant", li.id); li.scrollIntoView({block: "nearest"}); }
+}
+function open() {
+  build(); list.classList.add("open"); btn.setAttribute("aria-expanded", "true");
+  setActive(list.querySelector("[aria-selected=true]") || items()[0]); list.focus();
+}
+function close(focus) {
+  list.classList.remove("open"); btn.setAttribute("aria-expanded", "false");
+  if (focus) btn.focus();
+}
+function choose(li) {
+  if (!li) return;
+  sel.value = li.dataset.value; showLabel(); close(true);
+  sel.dispatchEvent(new Event("change", {bubbles: true}));
+}
+function remove(li, x) {
+  if (!x.classList.contains("sure")) {   // first click: ask
+    x.classList.add("sure"); x.textContent = "Delete?"; x.setAttribute("aria-label", "Click again to delete");
+    setTimeout(function () { if (x.isConnected && x.classList.contains("sure")) { x.classList.remove("sure"); x.innerHTML = X; } }, 3500);
+    return;
+  }
+  var name = li.dataset.value;
+  li.classList.add("busy");
+  fetch("/preset", {method: "POST", body: new URLSearchParams({preset_do: "delete", preset_pick: name})}).then(function (r) {
+    if (!r.ok) throw r;
+    var o = Array.prototype.find.call(sel.options, function (op) { return op.value === name; }), was = o && o.selected;
+    if (o) { var g = o.parentNode; o.remove(); if (g.tagName === "OPTGROUP" && !g.children.length) g.remove(); }
+    delete data[name];
+    var act = document.getElementById("active_preset_set");
+    if (act && act.value === name) act.value = "";
+    if (was) { sel.value = ""; showLabel(); }
+    li.remove(); build(); setActive(items()[0]);
+    state.textContent = "Preset \u201c" + name + "\u201d deleted. The settings below did not change.";
+  }).catch(function () { li.classList.remove("busy"); state.textContent = "Could not delete \u201c" + name + "\u201d; try again."; });
+}
+btn.addEventListener("click", function () { list.classList.contains("open") ? close(true) : open(); });
+btn.addEventListener("keydown", function (ev) { if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); open(); } });
+list.addEventListener("click", function (ev) {
+  var li = ev.target.closest("[role=option]"); if (!li) return;
+  var x = ev.target.closest(".pp-x");
+  if (x) { ev.stopPropagation(); remove(li, x); } else choose(li);
+});
+list.addEventListener("keydown", function (ev) {
+  var all = items(), cur = list.querySelector(".act"), i = all.indexOf(cur);
+  if (ev.key === "ArrowDown") { ev.preventDefault(); setActive(all[Math.min(i + 1, all.length - 1)]); }
+  else if (ev.key === "ArrowUp") { ev.preventDefault(); setActive(all[Math.max(i - 1, 0)]); }
+  else if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); choose(cur); }
+  else if (ev.key === "Delete" && cur && cur.querySelector(".pp-x")) { ev.preventDefault(); remove(cur, cur.querySelector(".pp-x")); }
+  else if (ev.key === "Escape" || ev.key === "Tab") { if (ev.key === "Escape") ev.preventDefault(); close(ev.key === "Escape"); }
+});
+document.addEventListener("click", function (ev) { if (!ev.target.closest("#pp")) close(false); });
+sel.addEventListener("change", showLabel);
+showLabel();
+})();</script>"""
+
 
 OUTREACH_JS = """<script>
 function ocount(id, lim) { var t = document.getElementById('om' + id), c = document.getElementById('on' + id);

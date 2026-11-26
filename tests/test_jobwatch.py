@@ -25,6 +25,15 @@ def template(name):
         return json.load(f)
 
 
+
+def enrich_now(cfg):
+    """Runs the work-mode pass now: waits until a background pass started by an earlier test (a refresh starts one) has
+    finished, otherwise this call would return at once and the test would race it."""
+    assert app.MODE_LOCK.acquire(timeout=30), "a background work-mode pass did not finish"
+    app.MODE_LOCK.release()
+    app.enrich_work_modes(cfg)
+
+
 class DocumentNames(unittest.TestCase):
     def test_accents_become_ascii_underscored_prefix(self):
         self.assertEqual(app.owner_prefix({"name": "Zoé Ünal"}), "Zoe_Unal")
@@ -987,7 +996,7 @@ class WorkModes(unittest.TestCase):
             return "onsite", "Join our studio team."
         with mock.patch.object(app, "fetch", lambda u, **k: flexa_page), mock.patch.object(app.time, "sleep", lambda s: None), \
                 mock.patch.object(cvgen, "work_mode_from_text", fake_claude):
-            app.enrich_work_modes(cfg)
+            enrich_now(cfg)
         with app.db() as con:
             got = {r["id"]: (r["work_mode"], r["mode_src"]) for r in con.execute("SELECT id, work_mode, mode_src FROM jobs")}
         self.assertEqual(got["flexa:1"], ("remote", "page"))        # the board's own label
@@ -1044,7 +1053,7 @@ class UnknownReasons(unittest.TestCase):
         cfg["anthropic_api_key"] = "k"
         with mock.patch.object(app, "fetch", lambda u, **k: "<p>no badge</p>"), mock.patch.object(app.time, "sleep", lambda s: None), \
                 mock.patch.object(cvgen, "work_mode_from_text", lambda *a: ("unknown", "")):
-            app.enrich_work_modes(cfg)
+            enrich_now(cfg)
         with app.db() as con:
             got = {r["id"]: (r["mode_checked"] is not None, r["mode_note"]) for r in con.execute("SELECT id, mode_checked, mode_note FROM jobs")}
         self.assertEqual(got["linkedin:1"], (False, None))              # waits for its text
