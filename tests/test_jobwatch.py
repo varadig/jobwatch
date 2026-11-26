@@ -1498,3 +1498,23 @@ class OptionalBoards(unittest.TestCase):
                                            {"title": "Senior Backend Engineer", "description": "Node.js developer team"}, in_title=True))
         self.assertTrue({"remoteok", "weworkremotely", "workingnomads", "arbeitnow"} <= app.ALWAYS_FILTERED)
         self.assertTrue(app.TITLE_FILTERED <= app.ALWAYS_FILTERED)
+
+
+class HeaderRefreshMenu(unittest.TestCase):
+    def test_menu_lists_switched_on_sources_and_refresh_all_ignores_ticks(self):
+        cfg = {"sources": {"linkedin": True, "flexa": False, "remoteok": True}}
+        with mock.patch.object(app, "load_config", lambda: cfg):
+            h = app.refresh_menu()
+        self.assertIn('name="run_linkedin"', h)
+        self.assertIn('name="run_remoteok"', h)
+        self.assertNotIn('name="run_flexa"', h)
+        self.assertIn('name="selected"', h)
+        self.assertNotIn("Choose", h)
+        # "Refresh all" sends the ticks but no "selected": every source
+        self.assertEqual(app.run_selection({"run_linkedin": "on"}), (None, set()))
+        self.assertEqual(app.run_selection({"run_linkedin": "on", "selected": "1"}), ({"linkedin"}, set()))
+
+    def test_header_has_no_test_push(self):
+        html_ = app.page("x", "<p>x</p>")
+        self.assertNotIn("Test push", html_)
+        self.assertIn('class="rf-wrap"', html_)

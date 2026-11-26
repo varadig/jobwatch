@@ -2369,6 +2369,17 @@ header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px 
 .brand{font-weight:700;font-size:16px;margin-right:6px;white-space:nowrap}
 nav.tabs{display:flex;gap:2px;flex-wrap:wrap}nav.tabs a{padding:6px 11px;border-radius:8px;color:var(--muted);font-weight:500}
 nav.tabs a:hover{background:var(--soft);text-decoration:none}nav.tabs a.on{background:var(--acc-soft);color:var(--acc)}
+.rf-wrap{position:relative}
+.rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;padding:10px 12px;background:var(--card);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 10px 28px rgba(0,0,0,.25);
+  opacity:0;visibility:hidden;transform:translateY(-6px);transition:opacity .16s ease,transform .18s ease,visibility 0s linear .18s}
+.rf-menu::before{content:"";position:absolute;left:0;right:0;top:-8px;height:8px}
+.rf-wrap:hover .rf-menu,.rf-wrap:focus-within .rf-menu{opacity:1;visibility:visible;transform:none;transition-delay:0s}
+.rf-title{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em}
+.rf-list{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;max-height:60vh;overflow-y:auto}
+.rf-list label{display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;white-space:nowrap}
+.rf-more{display:block;margin-top:8px;font-size:12.5px;color:var(--acc)}
+@media (prefers-reduced-motion: reduce){.rf-menu{transition:none}}
 .bar .right{margin-left:auto;display:flex;gap:6px;align-items:center}
 main{max-width:1040px;margin:0 auto;padding:16px}
 textarea{width:100%;min-height:120px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
@@ -2613,6 +2624,23 @@ SOFT_REFRESH = """<script>(function () {
 })();</script>"""
 
 
+def refresh_menu():
+    """Header: "Refresh all" fetches every source; hovering it (or tabbing into it) shows the switched-on sources, to
+    refresh only the ticked ones. One form: "Refresh all" sends no "selected", so the ticks do not matter for it."""
+    try:
+        with CFG_LOCK:
+            on = load_config().get("sources") or {}
+    except Exception:
+        on = {}
+    boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-xs checkbox-primary" name="run_%s"> %s</label>' % (
+        k, e(SOURCES_INFO[k][0])) for k in FETCHED_SOURCES if on.get(k))
+    menu = ('<div class="rf-menu" role="group" aria-label="Refresh only some sources"><div class="rf-title">Refresh only these</div>'
+            '<div class="rf-list">%s</div><button class="btn btn-xs btn-primary" name="selected" value="1">Refresh selected</button>'
+            '<a class="rf-more" href="/sources#refresh">Own sources and status…</a></div>' % boxes) if boxes else ""
+    return ('<form method="post" action="/run" class="rf-wrap"><button class="btn btn-primary btn-sm" title="Fetch all sources now">'
+            '%s Refresh all</button>%s</form>') % (ic("refresh"), menu)
+
+
 def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
     tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/sources", "Sources"),
@@ -2661,12 +2689,11 @@ def page(title, body, flash="", refresh=0):
 <title>%s · jobwatch</title>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">%s jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
-<div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">%s Test push</button></form>
-<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">%s Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form>
+<div class="right">%s%s
 <button type="button" class="btn btn-sm btn-ghost text-error" onclick="document.getElementById('clear_dlg').showModal()">%s Clear cache</button></div></div></header>
 <main>%s%s</main>%s</body></html>"""
-            % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, ic("work"), nav, running, ic("notifications"),
-               ic("refresh"), ic("delete"),
+            % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, ic("work"), nav, running, refresh_menu(),
+               ic("delete"),
                '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body), CLEAR_DIALOG))
 
 
