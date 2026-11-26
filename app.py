@@ -2519,6 +2519,16 @@ def interviews_ics(rows, cfg):
     return "\r\n".join(ics_fold(x) for x in lines) + "\r\n"
 
 
+def ics_filename(r):
+    """The download name of an interview's calendar file, in ASCII: "Interview_Kodesage_2026-12-01_10-40.ics"."""
+    company = unicodedata.normalize("NFKD", r.get("company") or "").encode("ascii", "ignore").decode("ascii")
+    parts = ["Interview"] + re.findall(r"[A-Za-z0-9]+", company)[:6]
+    st = iv_start(r)
+    if st:
+        parts.append(st.strftime("%Y-%m-%d_%H-%M"))
+    return "_".join(parts) + ".ics"
+
+
 def google_calendar_link(r):
     st = iv_start(r)
     if not st:
@@ -6059,7 +6069,7 @@ class Handler(BaseHTTPRequestHandler):
                     with CFG_LOCK:
                         cfg_ = load_config()
                     return self.send_bytes(interviews_ics(rows, cfg_).encode("utf-8"), "text/calendar; charset=utf-8",
-                                           "interview-%s.ics" % m.group(1))
+                                           ics_filename(rows[0]) if rows else "Interview.ics")
                 return self.send_html(interview_page(int(m.group(1)), q.get("msg", "")))
             m = re.fullmatch(r"/calendar/([A-Za-z0-9_-]{20,})\.ics", u.path)
             if m:

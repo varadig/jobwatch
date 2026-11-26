@@ -1840,3 +1840,11 @@ class ResearchIsOptional(unittest.TestCase):
             self.assertEqual(started, [iid])
         with app.db() as con:
             con.execute("DELETE FROM interviews WHERE id=?", (iid,))
+
+
+
+class IcsFileName(unittest.TestCase):
+    def test_company_and_time_in_the_name(self):
+        r = {"company": "Ünal Games, Kft.", "starts": "2026-12-01T10:40+01:00"}
+        self.assertEqual(app.ics_filename(r), "Interview_Unal_Games_Kft_2026-12-01_10-40.ics")
+        self.assertEqual(app.ics_filename({"company": "", "starts": ""}), "Interview.ics")
