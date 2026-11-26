@@ -4,7 +4,7 @@
     python tools/make_symbols.py "MaterialSymbolsOutlined[FILL,GRAD,opsz,wght].ttf"
 
 The font comes from Google Fonts (Material Symbols Outlined, Apache License 2.0). The icons are the ICONS table in
-app.py: add one there, then run this again. Each icon is drawn from its own code point, so the ligature table is
+jobwatch/web/components.py: add one there, then run this again. Each icon is drawn from its own code point, so the ligature table is
 dropped; the weight, grade and optical size are fixed, and only the FILL axis is kept (filled icons: class "ms fill").
 """
 import ast
@@ -20,11 +20,11 @@ OUT = os.path.join(HERE, "static", "material-symbols.woff2")
 
 
 def icons():
-    tree = ast.parse(open(os.path.join(HERE, "app.py"), encoding="utf-8").read())
+    tree = ast.parse(open(os.path.join(HERE, "jobwatch", "web", "components.py"), encoding="utf-8").read())
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "ICONS" for t in node.targets):
             return ast.literal_eval(node.value)
-    raise SystemExit("No ICONS table in app.py")
+    raise SystemExit("No ICONS table in jobwatch/web/components.py")
 
 
 def main(src):

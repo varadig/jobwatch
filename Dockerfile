@@ -10,7 +10,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py cvgen.py ./
+COPY app.py ./
+COPY jobwatch ./jobwatch
 COPY fonts ./fonts
 COPY templates ./templates
 COPY tools ./tools
