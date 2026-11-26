@@ -2370,13 +2370,14 @@ header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px 
 nav.tabs{display:flex;gap:2px;flex-wrap:wrap}nav.tabs a{padding:6px 11px;border-radius:8px;color:var(--muted);font-weight:500}
 nav.tabs a:hover{background:var(--soft);text-decoration:none}nav.tabs a.on{background:var(--acc-soft);color:var(--acc)}
 .rf-wrap{position:relative}
-.rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;padding:10px 12px;background:var(--card);
+.rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;width:max-content;max-width:calc(100vw - 32px);padding:10px 12px;background:var(--card);
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 10px 28px rgba(0,0,0,.25);
   opacity:0;visibility:hidden;transform:translateY(-6px);transition:opacity .16s ease,transform .18s ease,visibility 0s linear .18s}
 .rf-menu::before{content:"";position:absolute;left:0;right:0;top:-8px;height:8px}
 .rf-wrap:hover .rf-menu,.rf-wrap:focus-within .rf-menu{opacity:1;visibility:visible;transform:none;transition-delay:0s}
 .rf-title{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em}
-.rf-list{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;max-height:60vh;overflow-y:auto}
+.rf-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 18px;margin-bottom:10px;max-height:70vh;overflow-y:auto}
+@media (max-width:520px){.rf-list{grid-template-columns:1fr}}
 .rf-list label{display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;white-space:nowrap}
 .rf-more{display:block;margin-top:8px;font-size:12.5px;color:var(--acc)}
 @media (prefers-reduced-motion: reduce){.rf-menu{transition:none}}
