@@ -198,6 +198,55 @@ def apply_preset(cfg, preset):
             cfg[k] = copy.deepcopy(preset[k])
 
 
+NEW_PRESET = "New preset"
+
+
+def clean_preset_name(name):
+    return re.sub(r"\s+", " ", name or "").strip()[:60]
+
+
+def preset_by_key(cfg, key):
+    """The preset behind a Presets-box value: one of yours, or "tpl:<template>"."""
+    if (key or "").startswith("tpl:"):
+        return template_presets().get(key[4:])
+    return (cfg.get("presets") or {}).get(key)
+
+
+def same_as_preset(cfg, preset):
+    """True if the current search + scoring equal the preset (the keys the preset has)."""
+    if not preset:
+        return False
+
+    def eq(a, b):  # a missing list / flag counts as an empty one
+        if not a and not b:
+            return True
+        if isinstance(a, dict) or isinstance(b, dict):
+            a, b = a or {}, b or {}
+            return isinstance(a, dict) and isinstance(b, dict) and all(eq(a.get(k), b.get(k)) for k in set(a) | set(b))
+        return a == b
+    return all(eq(cfg.get(k), v) for k, v in preset.items() if k in PRESET_KEYS)
+
+
+def free_preset_name(cfg, base=NEW_PRESET):
+    have = set(cfg.get("presets") or {})
+    if base not in have:
+        return base
+    return next("%s %d" % (base, i) for i in range(2, 1000) if "%s %d" % (base, i) not in have)
+
+
+def preset_label(key):
+    return "%s (template)" % key[4:] if (key or "").startswith("tpl:") else key
+
+
+class SaveResult:
+    """What saving the settings did: truthy when the search changed."""
+    def __init__(self, search_changed, preset_note=""):
+        self.search_changed, self.preset_note = search_changed, preset_note
+
+    def __bool__(self):
+        return self.search_changed
+
+
 def preset_action(f):
     """Settings → Presets buttons. Returns the message to show."""
     act, pick = f.get("preset_do", ""), f.get("preset_pick", "")
@@ -235,7 +284,7 @@ def preset_action(f):
             cfg = load_config()
             before = search_signature(cfg)
             apply_preset(cfg, preset)
-            cfg["active_preset"] = "" if pick.startswith("tpl:") else pick
+            cfg["active_preset"] = pick
             save_config(cfg)
             changed = search_signature(cfg) != before
         rescore_all()
@@ -244,7 +293,22 @@ def preset_action(f):
         return (pre + "Switched to “%s”. " % name
                 + ("The search changed, so the postings found so far were cleared (%s) and a new search started." % KEPT_ON_NEW_SEARCH
                    if changed else "Postings re-scored.")
-                + (" Save it under a name of your own to keep your changes." if pick.startswith("tpl:") else ""))
+                )
+    if act == "rename":
+        new = clean_preset_name(f.get("preset_name"))
+        with CFG_LOCK:
+            cfg = load_config()
+            old = cfg.get("active_preset") or ""
+            if old not in (cfg.get("presets") or {}):
+                return "Only your own presets can be renamed (pick or save one first)."
+            if not new or new.startswith("tpl:"):
+                return "Type the new name in the name field."
+            if new != old and new in cfg["presets"]:
+                return "There is already a preset called “%s”." % new
+            cfg["presets"] = {(new if k == old else k): v for k, v in cfg["presets"].items()}
+            cfg["active_preset"] = new
+            save_config(cfg)
+        return "Preset “%s” renamed to “%s”." % (old, new)
     if act == "delete":
         with CFG_LOCK:
             cfg = load_config()
@@ -2755,11 +2819,12 @@ def settings_page(flash=""):
     own += mail
 
     mine, tpls, active = sorted(cfg.get("presets") or {}), template_presets(), cfg.get("active_preset") or ""
-    opts = (('<option value=""%s>Choose a preset or template…</option>' % ("" if active in mine else " selected"))
+    sel = lambda v: " selected" if v == active else ""
+    opts = (('<option value=""%s>None (custom settings)</option>' % ("" if active in mine or active[4:] in tpls else " selected"))
             + ('<optgroup label="My presets">%s</optgroup>' % "".join('<option value="%s"%s>%s</option>' % (
-                e(n), " selected" if n == active else "", e(n)) for n in mine) if mine else "")
+                e(n), sel(n), e(n)) for n in mine) if mine else "")
             + '<optgroup label="Templates (read-only)">%s</optgroup>' % "".join(
-                '<option value="tpl:%s">%s</option>' % (e(n), e(n)) for n in tpls))
+                '<option value="tpl:%s"%s>%s</option>' % (e(n), sel("tpl:" + n), e(n)) for n in tpls))
     pdata = dict({n: (cfg.get("presets") or {})[n] for n in mine}, **{"tpl:" + n: t for n, t in tpls.items()})
     pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
                                        % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
@@ -2767,17 +2832,19 @@ def settings_page(flash=""):
                      "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
                      "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
                      "also updates the active preset.",
-        '<p class="ui-lead" id="preset_state" aria-live="polite">Active: <b>%s</b></p><div class="ui-grid"><div>'
+        '<p class="ui-lead" id="preset_state" aria-live="polite">In use: <b>%s</b></p><div class="ui-grid"><div>'
         '<label for="preset_pick">Preset</label><select class="select" id="preset_pick" name="preset_pick">%s</select>'
         '<input type="hidden" name="active_preset_set" id="active_preset_set" value="%s">'
-        '<div class="ui-inline">%s</div><span class="help">Fills in Job search and Scoring below. Review it, then Save changes; '
-        'leaving without saving asks first.</span></div>'
-        '<div><label for="preset_name">Save the current settings as</label><input class="input" id="preset_name" '
-        'name="preset_name" maxlength="60" placeholder="e.g. Game designer" value="%s"><div class="ui-inline">%s</div>'
-        '<span class="help">Saves what is on this page (also the unsaved changes). The same name overwrites.</span></div></div>'
+        '<div class="ui-inline">%s</div><span class="help">Picking one fills in Job search and Scoring below. Review it, '
+        'then Save changes; leaving without saving asks first.</span></div>'
+        '<div><label for="preset_name">Name for changed settings</label><input class="input" id="preset_name" '
+        'name="preset_name" maxlength="60" placeholder="%s"><div class="ui-inline">%s</div>'
+        '<span class="help">If you change the settings of a preset and save, they are kept as a new preset under this '
+        'name (empty: “%s”); the picked preset stays as it was. Type an existing name to update that one.</span></div></div>'
         '<script type="application/json" id="preset_data">%s</script>' % (
-            e(active) if active else "none (not saved as a preset)", opts, e(active),
-            pbtn("delete", "Delete this preset", "btn-ghost text-error") if mine else "", e(active), pbtn("save", "Save as preset"),
+            e(preset_label(active)) if active else "custom settings (no preset)", opts, e(active),
+            pbtn("delete", "Delete this preset", "btn-ghost text-error") if mine else "", e(NEW_PRESET),
+            pbtn("rename", "Rename the preset in use") if active in mine else "", e(NEW_PRESET),
             json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/")))
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
@@ -2845,6 +2912,7 @@ def save_settings(f):
     g = lambda k, d="": f.get(k, d)
     with CFG_LOCK:
         cfg = load_config()
+        old_cfg = copy.deepcopy(cfg)
         before = search_signature(cfg)
         cfg["ntfy"].update(enabled="ntfy_enabled" in f, server=g("ntfy_server", "https://ntfy.sh").strip() or "https://ntfy.sh",
                            topic=re.sub(r"[^A-Za-z0-9_-]", "", g("ntfy_topic")) or cfg["ntfy"]["topic"])
@@ -2883,22 +2951,35 @@ def save_settings(f):
                 ms["password"] = ""  # no own login: the e-mail account's is used
         if "sc_interests" in f:
             cfg["scoring"] = {k: parse_chips(g("sc_" + k)) for k in SCORING_KINDS}
-        if "active_preset_set" in f:  # picked in the Presets box (a template: no active preset)
-            pick = g("active_preset_set")
-            cfg["active_preset"] = pick if pick in (cfg.get("presets") or {}) else ""
-        if cfg.get("active_preset") in (cfg.get("presets") or {}):
-            cfg["presets"][cfg["active_preset"]] = preset_of(cfg)  # the active preset follows your edits
+        note = ""
+        if "sc_interests" in f:  # the whole form: decide which preset these settings are
+            pick = g("active_preset_set", cfg.get("active_preset") or "")
+            base = preset_by_key(cfg, pick)
+            if same_as_preset(cfg, base):
+                cfg["active_preset"] = pick                      # exactly the picked preset or template
+            elif base is None and not pick and same_as_preset(cfg, preset_of(old_cfg)):
+                pass                                             # no preset yet and the search did not change
+            else:  # changed: saved as a preset of its own, never over the picked one unless you name it
+                name = clean_preset_name(g("preset_name"))
+                if not name or name.startswith("tpl:") or name == pick and pick.startswith("tpl:"):
+                    name = free_preset_name(cfg)
+                existed = name in (cfg.get("presets") or {})
+                cfg.setdefault("presets", {})[name] = preset_of(cfg)
+                cfg["active_preset"] = name
+                note = ("Preset “%s” updated." if existed else
+                        "Your changes were saved as a new preset: “%s” (rename it under Presets).") % name
         save_config(cfg)
         changed = search_signature(cfg) != before
     rescore_all()
     if changed:
         search_again()
-    return changed
+    return SaveResult(changed, note)
 
 
-def saved_message(search_changed):
-    return ("Saved. The search changed, so the postings found so far were cleared (%s) and a new search started: "
-            "the list fills up again in a few minutes." % KEPT_ON_NEW_SEARCH) if search_changed else "Saved, postings re-scored."
+def saved_message(res):
+    return (("Saved. The search changed, so the postings found so far were cleared (%s) and a new search started: "
+             "the list fills up again in a few minutes." % KEPT_ON_NEW_SEARCH) if res else "Saved, postings re-scored.") + (
+        " " + res.preset_note if getattr(res, "preset_note", "") else "")
 
 
 # ---------------------------------------------------------------- CV
@@ -3232,18 +3313,32 @@ function dirty() {
 }
 function title(id) { var h = document.getElementById(id + "-h"); return h ? h.textContent : id; }
 var note = document.getElementById("savebar_note"), note0 = note.textContent;
+var PF = /^(search_terms|search_locations|min_score|sf_.*|sc_.*)$/;
+function psnap() {
+  var v = [];
+  form.querySelectorAll("input,textarea").forEach(function (el) {
+    if (el.name && PF.test(el.name)) v.push(el.name + "=" + (el.type === "checkbox" ? el.checked : el.value)); });
+  return v.join("\\u0001");
+}
+var pbase = psnap();
+function newPreset() {
+  if (psnap() === pbase) return "";
+  var n = (document.getElementById("preset_name").value || "").trim() || document.getElementById("preset_name").placeholder;
+  return " Saving keeps them as the preset \\u201c" + n + "\\u201d.";
+}
 function update() {
   var d = dirty();
   if (!d.length) { note.textContent = note0; return; }
   note.textContent = "Unsaved changes: " + d.map(title).join(", ") +
-    (d.some(function (x) { return SEARCH.indexOf(x) >= 0; }) ? ". The search changed: saving clears the found postings and searches again." : ".");
+    (d.some(function (x) { return SEARCH.indexOf(x) >= 0; }) ? ". The search changed: saving clears the found postings and searches again." : ".") +
+    newPreset();
 }
 form.addEventListener("input", update); form.addEventListener("change", update); document.addEventListener("chips", update);
 form.addEventListener("submit", function () { leaving = true; });
 window.addEventListener("beforeunload", function (ev) { if (!leaving && dirty().length) { ev.preventDefault(); ev.returnValue = ""; } });
 function ask(onSave, onDiscard, saveLabel, discardLabel) {
   var d = dirty();
-  document.getElementById("leave_what").textContent = "You changed: " + d.map(title).join(", ") + ".";
+  document.getElementById("leave_what").textContent = "You changed: " + d.map(title).join(", ") + "." + newPreset();
   document.getElementById("leave_search").hidden = !d.some(function (x) { return SEARCH.indexOf(x) >= 0; });
   document.getElementById("leave_save").textContent = saveLabel;
   document.getElementById("leave_discard").textContent = discardLabel;
@@ -3288,7 +3383,8 @@ pick.addEventListener("change", function () {
   if (p.scoring) Object.keys(p.scoring).forEach(function (k) {
     var ta = document.getElementById("sc_" + k); if (ta && ta.setChips) ta.setChips(p.scoring[k]); });
   var tpl = pick.value.indexOf("tpl:") === 0;
-  document.getElementById("active_preset_set").value = tpl ? "" : pick.value;
+  document.getElementById("active_preset_set").value = pick.value;
+  pbase = psnap();   // this is the picked preset; changes from here on make a new one
   document.getElementById("preset_state").innerHTML = "";
   document.getElementById("preset_state").append("Loaded \\u201c" + pick.options[pick.selectedIndex].text + "\\u201d" +
     (tpl ? " (template)" : "") + " into the settings below. Nothing is applied until you click Save changes.");

@@ -1158,7 +1158,7 @@ class Presets(unittest.TestCase):
         self.assertIn("Switched", app.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"}))
         cfg = app.load_config()
         self.assertIn("game designer", cfg["scoring"]["interests"])
-        self.assertEqual(cfg["active_preset"], "")
+        self.assertEqual(cfg["active_preset"], "tpl:game-designer")   # the template stays selected
         self.assertEqual(cfg["presets"]["Unity"]["search_terms"], ["unity developer"])  # the saved one is untouched
         app.preset_action({"preset_do": "load", "preset_pick": "Unity"})
         cfg = app.load_config()
@@ -1212,25 +1212,54 @@ class NewSearch(unittest.TestCase):
 
 
 class PresetPickedInTheForm(unittest.TestCase):
-    def test_saving_applies_the_picked_preset(self):
+    def setUp(self):
         from unittest import mock
         app.init_db()
         cfg = app.load_config()
         self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))
-        cfg["presets"] = {"Unity": {"search_terms": ["unity"]}, "Design": {"search_terms": ["game designer"]}}
-        cfg["active_preset"] = "Unity"
+        p = mock.patch.object(app, "search_again", lambda: 0)
+        p.start()
+        self.addCleanup(p.stop)
+        self.unity = {"search_terms": ["unity"], "scoring": {"interests": ["unity"]}}
+        cfg["presets"], cfg["active_preset"] = {"Unity": self.unity}, "Unity"
+        app.apply_preset(cfg, self.unity)
         app.save_config(cfg)
-        form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "game designer", "sc_interests": "game designer",
-                "min_score": "4", "active_preset_set": "Design"}
-        with mock.patch.object(app, "search_again", lambda: 0):
-            app.save_settings(form)
+        self.form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "sc_interests": "unity",
+                     "min_score": "4", "active_preset_set": "Unity", "preset_name": ""}
+
+    def test_unchanged_keeps_the_preset(self):
+        res = app.save_settings(self.form)
         cfg = app.load_config()
-        self.assertEqual(cfg["active_preset"], "Design")
-        self.assertEqual(cfg["presets"]["Unity"], {"search_terms": ["unity"]})        # the old one is untouched
-        self.assertEqual(cfg["presets"]["Design"]["scoring"]["interests"], ["game designer"])
-        with mock.patch.object(app, "search_again", lambda: 0):
-            app.save_settings(dict(form, active_preset_set=""))                    # a template was picked
-        self.assertEqual(app.load_config()["active_preset"], "")
+        self.assertEqual((cfg["active_preset"], list(cfg["presets"]), res.preset_note), ("Unity", ["Unity"], ""))
+
+    def test_changed_becomes_a_new_preset(self):
+        res = app.save_settings(dict(self.form, sc_interests="unity\ngame"))
+        cfg = app.load_config()
+        self.assertEqual(cfg["active_preset"], "New preset")
+        self.assertEqual(cfg["presets"]["Unity"], self.unity)                 # the picked one stays as it was
+        self.assertEqual(cfg["presets"]["New preset"]["scoring"]["interests"], ["unity", "game"])
+        self.assertIn("New preset", res.preset_note)
+        app.save_settings(dict(self.form, active_preset_set="New preset", sc_interests="unity\nc#"))
+        self.assertEqual(app.load_config()["active_preset"], "New preset 2")
+        app.save_settings(dict(self.form, active_preset_set="Unity", sc_interests="c#", preset_name="Unity"))  # named: updated
+        cfg = app.load_config()
+        self.assertEqual((cfg["active_preset"], cfg["presets"]["Unity"]["scoring"]["interests"]), ("Unity", ["c#"]))
+
+    def test_a_picked_template_stays_selected(self):
+        tpl = app.template_presets()["game-designer"]
+        form = dict(self.form, active_preset_set="tpl:game-designer", search_terms="\n".join(tpl["search_terms"]),
+                    search_locations="\n".join(tpl["search_locations"]), min_score=str(tpl["min_score"]),
+                    **{"sc_" + k: "\n".join(v) for k, v in tpl["scoring"].items()},
+                    **{"sf_" + k: "on" for k, v in tpl["search_filter"].items() if v})
+        app.save_settings(form)
+        cfg = app.load_config()
+        self.assertEqual(cfg["active_preset"], "tpl:game-designer")
+        self.assertIn('value="tpl:game-designer" selected', app.settings_page())
+
+    def test_rename(self):
+        self.assertIn("renamed", app.preset_action({"preset_do": "rename", "preset_name": "Unity dev"}))
+        cfg = app.load_config()
+        self.assertEqual((cfg["active_preset"], list(cfg["presets"])), ("Unity dev", ["Unity dev"]))
 
     def test_page_carries_the_presets_for_the_form(self):
         h = app.settings_page()
