@@ -28,7 +28,7 @@ from jobwatch.domain import scoring
 from jobwatch.domain import workmode
 from jobwatch import env
 from jobwatch import models
-from jobwatch.repositories import jobs as jobrepo
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch import search
 from jobwatch.services import documents
 from jobwatch.services import enrich
@@ -47,7 +47,7 @@ from jobwatch.sources import custom
 from jobwatch.sources import linkedin
 from jobwatch.sources import mail as mailsrc
 from jobwatch.sources import registry
-from jobwatch.util import text
+from jobwatch.util import text as textutil
 from jobwatch.web import components
 from jobwatch.web import server
 from jobwatch.web.views import interviews as interviews_view
@@ -58,6 +58,16 @@ from jobwatch.web.views import settings as settings_view
 database.init()
 database.migrate()  # the tests share one throwaway database with the current columns
 new_profile = importlib.import_module("new_profile")
+
+
+
+@contextlib.contextmanager
+def fake_sources(results):
+    """Every source's fetch replaced: results {key: fetch(cfg)}; the others find nothing."""
+    with contextlib.ExitStack() as stack:
+        for source in registry.SOURCES:
+            stack.enter_context(mock.patch.object(source, "fetch", results.get(source.key, lambda cfg: [])))
+        yield
 
 
 def template(name):
@@ -738,16 +748,16 @@ class RefreshSelection(unittest.TestCase):
         database.init()
         ran = []
         fake = {k: (lambda cfg, k=k: ran.append((k, [s["id"] for s in cfg.get("custom_sources") or []])) or [])
-                for k in registry.SOURCE_FUNCS}
+                for k in registry.BY_KEY}
         cfg = config_store.load()
         cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         cfg["custom_sources"] = [{"id": "a1", "url": "x"}, {"id": "b2", "url": "y"}]
         config_store.save(cfg)
-        with mock.patch.dict(registry.SOURCE_FUNCS, fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
-            refresh.run_all(force=True, only={"flexa"})
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
+            refresh.refresher.run(force=True, only={"flexa"})
             self.assertEqual(ran, [("flexa", ["a1", "b2"])])
             ran.clear()
-            refresh.run_all(force=True, only=set(), custom_ids={"b2"})
+            refresh.refresher.run(force=True, only=set(), custom_ids={"b2"})
             self.assertEqual(ran, [("custom", ["b2"])])
 
     def test_jobs_list_filters_by_several_sources(self):
@@ -818,9 +828,9 @@ class MailAlerts(unittest.TestCase):
         calls = []
         with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)):
             cfg = self.cfg()
-            jobs = mailsrc.src_mail(cfg)
+            jobs = mailsrc.MailAlertSource().fetch(cfg)
             mailsrc.mark_mails_done(cfg.pop("_mail_done"))  # what run_all does once the postings are saved
-            again = mailsrc.src_mail(self.cfg())
+            again = mailsrc.MailAlertSource().fetch(self.cfg())
         self.assertIn(("select", '"INBOX"', True), calls)                      # read-only
         self.assertTrue(all(c[2] == "(BODY.PEEK[])" for c in calls if c[0] == "fetch"))  # not marked as read
         self.assertEqual(sorted(j["title"] for j in jobs), ["Senior Unity Developer", "Unity Engineer"])
@@ -833,7 +843,7 @@ class MailAlerts(unittest.TestCase):
         fake = lambda key, subj, sender, text, links: [
             {"title": "Senior Unity Developer", "company": "Supercell", "location": "Helsinki", "url": "https://app.jackandjill.ai/jobs/123"}]
         with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)), mock.patch.object(cvgen, "jobs_from_email", fake):
-            jobs = mailsrc.src_mail(self.cfg(claude=True))
+            jobs = mailsrc.MailAlertSource().fetch(self.cfg(claude=True))
         self.assertEqual([(j["title"], j["company"]) for j in jobs], [("Senior Unity Developer", "Supercell")])
 
     def test_claude_filter_drops_made_up_links(self):
@@ -885,12 +895,12 @@ class Duplicates(unittest.TestCase):
 
     def run_sources(self, results):
         from unittest import mock
-        fake = {k: (lambda cfg, k=k: results.get(k, [])) for k in registry.SOURCE_FUNCS}
+        fake = {k: (lambda cfg, k=k: results.get(k, [])) for k in registry.BY_KEY}
         cfg = config_store.load()
         cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         config_store.save(cfg)
-        with mock.patch.dict(registry.SOURCE_FUNCS, fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None),                 mock.patch.object(refresh, "enrich_pending_linkedin", lambda cfg: None):
-            refresh.run_all(force=True, only=set(results))
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None),                 mock.patch.object(refresh, "enrich_pending_linkedin", lambda cfg: None):
+            refresh.refresher.run(force=True, only=set(results))
 
     def test_keys(self):
         self.assertEqual(identity.dup_key("Senior Unity Developer (m/w/d)", "Kolibri Games GmbH", "u"),
@@ -921,7 +931,7 @@ class Duplicates(unittest.TestCase):
                 con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,dupkey,urlkey) "
                             "VALUES(?,?,?,?,?,9,?,'2026-11-25',?,?)", (jid, src, "Unity Dev", "Acme", "u/" + jid, status,
                                                                      identity.dup_key("Unity Dev", "Acme", ""), "u/" + jid))
-            self.assertEqual(jobrepo.dedupe_existing(con), 1)
+            self.assertEqual(JobRepository(con).dedupe(), 1)
             kept = con.execute("SELECT id, also_sources FROM jobs WHERE dup_of IS NULL").fetchall()
         self.assertEqual([(r["id"], r["also_sources"]) for r in kept], [("linkedin:2", "flexa")])
 
@@ -936,13 +946,13 @@ class Duplicates(unittest.TestCase):
                 self.assertIsNone(con.execute("SELECT 1 FROM mail_seen").fetchone())  # not yet
             return [{"ext_id": "z", "title": "Unity Dev", "company": "Z", "location": "", "posted": "",
                      "url": "https://z.example/jobs/1", "description": ""}]
-        fake = {k: (lambda cfg: []) for k in registry.SOURCE_FUNCS}
+        fake = {k: (lambda cfg: []) for k in registry.BY_KEY}
         fake["mail"] = fake_mail
         cfg = config_store.load()
         cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         config_store.save(cfg)
-        with mock.patch.dict(registry.SOURCE_FUNCS, fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
-            refresh.run_all(force=True, only={"mail"})
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
+            refresh.refresher.run(force=True, only={"mail"})
         with database.connect() as con:
             self.assertEqual(con.execute("SELECT msgid FROM mail_seen").fetchall()[0][0], "<m9@x>")
             self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs WHERE source='mail'").fetchone()[0], 1)
@@ -1043,8 +1053,8 @@ class WorkModes(unittest.TestCase):
             con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,work_mode,dupkey,urlkey) "
                         "VALUES('linkedin:9','linkedin','Unity Dev','Acme','https://www.linkedin.com/jobs/view/9999999/',5,'new','2026-11-25',"
                         "'unknown',?, 'li:9999999')", (identity.dup_key("Unity Dev", "Acme", ""),))
-            row = jobrepo.find_duplicate(con, "Unity Dev", "", "https://www.linkedin.com/comm/jobs/view/9999999/?x=1")
-            jobrepo.merge_into(con, row, "mail", {"work_mode": "hybrid"})
+            row = JobRepository(con).find_duplicate("Unity Dev", "", "https://www.linkedin.com/comm/jobs/view/9999999/?x=1")
+            JobRepository(con).merge_into(row, "mail", {"work_mode": "hybrid"})
             r = con.execute("SELECT work_mode, mode_src FROM jobs WHERE id='linkedin:9'").fetchone()
         self.assertEqual((r["work_mode"], r["mode_src"]), ("hybrid", "source"))
 
@@ -1062,7 +1072,7 @@ class UnknownReasons(unittest.TestCase):
         ]
         for r, short in cases:
             self.assertEqual(workmode.unknown_reason(r)[0], short)
-            self.assertIn(text.e(short), components.mode_picker(r))
+            self.assertIn(textutil.e(short), components.mode_picker(r))
         long_ = workmode.unknown_reason(cases[1][0])[1]
         self.assertIn("rules and Claude", long_)
         self.assertNotIn("· ", components.mode_picker(dict(base, source="linkedin", urlkey="li:1", description="", mode_src="manual",
@@ -1142,9 +1152,9 @@ class UnifiedSearch(unittest.TestCase):
                  {"ext_id": "2", "title": "Accountant", "company": "B", "location": "", "url": "https://b/2", "posted": ""}]
         fake = {"meetfrank": lambda c: [dict(i) for i in items],
                 "studios": lambda c: [dict(i, ext_id="s" + i["ext_id"], company="S" + i["company"], url=i["url"] + "s") for i in items]}
-        with mock.patch.dict(registry.SOURCE_FUNCS, fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None), \
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None), \
                 mock.patch.object(notifier, "new_jobs", lambda c, j: []):
-            refresh.run_all(force=True, only={"meetfrank", "studios"})
+            refresh.refresher.run(force=True, only={"meetfrank", "studios"})
         with database.connect() as con:
             ids = {r[0] for r in con.execute("SELECT id FROM jobs")}
         self.assertEqual(ids, {"meetfrank:1", "studios:s1", "studios:s2"})
@@ -1325,7 +1335,7 @@ class CvPostingsStay(unittest.TestCase):
                                  "work_mode": "remote", "urlkey": identity.url_key("https://www.linkedin.com/jobs/view/777/")}])
         # fetched again later (e.g. from an alert e-mail): merged into the one with the CV, not a second card
         with database.connect() as con:
-            same = jobrepo.find_duplicate(con, "Senior Unity Developer", "Acme", "https://www.linkedin.com/jobs/view/777/?trk=x")
+            same = JobRepository(con).find_duplicate("Senior Unity Developer", "Acme", "https://www.linkedin.com/jobs/view/777/?trk=x")
         self.assertEqual(same["id"], "linkedin:777")
         with database.connect() as con:
             con.execute("DELETE FROM cvs")
@@ -1361,19 +1371,19 @@ class DecisionsSurviveReset(unittest.TestCase):
         config_store.save(cfg)
         items = [{"ext_id": "1", "title": "Unity Developer", "company": "Acme", "location": "", "url": "https://acme.example/jobs/1", "posted": ""},
                  {"ext_id": "2", "title": "Game Programmer", "company": "Beta", "location": "", "url": "https://beta.example/jobs/2", "posted": ""}]
-        run = lambda srcs: refresh.run_all(force=True, only=srcs)
-        with mock.patch.dict(registry.SOURCE_FUNCS, {"meetfrank": lambda c: [dict(i) for i in items],
+        run = lambda srcs: refresh.refresher.run(force=True, only=srcs)
+        with fake_sources({"meetfrank": lambda c: [dict(i) for i in items],
                                                 "flexa": lambda c: [dict(i, ext_id="f" + i["ext_id"]) for i in items[:1]]}), \
                 mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None), mock.patch.object(notifier, "new_jobs", lambda c, j: []):
             run({"meetfrank"})
             with database.connect() as con:
-                jobrepo.set_job_status(con, "meetfrank:1", "hidden")
-                jobrepo.set_job_status(con, "meetfrank:2", "saved")
+                JobRepository(con).set_status("meetfrank:1", "hidden")
+                JobRepository(con).set_status("meetfrank:2", "saved")
             refresh.reset_job_cache()
             run({"meetfrank"})      # mark all new as seen survives a reset too
             with database.connect() as con:
                 for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
-                    jobrepo.set_job_status(con, r["id"], "seen")
+                    JobRepository(con).set_status(r["id"], "seen")
             refresh.reset_job_cache()
             run({"flexa"})          # the same posting from another source
             run({"meetfrank"})
@@ -1381,8 +1391,8 @@ class DecisionsSurviveReset(unittest.TestCase):
             st = {r["id"]: r["status"] for r in con.execute("SELECT id, status FROM jobs WHERE dup_of IS NULL")}
         self.assertEqual(st, {"flexa:f1": "hidden", "meetfrank:2": "saved"})
         with database.connect() as con:                    # unhiding forgets it
-            jobrepo.set_job_status(con, "flexa:f1", "new")
-            self.assertIsNone(jobrepo.remembered_status(con, "meetfrank:1", identity.url_key(items[0]["url"]), ""))
+            JobRepository(con).set_status("flexa:f1", "new")
+            self.assertIsNone(JobRepository(con).remembered_status("meetfrank:1", identity.url_key(items[0]["url"]), ""))
             for t in ("jobs", "job_marks"):
                 con.execute("DELETE FROM %s" % t)
 
@@ -1397,14 +1407,14 @@ class SeenIsRemembered(unittest.TestCase):
             con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
                         "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'new','x',?,?)",
                         (url, identity.url_key(url), identity.dup_key("Tools Programmer", "Gamma", url)))
-            jobrepo.set_job_status(con, "rss:9", "seen")
+            JobRepository(con).set_status("rss:9", "seen")
             con.execute("DELETE FROM jobs WHERE id='rss:9'")                  # a cache reset
-            self.assertEqual(jobrepo.remembered_status(con, "flexa:x", identity.url_key(url), ""), "seen")
+            self.assertEqual(JobRepository(con).remembered_status("flexa:x", identity.url_key(url), ""), "seen")
             con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
                         "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'seen','x',?,?)",
                         (url, identity.url_key(url), identity.dup_key("Tools Programmer", "Gamma", url)))
-            jobrepo.set_job_status(con, "rss:9", "new")                           # "Mark new again"
-            self.assertIsNone(jobrepo.remembered_status(con, "rss:9", identity.url_key(url), ""))
+            JobRepository(con).set_status("rss:9", "new")                           # "Mark new again"
+            self.assertIsNone(JobRepository(con).remembered_status("rss:9", identity.url_key(url), ""))
             con.execute("DELETE FROM jobs WHERE id='rss:9'")
 
 
@@ -1428,9 +1438,9 @@ class ManualModeAndDetailPage(unittest.TestCase):
 
     def test_hand_set_mode_is_remembered(self):
         with database.connect() as con:
-            jobrepo.set_manual_mode(con, "rss:5", "hybrid")
+            JobRepository(con).set_manual_mode("rss:5", "hybrid")
             con.execute("DELETE FROM jobs WHERE id='rss:5'")                      # cache reset
-            self.assertEqual(jobrepo.remembered_mode(con, "mail:other", identity.url_key(self.url), ""), "hybrid")
+            self.assertEqual(JobRepository(con).remembered_mode("mail:other", identity.url_key(self.url), ""), "hybrid")
 
     def test_unknown_cards_offer_quick_buttons(self):
         with database.connect() as con:
@@ -1477,7 +1487,7 @@ class OptionalBoards(unittest.TestCase):
             raise AssertionError("unexpected URL " + url)
         cfg = {"search_terms": ["node.js developer"]}
         with mock.patch.object(http, "get", fake), mock.patch.object(time, "sleep", lambda s: None):
-            return registry.SOURCE_FUNCS[name](cfg), calls
+            return registry.BY_KEY[name].fetch(cfg), calls
 
     def test_off_by_default_and_listed(self):
         for k in ("remoteok", "weworkremotely", "himalayas", "jobicy", "workingnomads", "arbeitnow",
@@ -1535,8 +1545,15 @@ class OptionalBoards(unittest.TestCase):
         self.assertFalse(search.matches_search(["unity"], data, in_title=True))
         self.assertTrue(search.matches_search(["backend developer node.js"],
                                            {"title": "Senior Backend Engineer", "description": "Node.js developer team"}, in_title=True))
-        self.assertTrue({"remoteok", "weworkremotely", "workingnomads", "arbeitnow"} <= models.ALWAYS_FILTERED)
-        self.assertTrue(models.TITLE_FILTERED <= models.ALWAYS_FILTERED)
+        from jobwatch.sources.base import Filtering
+        cfg = {"search_terms": ["unity"], "search_filter": {}}
+        for key in ("remoteok", "weworkremotely", "workingnomads", "arbeitnow"):
+            source = registry.BY_KEY[key]
+            self.assertIs(source.filtering, Filtering.TITLE)
+            self.assertEqual(source.search_filter(cfg), ["unity"])   # always narrowed, whatever Settings says
+            self.assertFalse(source.keeps(["unity"], data))
+        self.assertTrue(registry.BY_KEY["remotegamejobs"].keeps(["unity"], data))   # a game board: the description counts
+        self.assertEqual(registry.BY_KEY["meetfrank"].search_filter(cfg), [])       # optional: off in Settings
 
 
 class HeaderRefreshMenu(unittest.TestCase):

@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-
+from jobwatch.sources.base import Filtering, JobSource
 from jobwatch.env import UA, log
 from jobwatch.sources.feeds import parse_rss
 from jobwatch.util.text import html_attr, strip_tags
@@ -185,28 +185,35 @@ def run_custom_source(src, is_new=lambda ext_id: True):
     return CUSTOM_FUNCS[src["type"]](sess, src, is_new)
 
 
-def src_custom(cfg):
-    out, errs = [], []
-    for src in cfg.get("custom_sources") or []:
-        if not src.get("enabled", True) or not src.get("url"):
-            continue
-        prefix = src["id"] + ":"
+class CustomSource(JobSource):
+    """Your own sources from Settings (sites behind a login form); gentle, so the site does not block us."""
 
-        def is_new(ext_id, prefix=prefix):
-            with database.connect() as con:
-                return not con.execute("SELECT 1 FROM jobs WHERE id=?", ("custom:" + prefix + ext_id,)).fetchone()
-        try:
-            for it in run_custom_source(src, is_new):
-                it["ext_id"] = prefix + it["ext_id"]
-                it["via"] = src.get("name") or src["type"]
-                out.append(it)
-        except Exception as ex:
-            errs.append("%s: %s" % (src.get("name") or src["type"], ex))
-    if errs:
-        log.warning("Own source errors: %s", "; ".join(errs))
-        if not out:
-            raise RuntimeError("; ".join(errs))
-    return out
+    key = "custom"
+    filtering = Filtering.OPTIONAL
+    min_interval = 120
+
+    def fetch(self, cfg):
+        out, errs = [], []
+        for src in cfg.get("custom_sources") or []:
+            if not src.get("enabled", True) or not src.get("url"):
+                continue
+            prefix = src["id"] + ":"
+
+            def is_new(ext_id, prefix=prefix):
+                with database.connect() as con:
+                    return not con.execute("SELECT 1 FROM jobs WHERE id=?", ("custom:" + prefix + ext_id,)).fetchone()
+            try:
+                for it in run_custom_source(src, is_new):
+                    it["ext_id"] = prefix + it["ext_id"]
+                    it["via"] = src.get("name") or src["type"]
+                    out.append(it)
+            except Exception as ex:
+                errs.append("%s: %s" % (src.get("name") or src["type"], ex))
+        if errs:
+            log.warning("Own source errors: %s", "; ".join(errs))
+            if not out:
+                raise RuntimeError("; ".join(errs))
+        return out
 
 
 def kv_text(d):

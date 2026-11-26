@@ -1,21 +1,13 @@
-"""All the sources by name, and how often each may be fetched."""
+"""Every source, in the order they are shown, and what the pages need to know about them."""
+from jobwatch.sources.base import Filtering
+from jobwatch.sources.custom import CustomSource
+from jobwatch.sources.feeds import MeetFrankSource, FourDayWeekSource, FlexaSource, RemotiveSource, RemoteOkSource, WeWorkRemotelySource, HimalayasSource, JobicySource, WorkingNomadsSource, ArbeitnowSource, RemoteGameJobsSource, WorkWithIndiesSource, RssSource
+from jobwatch.sources.linkedin import LinkedInSource
+from jobwatch.sources.mail import MailAlertSource
+from jobwatch.sources.studios import StudiosSource
 
-from jobwatch.sources.custom import src_custom
-from jobwatch.sources.feeds import src_4dayweek, src_arbeitnow, src_flexa, src_himalayas, src_jobicy, src_meetfrank, src_remotegamejobs, src_remoteok, src_remotive, src_rss, src_weworkremotely, src_workingnomads, src_workwithindies
-from jobwatch.sources.linkedin import src_linkedin
-from jobwatch.sources.mail import src_mail
-from jobwatch.sources.studios import src_studios
+SOURCES = (LinkedInSource(), MeetFrankSource(), FourDayWeekSource(), FlexaSource(), RemotiveSource(), RemoteOkSource(), WeWorkRemotelySource(), HimalayasSource(), JobicySource(), WorkingNomadsSource(), ArbeitnowSource(), RemoteGameJobsSource(), WorkWithIndiesSource(), StudiosSource(), RssSource(), CustomSource(), MailAlertSource())
+BY_KEY = {s.key: s for s in SOURCES}
 
-
-SOURCE_FUNCS = {"linkedin": src_linkedin, "meetfrank": src_meetfrank, "4dayweek": src_4dayweek,
-                "flexa": src_flexa, "remotive": src_remotive, "studios": src_studios,
-                "rss": src_rss, "custom": src_custom, "mail": lambda cfg: src_mail(cfg),
-                "remoteok": src_remoteok, "weworkremotely": src_weworkremotely, "himalayas": src_himalayas,
-                "jobicy": src_jobicy, "workingnomads": src_workingnomads, "arbeitnow": src_arbeitnow,
-                "remotegamejobs": src_remotegamejobs, "workwithindies": src_workwithindies}
-
-
-MIN_INTERVAL = {"remotive": 360,  # perc; a Remotive API max ~4 hivast ker naponta
-                "custom": 120,    # own sources (e.g. munka.hu): gentle, so the site does not block us
-                # the optional public boards: gentle, they are free APIs that ask not to be hammered
-                "remoteok": 120, "himalayas": 120, "jobicy": 120, "workingnomads": 120, "arbeitnow": 120}
+OPTIONAL_BOARDS = [s.key for s in SOURCES if s.optional]
+SEARCH_FILTERABLE = [s.key for s in SOURCES if s.filtering is Filtering.OPTIONAL]   # the search filter is a setting

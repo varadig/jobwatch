@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-
+from jobwatch.sources.base import JobSource
 from jobwatch import cvgen
 
 from jobwatch.env import log
@@ -129,47 +129,50 @@ MAIL_PER_RUN = 15   # newest first; the rest waits for the next run, so one run 
 MAIL_WORKERS = 4    # e-mails read by Claude at the same time
 
 
-def src_mail(cfg):
-    """The postings of the new alert e-mails. The e-mails are marked as done only after their postings are
-    saved (run_all calls mark_mails_done), so a restart in the middle loses nothing."""
-    from concurrent.futures import ThreadPoolExecutor
-    mails = read_alert_mails(cfg, limit=MAIL_PER_RUN)
-    prog = (STATE.get("progress") or {}).get("sources")
-    done_n = [0]
+class MailAlertSource(JobSource):
+    """Job alert e-mails from the listed senders, read from the mailbox."""
 
-    def one(m):
-        msgid, sender, subject, msg = m
-        try:
-            return msgid, sender, msg, jobs_from_mail(cfg, sender, subject, msg), None
-        except Exception as ex:
-            return msgid, sender, msg, [], "%s: %s" % (subject[:60], ex)
-        finally:
-            done_n[0] += 1
-            if prog is not None and "mail" in prog:
-                prog["mail"] = "fetching %d / %d e-mails" % (done_n[0], len(mails))
+    key = "mail"
 
-    out, errs, done = [], [], []
-    with ThreadPoolExecutor(max_workers=MAIL_WORKERS) as pool:
-        for msgid, sender, msg, jobs, err in pool.map(one, mails):
-            if err:
-                errs.append(err)
-                continue  # not marked as done: tried again next time
-            via = re.sub(r".*@", "", re.sub(r"[<>\s]", "", sender.rsplit(" ", 1)[-1]))
-            for j in jobs:
-                url = j.get("url") or ""
-                if not url.startswith("http"):
-                    continue
-                out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
-                            "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
-                            "url": url, "posted": parsedate_iso(msg.get("Date")), "description": "",
-                            "work_mode": j.get("work_mode") if j.get("work_mode") in ("remote", "hybrid", "onsite") else None})
-            done.append((msgid, len(jobs)))
-    cfg.setdefault("_mail_done", []).extend(done)
-    if errs:
-        log.warning("E-mail alert errors: %s", "; ".join(errs))
-        if not out:
-            raise RuntimeError("; ".join(errs))
-    return out
+    def fetch(self, cfg):
+        from concurrent.futures import ThreadPoolExecutor
+        mails = read_alert_mails(cfg, limit=MAIL_PER_RUN)
+        prog = (STATE.get("progress") or {}).get("sources")
+        done_n = [0]
+
+        def one(m):
+            msgid, sender, subject, msg = m
+            try:
+                return msgid, sender, msg, jobs_from_mail(cfg, sender, subject, msg), None
+            except Exception as ex:
+                return msgid, sender, msg, [], "%s: %s" % (subject[:60], ex)
+            finally:
+                done_n[0] += 1
+                if prog is not None and "mail" in prog:
+                    prog["mail"] = "fetching %d / %d e-mails" % (done_n[0], len(mails))
+
+        out, errs, done = [], [], []
+        with ThreadPoolExecutor(max_workers=MAIL_WORKERS) as pool:
+            for msgid, sender, msg, jobs, err in pool.map(one, mails):
+                if err:
+                    errs.append(err)
+                    continue  # not marked as done: tried again next time
+                via = re.sub(r".*@", "", re.sub(r"[<>\s]", "", sender.rsplit(" ", 1)[-1]))
+                for j in jobs:
+                    url = j.get("url") or ""
+                    if not url.startswith("http"):
+                        continue
+                    out.append({"ext_id": hashlib.sha1(url.encode()).hexdigest()[:16], "title": j["title"][:200],
+                                "company": j.get("company", "")[:120], "location": j.get("location", "")[:120] or via,
+                                "url": url, "posted": parsedate_iso(msg.get("Date")), "description": "",
+                                "work_mode": j.get("work_mode") if j.get("work_mode") in ("remote", "hybrid", "onsite") else None})
+                done.append((msgid, len(jobs)))
+        cfg.setdefault("_mail_done", []).extend(done)
+        if errs:
+            log.warning("E-mail alert errors: %s", "; ".join(errs))
+            if not out:
+                raise RuntimeError("; ".join(errs))
+        return out
 
 
 def mark_mails_done(done):

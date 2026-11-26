@@ -9,7 +9,7 @@ from datetime import timedelta
 from jobwatch import cvgen
 
 from jobwatch.env import log
-from jobwatch.repositories.jobs import set_job_status
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.documents import load_profile
 
 from jobwatch.util.timeutil import now_iso, to_local
@@ -72,7 +72,7 @@ def add_interview(con, company, role, start, minutes=60, place="", people="", no
     if job_id:
         st = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
         if st and st["status"] in ("new", "seen", "saved"):
-            set_job_status(con, job_id, "applied")
+            JobRepository(con).set_status(job_id, "applied")
     return cur.lastrowid
 
 

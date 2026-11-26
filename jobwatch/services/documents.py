@@ -13,7 +13,7 @@ from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import DOCS_ROOT, FONT_DIR, PHOTO_PATH, PROFILE_PATH, SMB_BASE, SMB_PREFIX, log
-from jobwatch.repositories.jobs import dedupe_existing, remembered_mode, set_job_status
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.util.text import safe_name
 from jobwatch.util.timeutil import now_iso
 from jobwatch.config import config_store
@@ -50,7 +50,7 @@ def restore_cv_jobs(con=None):
             else:
                 wm, mnote = classify_mode_ex(it["title"], it["location"], it["description"])
                 msrc = "text" if wm != "unknown" else None
-            hand = remembered_mode(con, cv["job_id"], url_key(it["url"]), dup_key(it["title"], it["company"], it["url"]))
+            hand = JobRepository(con).remembered_mode(cv["job_id"], url_key(it["url"]), dup_key(it["title"], it["company"], it["url"]))
             if hand:
                 wm, msrc, mnote = hand, "manual", "set by you"
             ts = cv["created"] or info.get("generated") or now_iso()
@@ -62,7 +62,7 @@ def restore_cv_jobs(con=None):
                  url_key(it["url"]), msrc, mnote))
             back += 1
         if back:
-            dedupe_existing(con)  # a copy fetched meanwhile is hidden behind the one with the CV
+            JobRepository(con).dedupe()  # a copy fetched meanwhile is hidden behind the one with the CV
             log.info("Postings with a CV restored: %d", back)
         if own:
             con.commit()
@@ -209,7 +209,7 @@ def cv_generate(jid, description):
             # documents made: you have (probably) applied
             r = con.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
             if r and (r["status"] or "new") in ("new", "seen"):
-                set_job_status(con, jid, "applied")
+                JobRepository(con).set_status(jid, "applied")
     except Exception as ex:
         log.exception("CV generation error")
         with database.connect() as con:

@@ -3,7 +3,8 @@ import copy
 import re
 
 from jobwatch.domain.scoring import SCORING_KINDS, parse_chips
-from jobwatch.models import FETCHED_SOURCES, SEARCH_FILTERABLE, WORK_MODES
+from jobwatch.models import FETCHED_SOURCES, WORK_MODES
+from jobwatch.sources.registry import SEARCH_FILTERABLE
 from jobwatch.services.presets import apply_preset, clean_preset_name, free_preset_name, preset_by_key, preset_of, same_as_preset, template_presets
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH, rescore_all, search_again, search_signature
 from jobwatch.sources.custom import parse_custom_sources

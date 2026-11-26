@@ -11,7 +11,7 @@ from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import log
 from jobwatch.models import SOURCES_INFO
 
-from jobwatch.repositories.jobs import find_duplicate, merge_into
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.enrich import enrich_work_modes
 from jobwatch.services.logos import fetch_logos, remember_logo
 from jobwatch.services.outreach import LINKEDIN_JOB_RE, linkedin_job
@@ -93,9 +93,9 @@ def add_job_by_link(url):
     jid, ts = "manual:" + it["ext_id"], now_iso()
     with database.connect() as con:
         remember_logo(con, it["company"], it.get("logo"))
-        same = find_duplicate(con, it["title"], it["company"], it["url"])
+        same = JobRepository(con).find_duplicate(it["title"], it["company"], it["url"])
         if same:
-            merge_into(con, same, "manual", it)
+            JobRepository(con).merge_into(same, "manual", it)
             return same["id"], "This posting is already in the list (from %s)." % SOURCES_INFO.get(same["source"], (same["source"],))[0]
         con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
                     "first_seen,last_seen,status,notified,work_mode,urlkey,mode_src,mode_note) "

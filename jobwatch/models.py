@@ -24,18 +24,6 @@ SOURCES_INFO = {
 
 FETCHED_SOURCES = [k for k in SOURCES_INFO if k != "manual"]
 
-OPTIONAL_BOARDS = ["remoteok", "weworkremotely", "himalayas", "jobicy", "workingnomads", "arbeitnow", "remotegamejobs",
-                   "workwithindies"]
-
-# boards that list everything and are always narrowed to the search terms (they would flood the list otherwise)
-ALWAYS_FILTERED = {"remoteok", "weworkremotely", "workingnomads", "arbeitnow", "remotegamejobs", "workwithindies",
-                   "jobicy"}   # Jobicy's own search also matches inside words ("unity" in "community")
-
-# general boards (all trades): a search term must also show in the title (see matches_search)
-TITLE_FILTERED = {"remoteok", "weworkremotely", "workingnomads", "arbeitnow"}
-
-SEARCH_FILTERABLE = ["meetfrank", "4dayweek", "studios", "rss", "custom"]  # they list everything; the others search  # "manual" is never fetched, only added from the Jobs page
-
 UNSUPPORTED = [
     ("HiringCafe", "https://hiringcafe.com/", "Cloudflare blocks automated fetching (403)"),
     ("JobLeads", "https://www.jobleads.com/", "Cloudflare blocks automated fetching (403)"),

@@ -17,7 +17,7 @@ from jobwatch import cvgen
 
 from jobwatch.env import CV_DIR, DATA, DOCS_ROOT, FONT_DIR, LOGO_DIR, PHOTO_PATH, PORT, PROFILE_PATH, STATIC_DIR, log
 from jobwatch.models import STATUS_LABEL
-from jobwatch.repositories.jobs import set_job_status, set_manual_mode
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.documents import MAX_PDF_BYTES, backfill_docs, cv_filename, cv_generate, cv_paths, load_profile, owner_prefix, pdf_from_multipart, pdf_text, profile_from_cv_text, render_cv_files, restore_cv_jobs, write_job_info
 from jobwatch.services.enrich import enrich_work_modes
 from jobwatch.services.interviews.core import interview_cfg
@@ -27,7 +27,7 @@ from jobwatch.services.logos import LOGO_TYPES, logo_files
 
 from jobwatch.services.outreach import linkedin_preview, outreach_action, outreach_create
 from jobwatch.services.postings import add_job_by_link, posting_preview
-from jobwatch.services.refresh import reset_job_cache, run_all, run_selection, scheduler
+from jobwatch.services.refresh import refresher, reset_job_cache, run_selection, scheduler
 from jobwatch.services.settings import preset_action, save_settings, saved_message
 from jobwatch.services.state import STATE
 from jobwatch.sources.custom import test_custom_sources
@@ -216,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 with database.connect() as con:
                     r = con.execute("SELECT url,status FROM jobs WHERE id=?", (jid,)).fetchone()
                     if r and r["status"] == "new":
-                        set_job_status(con, jid, "seen")
+                        JobRepository(con).set_status(jid, "seen")
                 return self.redirect(safe_url(r["url"]) if r else "/")
             if u.path == "/profile":
                 return self.send_html(profile_page(q.get("msg", "")))
@@ -336,7 +336,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/reset-jobs":
                 reset_job_cache()
                 if f.get("refetch"):
-                    threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
+                    threading.Thread(target=refresher.run, kwargs={"force": True}, daemon=True).start()
                     msg = "Job cache cleared and a new search started: the list fills up again in a few minutes."
                 else:
                     msg = "Job cache cleared. Press Refresh all to fetch again."
@@ -348,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
                 if STATE["running"]:
                     return self.redirect(self.back() + ("&" if "?" in self.back() else "?") + "msg=" +
                                          urllib.parse.quote("A refresh is already running; try again when it has finished."))
-                threading.Thread(target=run_all, kwargs={"force": True, "only": only, "custom_ids": cids}, daemon=True).start()
+                threading.Thread(target=refresher.run, kwargs={"force": True, "only": only, "custom_ids": cids}, daemon=True).start()
                 time.sleep(0.3)
                 return self.redirect(self.back())
             if u.path.startswith("/job/"):
@@ -356,15 +356,15 @@ class Handler(BaseHTTPRequestHandler):
                 st = f.get("status")
                 if st in STATUS_LABEL:
                     with database.connect() as con:
-                        set_job_status(con, jid, st)
+                        JobRepository(con).set_status(jid, st)
                 wm = f.get("work_mode")
                 if wm in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten, remembered
                     with database.connect() as con:
                         con.execute("UPDATE jobs SET work_mode=?, mode_src='manual', mode_note='set by you' WHERE id=?", (wm, jid))
-                        set_manual_mode(con, jid, wm)
+                        JobRepository(con).set_manual_mode(jid, wm)
                 elif wm == "auto":                           # back to automatic: decided again in the background
                     with database.connect() as con:
-                        set_manual_mode(con, jid, None)
+                        JobRepository(con).set_manual_mode(jid, None)
                         con.execute("UPDATE jobs SET work_mode='unknown', mode_src=NULL, mode_note=NULL, mode_checked=NULL WHERE id=?", (jid,))
                     with config_store.lock:
                         cfg_ = config_store.load()
@@ -439,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
                                    f.get("body", ""), to=to, attachments=att)
                         with database.connect() as con:
                             con.execute("UPDATE cvs SET sent_to=?, sent_at=? WHERE job_id=?", (to, now_iso(), jid))
-                            set_job_status(con, jid, "applied")
+                            JobRepository(con).set_status(jid, "applied")
                             cvrow = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
                         try:
                             write_job_info(os.path.dirname(paths["cv"]), job, json.loads(cvrow["data"]), cvrow)
@@ -462,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/mark-all-seen":
                 with database.connect() as con:
                     for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
-                        set_job_status(con, r["id"], "seen")
+                        JobRepository(con).set_status(r["id"], "seen")
                 return self.redirect(self.back())
             if u.path == "/settings":
                 msg = urllib.parse.quote(saved_message(save_settings(f)))

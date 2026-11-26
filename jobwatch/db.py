@@ -6,7 +6,7 @@ from jobwatch.domain.identity import dup_key, mark_keys, url_key
 from jobwatch.domain.workmode import classify_mode
 from jobwatch.env import DB_PATH, log
 from jobwatch.models import KEPT_STATUSES
-from jobwatch.repositories.jobs import dedupe_existing
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.util.timeutil import now_iso
 
 
@@ -106,7 +106,7 @@ class Database:
                 for r in con.execute("SELECT id, title, company, url FROM jobs").fetchall():
                     con.execute("UPDATE jobs SET dupkey=?, urlkey=? WHERE id=?",
                                 (dup_key(r["title"], r["company"], r["url"]), url_key(r["url"]), r["id"]))
-                n = dedupe_existing(con)
+                n = JobRepository(con).dedupe()
                 if n:
                     log.info("Duplicates: %d posting(s) hidden", n)
                 con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dedupe','1')")

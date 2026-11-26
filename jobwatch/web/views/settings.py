@@ -2,7 +2,8 @@
 import json
 
 from jobwatch.domain.scoring import DESC_MAX, SCORING_KINDS
-from jobwatch.models import FETCHED_SOURCES, OPTIONAL_BOARDS, SEARCH_FILTERABLE, SOURCES_INFO, WORK_MODES
+from jobwatch.models import FETCHED_SOURCES, SOURCES_INFO, WORK_MODES
+from jobwatch.sources.registry import OPTIONAL_BOARDS, SEARCH_FILTERABLE
 from jobwatch.services.presets import NEW_PRESET, preset_label, template_presets
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH
 from jobwatch.util.text import e

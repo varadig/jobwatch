@@ -8,10 +8,10 @@ from datetime import datetime
 from datetime import timezone
 
 from jobwatch.models import SOURCES_INFO, STATUS_LABEL
-from jobwatch.repositories.jobs import set_job_status
+from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.logos import logo_files
 from jobwatch.services.postings import clean_posting_html
-from jobwatch.services.refresh import run_all
+from jobwatch.services.refresh import refresher
 from jobwatch.services.state import STATE
 from jobwatch.util.text import e
 from jobwatch.util.timeutil import bucket_of, days_ago, fmt_dt, parse_dt, rel_day
@@ -27,7 +27,7 @@ def jobs_page(q):
     with database.connect() as con:
         empty = con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
     if empty and not STATE["running"] and not STATE.get("progress"):
-        threading.Thread(target=run_all, kwargs={"force": True}, daemon=True).start()
+        threading.Thread(target=refresher.run, kwargs={"force": True}, daemon=True).start()
         time.sleep(0.3)
     status = q.get("status", "active")
     srcs = sorted({s for s in q.get("source", "").split(",") if s in SOURCES_INFO})  # several sources may be picked
@@ -251,7 +251,7 @@ def job_detail_html(jid, back="/", modal=False):
     with database.connect() as con:
         r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         if r and r["status"] == "new":
-            set_job_status(con, jid, "seen")   # opened: seen (remembered)
+            JobRepository(con).set_status(jid, "seen")   # opened: seen (remembered)
             r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         has_cv = bool(r and con.execute("SELECT 1 FROM cvs WHERE job_id=? AND status='done'", (jid,)).fetchone())
     if not r:
