@@ -2692,40 +2692,216 @@ def interview_loop():
 
 
 # ---- the mailbox
-def read_interview_mails(cfg, limit=25):
-    """The new e-mails of the last days whose subject looks like an interview: [(msgid, sender, subject, date, msg)].
-    Read-only (PEEK): nothing is marked as read."""
+# IMAP servers of the common mail providers, by the address's domain
+IMAP_HOSTS = {"icloud.com": "imap.mail.me.com", "me.com": "imap.mail.me.com", "mac.com": "imap.mail.me.com",
+              "gmail.com": "imap.gmail.com", "googlemail.com": "imap.gmail.com",
+              "outlook.com": "outlook.office365.com", "hotmail.com": "outlook.office365.com",
+              "live.com": "outlook.office365.com", "msn.com": "outlook.office365.com",
+              "yahoo.com": "imap.mail.yahoo.com", "freemail.hu": "imap.freemail.hu", "gmx.net": "imap.gmx.net",
+              "gmx.com": "imap.gmx.com"}
+APP_PASSWORD_HELP = {
+    "imap.mail.me.com": ("iCloud needs an app-specific password: appleid.apple.com → Sign-In and Security → "
+                         "App-Specific Passwords.", "https://appleid.apple.com/account/manage"),
+    "imap.gmail.com": ("Gmail needs an app password (with 2-step verification on): Google Account → Security → "
+                       "App passwords.", "https://myaccount.google.com/apppasswords"),
+    "outlook.office365.com": ("Outlook.com may need an app password: Microsoft account → Security → Advanced "
+                              "security options.", "https://account.microsoft.com/security"),
+    "imap.mail.yahoo.com": ("Yahoo needs an app password: Account security → Generate app password.",
+                            "https://login.yahoo.com/account/security"),
+}
+
+
+def imap_host_for(address):
+    dom = (address or "").rsplit("@", 1)[-1].strip().lower()
+    return IMAP_HOSTS.get(dom, "imap." + dom if dom else "")
+
+
+def interview_mailboxes(cfg):
+    """The mailboxes searched for interviews: the main one (Settings → Notifications / E-mail alerts) and the ones
+    added on the Interviews page. [{id, label, host, port, user, password, folder}]"""
+    out = []
+    try:
+        host, port, user, pw = mail_login(cfg)
+        out.append({"id": "main", "label": user, "host": host, "port": port, "user": user, "password": pw,
+                    "folder": (cfg.get("mail_source") or {}).get("folder") or "INBOX"})
+    except Exception:
+        pass
+    for mb in interview_cfg(cfg).get("mailboxes") or []:
+        if mb.get("user") and mb.get("password"):
+            out.append(dict({"host": imap_host_for(mb["user"]), "port": 993, "folder": "INBOX", "label": mb["user"]}, **mb))
+    return out
+
+
+def imap_open(mb):
+    """An IMAP connection to a mailbox, logged in, with its folder opened read-only."""
+    import imaplib
+    M = imaplib.IMAP4_SSL(mb["host"], int(mb.get("port") or 993), timeout=30)
+    try:
+        M.login(mb["user"], mb["password"])
+        typ, _ = M.select('"%s"' % (mb.get("folder") or "INBOX").replace('"', ""), readonly=True)
+        if typ != "OK":
+            raise RuntimeError("cannot open the folder %s" % (mb.get("folder") or "INBOX"))
+    except Exception:
+        try:
+            M.logout()
+        except Exception:
+            pass
+        raise
+    return M
+
+
+def imap_error(ex):
+    t = str(ex)
+    if isinstance(ex, bytes) or t.startswith("b'"):
+        t = t[2:-1]
+    if "AUTHENTICATIONFAILED" in t.upper() or "invalid credentials" in t.lower() or "authentication failed" in t.lower():
+        return "the login was refused (for most providers use an app password, not the normal one)"
+    return t[:200] or type(ex).__name__
+
+
+def read_mailbox_interviews(mb, since, done, limit):
+    """The new interview-like e-mails of one mailbox: [(msgid, sender, subject, date, msg)]. Read-only (PEEK)."""
     import email as email_lib
     import email.policy
-    import imaplib
-    ivc, ms = interview_cfg(cfg), cfg.get("mail_source") or {}
-    host, port, user, pw = mail_login(cfg)
-    since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - 86400 * int(ivc["mail_days"] or 14)))
     out = []
-    with imaplib.IMAP4_SSL(host, port, timeout=30) as M:
-        M.login(user, pw)
-        typ, _ = M.select('"%s"' % (ms.get("folder") or "INBOX").replace('"', ""), readonly=True)
-        if typ != "OK":
-            raise RuntimeError("cannot open the mail folder")
+    M = imap_open(mb)
+    try:
         crit = ["OR"] * (len(IV_MAIL_KEYWORDS) - 1)
         for k in IV_MAIL_KEYWORDS:
             crit += ["SUBJECT", '"%s"' % k]
         typ, data = M.search(None, "SINCE", since, *crit)
         ids = data[0].split() if typ == "OK" and data and data[0] else []
-        with db() as con:
-            done = {r["msgid"] for r in con.execute("SELECT msgid FROM interview_mail_seen")}
         for num in sorted(ids, key=int, reverse=True):
             typ, data = M.fetch(num, "(BODY.PEEK[])")
-            if typ != "OK" or not data or not isinstance(data[0], tuple):
+            raw = next((x[1] for x in data or [] if isinstance(x, tuple) and len(x) > 1), None) if typ == "OK" else None
+            if not raw:
                 continue
-            msg = email_lib.message_from_bytes(data[0][1], policy=email.policy.default)
-            msgid = (msg.get("Message-ID") or "").strip() or hashlib.sha1(data[0][1][:2000]).hexdigest()
+            msg = email_lib.message_from_bytes(raw, policy=email.policy.default)
+            msgid = (msg.get("Message-ID") or "").strip() or hashlib.sha1(raw[:2000]).hexdigest()
             if msgid in done:
                 continue
+            done.add(msgid)   # the same e-mail in two mailboxes is read once
             out.append((msgid, str(msg.get("From", "")), str(msg.get("Subject", "")), str(msg.get("Date", "")), msg))
             if len(out) >= limit:
                 break
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
     return out
+
+
+def read_interview_mails(cfg, limit=25):
+    """The new interview-like e-mails of every mailbox, and the errors: ([(msgid, sender, subject, date, msg)],
+    ["mailbox: error"]). A mailbox that cannot be read does not stop the others."""
+    since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - 86400 * int(interview_cfg(cfg)["mail_days"] or 14)))
+    with db() as con:
+        done = {r["msgid"] for r in con.execute("SELECT msgid FROM interview_mail_seen")}
+    mails, errs = [], []
+    for mb in interview_mailboxes(cfg):
+        try:
+            mails += read_mailbox_interviews(mb, since, done, limit)
+            set_mailbox_state(mb["id"], "")
+        except Exception as ex:
+            errs.append("%s: %s" % (mb["label"], imap_error(ex)))
+            set_mailbox_state(mb["id"], imap_error(ex))
+    return mails, errs
+
+
+def set_mailbox_state(mid, error):
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)", ("mbox:" + str(mid), json.dumps(
+            {"at": now_iso(), "error": error})))
+
+
+def mailbox_state(mid):
+    with db() as con:
+        r = con.execute("SELECT v FROM meta WHERE k=?", ("mbox:" + str(mid),)).fetchone()
+    try:
+        return json.loads(r["v"]) if r else {}
+    except ValueError:
+        return {}
+
+
+def mailbox_post(f):
+    """Interviews page → Mailboxes: add (after a test login), test or remove one. Returns the message."""
+    act = f.get("act", "")
+    if act == "add":
+        user = f.get("mb_user", "").strip()
+        pw = re.sub(r"\s+", "", f.get("mb_password", ""))   # app passwords are shown in groups with spaces
+        if not user or "@" not in user or not pw:
+            return "Give the e-mail address and its (app) password."
+        mb = {"id": secrets.token_hex(4), "label": user, "user": user, "password": pw,
+              "host": f.get("mb_host", "").strip() or imap_host_for(user), "port": 993,
+              "folder": f.get("mb_folder", "").strip() or "INBOX"}
+        try:
+            imap_open(mb).logout()
+        except Exception as ex:
+            return "Could not log in to %s: %s. Nothing was saved." % (user, imap_error(ex))
+        with CFG_LOCK:
+            cfg = load_config()
+            iv = cfg.setdefault("interviews", {})
+            iv["mailboxes"] = [m for m in iv.get("mailboxes") or [] if m.get("user", "").lower() != user.lower()] + [mb]
+            save_config(cfg)
+        set_mailbox_state(mb["id"], "")
+        threading.Thread(target=scan_interview_mails, daemon=True).start()
+        return "%s added; its e-mails of the last days are being checked now." % user
+    mid = f.get("mb_id", "")
+    with CFG_LOCK:
+        cfg = load_config()
+        iv = cfg.setdefault("interviews", {})
+        boxes = iv.get("mailboxes") or []
+        mb = next((m for m in boxes if m.get("id") == mid), None)
+        if act == "remove" and mb:
+            iv["mailboxes"] = [m for m in boxes if m.get("id") != mid]
+            save_config(cfg)
+            return "%s removed." % mb["user"]
+    if act == "test":
+        mb = next((m for m in interview_mailboxes(cfg) if m["id"] == mid), None)
+        if not mb:
+            return "No such mailbox."
+        try:
+            imap_open(mb).logout()
+            set_mailbox_state(mid, "")
+            return "%s: the login works." % mb["label"]
+        except Exception as ex:
+            set_mailbox_state(mid, imap_error(ex))
+            return "%s: %s" % (mb["label"], imap_error(ex))
+    return "Nothing to do."
+
+
+def mailboxes_html(cfg):
+    rows = []
+    for mb in interview_mailboxes(cfg):
+        st = mailbox_state(mb["id"])
+        status = ('<span class="badge badge-soft badge-error">%s</span>' % e(st["error"][:120]) if st.get("error") else
+                  '<span class="badge badge-soft badge-success">checked %s</span>' % e(fmt_dt(st["at"])) if st.get("at") else
+                  '<span class="badge badge-soft badge-neutral">not checked yet</span>')
+        btns = ('<button class="btn btn-xs btn-ghost" name="act" value="test">Test</button>'
+                + ('' if mb["id"] == "main" else '<button class="btn btn-xs btn-ghost text-error" name="act" value="remove" '
+                   'aria-label="Remove %s">Remove</button>' % e(mb["label"])))
+        rows.append('<form method="post" action="/interviews/mailbox" class="mb-row"><input type="hidden" name="mb_id" value="%s">'
+                    '<div class="mb-main">%s <b>%s</b><span class="muted"> · %s%s</span></div><div class="mb-st">%s</div>'
+                    '<div class="ui-btns">%s</div></form>' % (
+                        e(mb["id"]), ic("mail"), e(mb["label"]), e(mb["host"]),
+                        " · the main mailbox (Settings)" if mb["id"] == "main" else "", status, btns))
+    helps = "".join('<li>%s <a href="%s" target="_blank" rel="noopener noreferrer">Open</a></li>' % (e(t), e(u))
+                    for t, u in APP_PASSWORD_HELP.values())
+    return ((''.join(rows) if rows else '<p class="muted">No mailbox yet.</p>')
+            + ('<details class="mb-add"%s><summary>%s Add a mailbox</summary>' % (" open" if not rows else "", ic("add")))
+            + '<form method="post" action="/interviews/mailbox" class="ui-grid" autocomplete="off" style="margin-top:10px">'
+              '<input type="hidden" name="act" value="add">'
+              + ui_field("mb_user", "E-mail address", "", "email", "The server is found from the address (iCloud, Gmail, "
+                         "Outlook, Yahoo…).", ' required autocomplete="off"')
+              + '<div><label for="mb_password">App password</label><input class="input" id="mb_password" type="password" '
+                'name="mb_password" required autocomplete="new-password"><span class="help">Not your normal password.</span></div>'
+              + ui_field("mb_host", "IMAP server (optional)", "", help_="Only if it is not found from the address.")
+              + ui_field("mb_folder", "Folder (optional)", "", help_="Default: INBOX.")
+              + ('<div class="wide"><ul class="mb-help">%s</ul><button class="btn btn-sm btn-primary">Test and add</button>'
+                 '<span class="help">The password is kept in jobwatch\'s settings file on this server, like the other '
+                 'passwords there. The mailbox is only read: nothing is changed, moved or marked as read.</span></div>'
+                 '</form></details>' % helps))
 
 
 def mail_calendar(msg):
@@ -2798,15 +2974,14 @@ def scan_interview_mails():
             cfg = load_config()
         if not interview_cfg(cfg)["from_mail"]:
             return "Finding interviews in the e-mails is turned off."
-        try:
-            mails = read_interview_mails(cfg)
-        except Exception as ex:
-            return "Cannot read the mailbox: %s" % ex
+        mails, mail_errs = read_interview_mails(cfg)
+        if mail_errs and not mails and len(mail_errs) == len(interview_mailboxes(cfg)):
+            return "Cannot read the mailbox: %s" % "; ".join(mail_errs)
         with db() as con:
             companies = [r["company"] for r in con.execute(
                 "SELECT DISTINCT company FROM jobs WHERE company<>'' AND (status IN ('applied','saved') OR id IN "
                 "(SELECT job_id FROM cvs)) LIMIT 80")]
-        added, changed, errs = [], 0, []
+        added, changed, errs = [], 0, list(mail_errs)
         for msgid, sender, subject, sent, msg in mails:
             try:
                 found = interview_from_mail(cfg, sender, subject, sent, msg, companies)
@@ -2991,11 +3166,7 @@ def interviews_page(q, flash=""):
     past = [r for r in reversed(rows) if r not in soon]
     key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     ntfy_on = cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic")
-    try:
-        mail_login(cfg)
-        mailbox = True
-    except Exception:
-        mailbox = False
+    mailbox = bool(interview_mailboxes(cfg))
     feed = "%s/calendar/%s.ics" % ((cfg.get("public_url") or "").rstrip("/"), calendar_token())
     head = ('<div class="ui-head"><h1>Interviews</h1><p>Your interviews, with a reminder on your phone on the day (from %s) and '
             '%d minutes before.%s</p></div>') % (
@@ -3023,11 +3194,11 @@ def interviews_page(q, flash=""):
         + '<div><label>From the mailbox</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
           'class="toggle toggle-sm toggle-primary" name="iv_from_mail"%s> Find interviews in my e-mails</label><span class="help">%s'
           '</span></div>' % (chk(ivc["from_mail"]),
-                             ("Every 30 minutes the e-mails of the last %d days whose subject looks like an interview are read "
+                             ("Every 30 minutes the e-mails of the last %d days in your mailboxes (below) whose subject looks like an interview are read "
                               "(calendar invitations directly%s). Nothing is marked as read." % (
                                   int(ivc["mail_days"] or 14), ", the others by Claude" if key else "; set a Claude key to "
                                   "read the others too")) if mailbox else
-                             'Needs a mailbox: the e-mail account in <a href="/settings#notify">Settings → Notifications</a>.')
+                             'Needs a mailbox: add one below.')
         + '<div><label>Research</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
           'class="toggle toggle-sm toggle-primary" name="iv_research"%s> Research the company for each new interview</label>'
           '<span class="help">Claude searches the web: the company, recent news, the interviewers\' professional background, '
@@ -3044,7 +3215,9 @@ def interviews_page(q, flash=""):
           'It works where the calendar can reach this address (Google Calendar needs it to be reachable from the internet; '
           'otherwise use “Google” or “.ics” on an interview). Keep it private: anyone with it can see your interviews.</span></div>'
           % e(feed))
-    return page("Interviews", '<div class="ui">%s%s%s%s%s</div>' % (head, add, upcoming, old, settings), flash)
+    boxes = ui_sec("mailboxes", "Mailboxes", "Where interview invitations can arrive. Add every address you gave to "
+                   "employers or job sites.", mailboxes_html(cfg))
+    return page("Interviews", '<div class="ui">%s%s%s%s%s%s</div>' % (head, add, upcoming, old, settings, boxes), flash)
 
 
 def interview_page(iid, flash=""):
@@ -3143,6 +3316,8 @@ def interview_post(path, f):
             iv["research"] = "iv_research" in f
             save_config(cfg)
         return "/interviews", "Saved."
+    if path == "/interviews/mailbox":
+        return "/interviews#mailboxes", mailbox_post(f)
     if path == "/interviews/scan":
         return "/interviews", scan_interview_mails()
     if path == "/interviews":
@@ -3252,6 +3427,10 @@ details.iv-past>.ui-row:first-of-type{border-top:1px solid var(--line)}
 .iv-research ul{margin:0 0 8px 20px;padding:0;list-style:disc}.iv-research li{margin:3px 0}
 .iv-src{margin:6px 0 0 18px;list-style:disc;font-size:13px}
 .iv-feed{margin-top:16px}
+.mb-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
+.mb-main{flex:1;min-width:200px;overflow-wrap:anywhere}.mb-st{flex:none}
+details.mb-add{margin-top:12px}details.mb-add>summary{cursor:pointer;font-weight:600;color:var(--acc)}
+.mb-help{margin:0 0 10px 18px;list-style:disc;font-size:13px;color:var(--muted)}
 @media (max-width:640px){.iv{flex-wrap:wrap}.iv-when{width:auto;flex-direction:row;gap:8px;align-items:baseline}}
 .rf-wrap{position:relative}
 .rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;width:max-content;max-width:calc(100vw - 32px);padding:10px 12px;background:var(--card);

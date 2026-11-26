@@ -1663,7 +1663,7 @@ class Interviews(unittest.TestCase):
         cfg = self.cfg(from_mail=True, research=False)
         cfg["anthropic_api_key"] = ""
         mails = [("<m1>", "anna@acme.com", "Invitation: Interview", "", msg)]
-        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "read_interview_mails", lambda c: mails), \
+        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "read_interview_mails", lambda c: (mails, [])), \
                 mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), mock.patch.object(app, "notify_interview", lambda *a: None):
             self.assertIn("1 new interview", app.scan_interview_mails())
             with app.db() as con:
@@ -1762,3 +1762,62 @@ class ResearchSources(unittest.TestCase):
             text, _ = cvgen.company_research("k", "Acme")
         self.assertEqual(text, "## At a glance\n- Big studio")
         self.assertEqual(seen[1][1]["role"], "assistant")   # the paused part was sent back
+
+
+
+class InterviewMailboxes(unittest.TestCase):
+    def setUp(self):
+        app.init_db()
+        app.migrate_db()
+        self.cfg = app.load_config()
+        self.cfg["email"] = dict(self.cfg["email"], username="me@gmail.com", password="pw")
+        self.cfg["interviews"] = {"mailboxes": []}
+        patcher = mock.patch.object(app, "load_config", lambda: self.cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        saver = mock.patch.object(app, "save_config", lambda c: None)
+        saver.start()
+        self.addCleanup(saver.stop)
+
+    def test_server_from_the_address(self):
+        self.assertEqual(app.imap_host_for("varadi.gabor@icloud.com"), "imap.mail.me.com")
+        self.assertEqual(app.imap_host_for("x@hotmail.com"), "outlook.office365.com")
+        self.assertEqual(app.imap_host_for("x@acme.hu"), "imap.acme.hu")
+
+    def test_add_after_a_working_login_only(self):
+        class FakeImap:
+            def logout(self):
+                pass
+        with mock.patch.object(app, "imap_open", lambda mb: FakeImap()), mock.patch.object(app, "scan_interview_mails", lambda: None):
+            msg = app.mailbox_post({"act": "add", "mb_user": "varadi.gabor@icloud.com", "mb_password": "abcd efgh ijkl mnop"})
+        self.assertIn("added", msg)
+        mb = self.cfg["interviews"]["mailboxes"][0]
+        self.assertEqual((mb["host"], mb["password"], mb["folder"]), ("imap.mail.me.com", "abcdefghijklmnop", "INBOX"))
+        boxes = app.interview_mailboxes(self.cfg)
+        self.assertEqual([b["user"] for b in boxes], ["me@gmail.com", "varadi.gabor@icloud.com"])
+        html_ = app.mailboxes_html(self.cfg)
+        self.assertIn("varadi.gabor@icloud.com", html_)
+        self.assertNotIn("abcdefghijklmnop", html_)   # the password is never shown
+
+        def refuse(mb):
+            raise Exception("b'[AUTHENTICATIONFAILED] Authentication failed.'")
+        with mock.patch.object(app, "imap_open", refuse):
+            msg = app.mailbox_post({"act": "add", "mb_user": "other@icloud.com", "mb_password": "x"})
+        self.assertIn("Nothing was saved", msg)
+        self.assertIn("app password", msg)
+        self.assertEqual(len(self.cfg["interviews"]["mailboxes"]), 1)
+        app.mailbox_post({"act": "remove", "mb_id": mb["id"]})
+        self.assertEqual(self.cfg["interviews"]["mailboxes"], [])
+
+    def test_one_broken_mailbox_does_not_stop_the_others(self):
+        self.cfg["interviews"]["mailboxes"] = [{"id": "ic", "user": "a@icloud.com", "password": "p"}]
+
+        def read(mb, since, done, limit):
+            if mb["id"] == "main":
+                raise Exception("timeout")
+            return [("<x>", "hr@z.test", "Interview", "", None)]
+        with mock.patch.object(app, "read_mailbox_interviews", read):
+            mails, errs = app.read_interview_mails(self.cfg)
+        self.assertEqual(len(mails), 1)
+        self.assertEqual(errs, ["me@gmail.com: timeout"])
+        self.assertEqual(app.mailbox_state("main")["error"], "timeout")
