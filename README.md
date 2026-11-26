@@ -16,6 +16,11 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
 - **Sources:** LinkedIn search pages, MeetFrank, 4dayweek.io, Flexa, Remotive, company job boards
   (Ashby, Greenhouse, Lever, BambooHR, SmartRecruiters), and your own RSS feeds. Each source can be
   switched off in the Settings page.
+- **Interviews:** add an interview by hand (or from a posting: "Interview" on its page), or let jobwatch find it in
+  your mailbox: calendar invitations are read directly, other e-mails (a recruiter confirming a time) by Claude; moved and
+  cancelled interviews are followed. Reminders go to ntfy on the day (from 08:00) and 60 minutes before (both adjustable).
+  Claude can research the company and the interviewers on the web (news, products, likely questions, questions to ask).
+  Each interview has "Add to Google Calendar" and an .ics file; all of them are also a calendar feed (a secret address).
 - **Optional boards** (off until you switch them on in Settings): Remote OK, We Work Remotely, Himalayas,
   Jobicy, Working Nomads, Arbeitnow (EU, mostly Germany), and for games Remote Game Jobs and Work With Indies.
   The boards that list every trade keep only the postings that match a search term (a word of it in the title).

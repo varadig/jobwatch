@@ -327,6 +327,116 @@ def jobs_from_email(api_key, subject, sender, text, links):
     return out
 
 
+
+# ---------------------------------------------------------------- interviews
+def _call(api_key, timeout, **kw):
+    """One Claude API request with the error handling used here. Returns the response."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key or None, timeout=timeout, max_retries=2)
+    try:
+        return client.beta.messages.create(model=MODEL, betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kw)
+    except anthropic.AuthenticationError:
+        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
+    except anthropic.PermissionDeniedError:
+        raise CVError("The API key has no permission for this model.")
+    except anthropic.RateLimitError:
+        raise CVError("Claude API: too many requests, try again in a few minutes.")
+    except anthropic.BadRequestError as e:
+        raise CVError("Claude API bad request: %s" % e.message)
+    except anthropic.APIStatusError as e:
+        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
+    except anthropic.APIConnectionError:
+        raise CVError("Cannot reach the Claude API (network error).")
+
+
+INTERVIEW_MAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_interview": {"type": "boolean"}, "cancelled": {"type": "boolean"},
+        "company": _STR, "role": _STR, "start": _STR, "minutes": {"type": "integer"},
+        "place": _STR, "people": _STR, "summary": _STR,
+    },
+    "required": ["is_interview", "cancelled", "company", "role", "start", "minutes", "place", "people", "summary"],
+    "additionalProperties": False,
+}
+INTERVIEW_MAIL_SYSTEM = """You read one e-mail from the mailbox of a job seeker and decide whether it fixes a job interview for them: a calendar invitation, a booking confirmation (Calendly, GoodTime, Teams, Zoom…), or a recruiter or hiring manager confirming a date and time. Any language.
+- is_interview: true only for an interview (screening call, technical interview, test task review, meeting with the hiring team…) with a fixed date and time, or for the cancellation of one. False for job alerts, newsletters, rejections, offers to pick a slot without a fixed time, and meetings that are not about a job.
+- cancelled: true if the e-mail cancels or withdraws a scheduled interview.
+- start: the start in the job seeker's time zone (given below) as YYYY-MM-DDTHH:MM, converted if the e-mail gives another zone; resolve relative dates ("tomorrow at 3pm") from the e-mail's date. "" if no fixed time.
+- minutes: the length; 0 if not stated.
+- company: the hiring company (not the scheduling tool or the recruiting agency, unless no company is named); role: the job title, "" if not given.
+- place: the meeting link (Zoom, Teams, Meet…) copied exactly, or the address, or the phone number; "".
+- people: the interviewers' names and titles as given, comma-separated; "".
+- summary: one short line about what the interview is (e.g. "45 min technical interview with the Unity team")."""
+
+
+def interview_from_email(api_key, sender, subject, sent, text, calendar, tz_name, now_local, companies=()):
+    """Claude API call: the interview an e-mail fixes (or cancels). calendar: the invitation's events as text."""
+    user = ("Job seeker's time zone: %s. Now: %s.\nCompanies the job seeker applied to (for the names): %s\n\n"
+            "<email>\nFrom: %s\nDate: %s\nSubject: %s\n\n%s\n</email>" % (
+                tz_name, now_local, ", ".join(companies[:60]) or "-", sender, sent, subject, text[:12000]))
+    if calendar:
+        user += "\n\n<calendar_invitation>\n%s\n</calendar_invitation>" % calendar[:4000]
+    resp = _call(api_key, 120.0, max_tokens=16000, system=INTERVIEW_MAIL_SYSTEM,
+                 output_config={"effort": "low", "format": {"type": "json_schema", "schema": INTERVIEW_MAIL_SCHEMA}},
+                 messages=[{"role": "user", "content": user}])
+    if resp.stop_reason in ("refusal", "max_tokens"):
+        raise CVError("The model did not answer (%s)." % resp.stop_reason)
+    try:
+        return json.loads("".join(b.text for b in resp.content if b.type == "text"))
+    except ValueError:
+        raise CVError("The model's response is not valid JSON.")
+
+
+RESEARCH_SYSTEM = """You prepare a job seeker for an interview. Search the web and write a short, practical briefing about the company and the interview, in English.
+Use these sections (## headings), each with short bullet points; leave a section out if you found nothing reliable:
+## At a glance — what the company does, size, headquarters and offices, founded, ownership or funding.
+## Products — their main products or games, with platforms and how they are doing.
+## Recent news — the last 12 months, each with its month and year (launches, funding, acquisitions, layoffs, leadership changes).
+## Tech and team — the technology, engines and tools they use, and how the team for this role works, as far as public sources show.
+## Culture — how they work (remote/hybrid, values, what employees say), only from sources you found.
+## The people you will meet — for each interviewer named: current role and professional background from public professional sources (company site, LinkedIn, talks). Professional information only, nothing private. Leave the section out if no one is named.
+## Likely questions — 6 to 8 questions this company is likely to ask for this role, tailored to it.
+## Questions to ask them — 5 smart questions that show you did your homework.
+## Watch-outs — anything worth checking (layoffs, bad reviews, unclear funding); leave out if none.
+Be factual: say "not found" rather than guess, and write the date of anything time-sensitive. No introduction and no closing remarks."""
+
+
+def company_research(api_key, company, role="", posting="", people="", place="", candidate=""):
+    """Claude API call with web search: an interview briefing about the company (markdown-like text) and the sources
+    [(title, url)]. Server-side tools may pause a long turn (pause_turn); it is resumed a few times."""
+    user = "Company: %s\nRole: %s\nInterviewers: %s\nWhere: %s" % (company, role or "-", people or "-", place or "-")
+    if posting:
+        user += "\n\n<posting>\n%s\n</posting>" % posting[:8000]
+    if candidate:
+        user += "\n\n<candidate>\nThe job seeker, to tailor the likely questions: %s\n</candidate>" % candidate[:1500]
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 8},
+             {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5}]
+    messages = [{"role": "user", "content": user}]
+    for _ in range(5):
+        resp = _call(api_key, 600.0, max_tokens=16000, system=RESEARCH_SYSTEM, tools=tools,
+                     output_config={"effort": "medium"}, messages=messages)
+        if resp.stop_reason != "pause_turn":
+            break
+        messages = [messages[0], {"role": "assistant", "content": resp.content}]
+    if resp.stop_reason == "refusal":
+        raise CVError("The model refused the request.")
+    text, sources, seen = [], [], set()
+    for b in resp.content:
+        if b.type != "text":
+            continue
+        text.append(b.text)
+        for c in getattr(b, "citations", None) or []:
+            url = getattr(c, "url", None)
+            if url and url not in seen:
+                seen.add(url)
+                sources.append((getattr(c, "title", None) or url, url))
+    out = "".join(text).strip()
+    if not out:
+        raise CVError("The research came back empty (%s)." % resp.stop_reason)
+    return out, sources
+
+
 def tailor(api_key, profile, job, description):
     """Claude API call: returns the tailored CV data (dict, same structure as the profile)."""
     import anthropic

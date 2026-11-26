@@ -6,7 +6,7 @@ Only the Python standard library. Run: python3 app.py  (port: JOBWATCH_PORT, def
 import copy, hashlib, html, json, shutil, logging, os, re, secrets, smtplib, sqlite3, ssl, threading, time
 import urllib.error, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -431,6 +431,13 @@ def init_db():
           k TEXT PRIMARY KEY, mode TEXT, title TEXT, company TEXT, at TEXT);
         CREATE TABLE IF NOT EXISTS job_marks(
           k TEXT PRIMARY KEY, status TEXT, title TEXT, company TEXT, at TEXT);
+        CREATE TABLE IF NOT EXISTS interviews(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, company TEXT, role TEXT, starts TEXT, minutes INTEGER,
+          place TEXT, people TEXT, notes TEXT, source TEXT, uid TEXT, msgid TEXT, status TEXT DEFAULT 'planned',
+          reminded_day TEXT, reminded_soon TEXT, research TEXT, research_sources TEXT, research_status TEXT,
+          research_at TEXT, research_error TEXT, created TEXT, updated TEXT);
+        CREATE TABLE IF NOT EXISTS interview_mail_seen(
+          msgid TEXT PRIMARY KEY, processed_at TEXT, found INTEGER);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -783,6 +790,8 @@ ICONS = {
     "visibility": 0xe417, "visibility_off": 0xe8f5, "calendar_today": 0xe935, "target": 0xe719, "repeat": 0xe040,
     "open_in_new": 0xe895, "close": 0xe14c, "arrow_back": 0xe5c4, "subdirectory_arrow_right": 0xe5da,
     "check": 0xe5ca, "circle": 0xef4a, "expand_more": 0xe5cf, "tune": 0xe429,
+    "event": 0xe24f, "calendar_month": 0xebcc, "videocam": 0xe04b, "travel_explore": 0xe2db, "download": 0xe171,
+    "mail": 0xe0be, "person": 0xe7fd, "add": 0xe145, "task_alt": 0xe2e6, "undo": 0xe166,
 }
 
 
@@ -2335,6 +2344,842 @@ def rescore_all():
             con.execute("UPDATE jobs SET score=?, matched=? WHERE id=?", (sc, ", ".join(hits), r["id"]))
 
 
+# ---------------------------------------------------------------- interviews
+# An interview: added by hand (optionally from a posting) or found in the mailbox (a calendar invitation, a booking
+# confirmation, a recruiter's e-mail). Reminders go to ntfy on the day (in the morning) and shortly before. Claude can
+# research the company and the interviewers on the web. The interviews are also an iCalendar feed to subscribe to.
+INTERVIEW_DEFAULTS = {"morning": "08:00", "before_min": 60, "from_mail": True, "mail_days": 14, "research": True, "cal_token": ""}
+INTERVIEW_STATUS = {"planned": "Planned", "done": "Done", "cancelled": "Cancelled"}
+IV_LOCK = threading.Lock()        # one e-mail scan at a time
+IV_SCAN_EVERY = 30 * 60           # seconds between e-mail scans
+IV_MAIL_KEYWORDS = ("interview", "interj", "invitation", "invite", "meeting", "call", "calendly", "scheduled", "confirmed",
+                    "next step", "einladung", "gespr", "entretien", "rozmow", "colloquio", "entrevista")
+IV_RX = re.compile(r"interview|interj|screening|technical (?:call|round)|hiring|recruit|gespr[äa]ch|entretien|rozmow"
+                   r"|colloquio|entrevista|bewerbung|candidate", re.I)
+
+
+def interview_cfg(cfg):
+    out = dict(INTERVIEW_DEFAULTS)
+    out.update(cfg.get("interviews") or {})
+    return out
+
+
+def local_tz():
+    return datetime.now().astimezone().tzinfo
+
+
+def local_tz_name():
+    return os.environ.get("TZ") or time.tzname[0] or "local time"
+
+
+def to_local(dt):
+    return dt.astimezone(local_tz()) if dt.tzinfo else dt.replace(tzinfo=local_tz())
+
+
+def parse_local(date_s, time_s):
+    """The form's date + time (the server's local time) as an aware datetime, or None."""
+    try:
+        return datetime.strptime("%s %s" % (date_s.strip(), (time_s or "09:00").strip()), "%Y-%m-%d %H:%M").astimezone()
+    except ValueError:
+        return None
+
+
+def iv_start(r):
+    try:
+        return to_local(datetime.fromisoformat(r["starts"]))
+    except (TypeError, ValueError):
+        return None
+
+
+# ---- iCalendar
+def ics_unfold(text):
+    return re.sub(r"\r?\n[ \t]", "", text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def ics_unescape(v):
+    return re.sub(r"\\([nN,;\\])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), v or "")
+
+
+def ics_time(value, params):
+    """An aware datetime from DTSTART/DTEND, or None (an all-day date)."""
+    v = value.strip()
+    if params.get("VALUE") == "DATE" or re.fullmatch(r"\d{8}", v):
+        return None
+    m = re.fullmatch(r"(\d{8}T\d{4,6})(Z?)", v)
+    if not m:
+        return None
+    raw = m.group(1) + ("00" if len(m.group(1)) == 13 else "")
+    dt = datetime.strptime(raw, "%Y%m%dT%H%M%S")
+    if m.group(2):
+        return dt.replace(tzinfo=timezone.utc)
+    tz = None
+    if params.get("TZID"):
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(params["TZID"].strip('"'))
+        except Exception:
+            tz = None   # an unknown (e.g. Windows) zone name: taken as local time
+    return dt.replace(tzinfo=tz) if tz else dt.astimezone()
+
+
+def parse_ics(text):
+    """The events of an iCalendar text: [{uid, start, end, summary, location, description, organizer, attendees, url,
+    method, cancelled}]."""
+    events, cur, method = [], None, ""
+    for line in ics_unfold(text):
+        if ":" not in line:
+            continue
+        head, value = line.split(":", 1)
+        name, *ps = head.split(";")
+        name = name.upper()
+        params = dict(p.split("=", 1) for p in ps if "=" in p)
+        params = {k.upper(): v for k, v in params.items()}
+        if name == "METHOD":
+            method = value.strip().upper()
+        elif name == "BEGIN" and value.strip().upper() == "VEVENT":
+            cur = {"attendees": [], "summary": "", "location": "", "description": "", "organizer": "", "url": "", "uid": "",
+                   "start": None, "end": None, "status": ""}
+        elif name == "END" and value.strip().upper() == "VEVENT" and cur is not None:
+            cur["method"] = method
+            cur["cancelled"] = method == "CANCEL" or cur["status"].upper() == "CANCELLED"
+            events.append(cur)
+            cur = None
+        elif cur is not None:
+            if name in ("DTSTART", "DTEND"):
+                cur["start" if name == "DTSTART" else "end"] = ics_time(value, params)
+            elif name in ("SUMMARY", "LOCATION", "DESCRIPTION", "UID", "URL", "STATUS"):
+                cur[name.lower()] = ics_unescape(value).strip()
+            elif name == "ORGANIZER":
+                cur["organizer"] = (params.get("CN") or value.replace("mailto:", "")).strip('"')
+            elif name == "ATTENDEE":
+                cur["attendees"].append((params.get("CN") or value.replace("mailto:", "")).strip('"'))
+    return events
+
+
+def meeting_link(*texts):
+    for t in texts:
+        m = re.search(r"https?://[^\s<>\"')]*(?:zoom\.us|teams\.microsoft|teams\.live|meet\.google|webex|whereby|"
+                      r"around\.co|gather\.town|discord\.gg|skype)[^\s<>\"')]*", t or "", re.I)
+        if m:
+            return m.group(0).rstrip(".,;")
+    return ""
+
+
+def ics_escape(v):
+    return (v or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\r", "").replace("\n", "\\n")
+
+
+def ics_fold(line):
+    out = []
+    while len(line) > 74:
+        out.append(line[:74])
+        line = " " + line[74:]
+    return "\r\n".join(out + [line])
+
+
+def ics_utc(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def interviews_ics(rows, cfg):
+    """An iCalendar text of the interviews (planned ones; cancelled ones as cancelled)."""
+    base = (cfg.get("public_url") or "").rstrip("/")
+    before = interview_cfg(cfg)["before_min"]
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//jobwatch//interviews//EN", "CALSCALE:GREGORIAN",
+             "X-WR-CALNAME:jobwatch interviews"]
+    for r in rows:
+        st = iv_start(r)
+        if not st:
+            continue
+        end = st + timedelta(minutes=r["minutes"] or 60)
+        desc = "\n".join(x for x in (r["role"] and "Role: " + r["role"], r["people"] and "With: " + r["people"],
+                                     r["notes"], base and "%s/interviews/%d" % (base, r["id"])) if x)
+        lines += ["BEGIN:VEVENT", "UID:jobwatch-interview-%d@jobwatch" % r["id"], "DTSTAMP:" + ics_utc(datetime.now(timezone.utc)),
+                  "DTSTART:" + ics_utc(st), "DTEND:" + ics_utc(end),
+                  "SUMMARY:" + ics_escape("Interview: %s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else "")),
+                  "STATUS:" + ("CANCELLED" if r["status"] == "cancelled" else "CONFIRMED")]
+        if r["place"]:
+            lines.append("LOCATION:" + ics_escape(r["place"]))
+        if desc:
+            lines.append("DESCRIPTION:" + ics_escape(desc))
+        if base:
+            lines.append("URL:%s/interviews/%d" % (base, r["id"]))
+        if before and r["status"] == "planned":
+            lines += ["BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:" + ics_escape("Interview: %s" % (r["company"] or "")),
+                      "TRIGGER:-PT%dM" % int(before), "END:VALARM"]
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(ics_fold(x) for x in lines) + "\r\n"
+
+
+def google_calendar_link(r):
+    st = iv_start(r)
+    if not st:
+        return ""
+    end = st + timedelta(minutes=r["minutes"] or 60)
+    return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode({
+        "action": "TEMPLATE", "text": "Interview: %s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else ""),
+        "dates": "%s/%s" % (ics_utc(st), ics_utc(end)), "location": r["place"] or "",
+        "details": "\n".join(x for x in (r["people"] and "With: " + r["people"], r["notes"]) if x)})
+
+
+def calendar_token(cfg_lock=True):
+    """The secret part of the calendar feed's address (made on first use)."""
+    with CFG_LOCK:
+        cfg = load_config()
+        iv = cfg.setdefault("interviews", {})
+        if not iv.get("cal_token"):
+            iv["cal_token"] = secrets.token_urlsafe(24)
+            save_config(cfg)
+        return iv["cal_token"]
+
+
+# ---- storing
+def find_job_for(con, company):
+    """The posting of a company (the one you worked with first), for linking an interview to it."""
+    if not company:
+        return None
+    r = con.execute("SELECT id FROM jobs WHERE lower(company)=lower(?) ORDER BY CASE status WHEN 'applied' THEN 0 "
+                    "WHEN 'saved' THEN 1 ELSE 2 END, first_seen DESC LIMIT 1", (company.strip(),)).fetchone()
+    return r["id"] if r else None
+
+
+def add_interview(con, company, role, start, minutes=60, place="", people="", notes="", job_id=None, source="manual",
+                  uid="", msgid=""):
+    """Saves an interview and returns its id. A posting it belongs to is marked applied."""
+    job_id = job_id or find_job_for(con, company)
+    cur = con.execute("INSERT INTO interviews(job_id, company, role, starts, minutes, place, people, notes, source, uid, msgid, "
+                      "status, created, updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)",
+                      (job_id, (company or "")[:120], (role or "")[:200], start.isoformat(timespec="minutes"),
+                       int(minutes or 60), (place or "")[:500], (people or "")[:500], (notes or "")[:4000], source,
+                       uid or "", msgid or "", now_iso(), now_iso()))
+    if job_id:
+        st = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if st and st["status"] in ("new", "seen", "saved"):
+            set_job_status(con, job_id, "applied")
+    return cur.lastrowid
+
+
+def update_interview(con, iid, **kw):
+    """Changes an interview. A new time starts the reminders again."""
+    r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
+    if not r:
+        return False
+    if "starts" in kw and kw["starts"] != r["starts"]:
+        kw.update(reminded_day=None, reminded_soon=None)
+    kw["updated"] = now_iso()
+    con.execute("UPDATE interviews SET %s WHERE id=?" % ", ".join("%s=?" % k for k in kw), list(kw.values()) + [iid])
+    return True
+
+
+def start_research(iid, force=False):
+    """Researches the company of an interview in the background (Claude with web search), if a key is set."""
+    with CFG_LOCK:
+        cfg = load_config()
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return False
+    with db() as con:
+        r = con.execute("SELECT research_status FROM interviews WHERE id=?", (iid,)).fetchone()
+        if not r or (r["research_status"] == "running" and not force):
+            return False
+        con.execute("UPDATE interviews SET research_status='running', research_error=NULL WHERE id=?", (iid,))
+    threading.Thread(target=research_interview, args=(iid, key), daemon=True).start()
+    return True
+
+
+def research_interview(iid, key):
+    import cvgen
+    try:
+        with db() as con:
+            r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
+        if not r:
+            return
+        try:
+            prof = load_profile()
+            candidate = "%s. %s" % (prof.get("headline", ""), prof.get("summary", ""))
+        except Exception:
+            candidate = ""
+        posting = ""
+        if job:
+            posting = "Title: %s\nLocation: %s\nURL: %s\n\n%s" % (job["title"], job["location"] or "-", job["url"],
+                                                                 job["description"] or "")
+        text, sources = cvgen.company_research(key, r["company"], r["role"], posting, r["people"], r["place"], candidate)
+        with db() as con:
+            con.execute("UPDATE interviews SET research=?, research_sources=?, research_status='done', research_at=?, "
+                        "research_error=NULL WHERE id=?", (text, json.dumps(sources), now_iso(), iid))
+        log.info("Interview %d: company research done (%d sources)", iid, len(sources))
+    except Exception as ex:
+        log.exception("Interview research failed")
+        with db() as con:
+            con.execute("UPDATE interviews SET research_status='error', research_error=? WHERE id=?", (str(ex)[:500], iid))
+
+
+# ---- reminders
+def interview_reminders(now=None):
+    """Sends the due reminders: on the day (from the morning time on) and shortly before. Returns what was sent."""
+    with CFG_LOCK:
+        cfg = load_config()
+    ivc = interview_cfg(cfg)
+    now = now or datetime.now().astimezone()
+    before = timedelta(minutes=int(ivc["before_min"] or 0))
+    try:
+        hh, mm = (int(x) for x in str(ivc["morning"] or "08:00").split(":")[:2])
+    except ValueError:
+        hh, mm = 8, 0
+    base = (cfg.get("public_url") or "").rstrip("/")
+    sent = []
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE status='planned' AND reminded_soon IS NULL")]
+    for r in rows:
+        st = iv_start(r)
+        if not st or now >= st:
+            continue
+        what = "%s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else "")
+        link = r["place"] if (r["place"] or "").startswith("http") else ("%s/interviews/%d" % (base, r["id"]) if base else None)
+        kind = None
+        if before and now >= st - before:
+            kind = "soon"
+            mins = max(1, int((st - now).total_seconds() // 60))
+            title = "Interview in %d min: %s" % (mins, r["company"] or "?")
+            msg = "%s at %s%s%s" % (what, st.strftime("%H:%M"), ("\n" + r["place"]) if r["place"] else "",
+                                    ("\nWith: " + r["people"]) if r["people"] else "")
+            prio = 5
+        elif not r["reminded_day"] and st.date() == now.date() and now >= st.replace(hour=hh, minute=mm):
+            kind = "day"
+            title = "Interview today at %s: %s" % (st.strftime("%H:%M"), r["company"] or "?")
+            msg = "%s, %d min%s%s" % (what, r["minutes"] or 60, ("\n" + r["place"]) if r["place"] else "",
+                                      ("\nWith: " + r["people"]) if r["people"] else "")
+            prio = 4
+        if not kind:
+            continue
+        if cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic"):
+            try:
+                send_ntfy(cfg, title, msg, click=link, priority=prio)
+            except Exception:
+                log.exception("Interview reminder failed")
+                continue   # tried again on the next tick
+        with db() as con:
+            con.execute("UPDATE interviews SET reminded_day=COALESCE(reminded_day, ?)%s WHERE id=?" % (
+                ", reminded_soon=?" if kind == "soon" else ""), ([now_iso(), now_iso()] if kind == "soon" else [now_iso()]) + [r["id"]])
+        sent.append((r["id"], kind))
+    return sent
+
+
+def interview_loop():
+    """Every 30 s: the reminders; every 30 min: the mailbox scan for interview e-mails (in the background)."""
+    time.sleep(8)
+    while True:
+        try:
+            interview_reminders()
+            with db() as con:
+                last = con.execute("SELECT v FROM meta WHERE k='iv_scan_at'").fetchone()
+            if not last or time.time() - float(last["v"]) > IV_SCAN_EVERY:
+                with db() as con:
+                    con.execute("INSERT OR REPLACE INTO meta(k, v) VALUES('iv_scan_at', ?)", (str(time.time()),))
+                threading.Thread(target=scan_interview_mails, daemon=True).start()
+        except Exception:
+            log.exception("Interview loop error")
+        time.sleep(30)
+
+
+# ---- the mailbox
+def read_interview_mails(cfg, limit=25):
+    """The new e-mails of the last days whose subject looks like an interview: [(msgid, sender, subject, date, msg)].
+    Read-only (PEEK): nothing is marked as read."""
+    import email as email_lib
+    import email.policy
+    import imaplib
+    ivc, ms = interview_cfg(cfg), cfg.get("mail_source") or {}
+    host, port, user, pw = mail_login(cfg)
+    since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - 86400 * int(ivc["mail_days"] or 14)))
+    out = []
+    with imaplib.IMAP4_SSL(host, port, timeout=30) as M:
+        M.login(user, pw)
+        typ, _ = M.select('"%s"' % (ms.get("folder") or "INBOX").replace('"', ""), readonly=True)
+        if typ != "OK":
+            raise RuntimeError("cannot open the mail folder")
+        crit = ["OR"] * (len(IV_MAIL_KEYWORDS) - 1)
+        for k in IV_MAIL_KEYWORDS:
+            crit += ["SUBJECT", '"%s"' % k]
+        typ, data = M.search(None, "SINCE", since, *crit)
+        ids = data[0].split() if typ == "OK" and data and data[0] else []
+        with db() as con:
+            done = {r["msgid"] for r in con.execute("SELECT msgid FROM interview_mail_seen")}
+        for num in sorted(ids, key=int, reverse=True):
+            typ, data = M.fetch(num, "(BODY.PEEK[])")
+            if typ != "OK" or not data or not isinstance(data[0], tuple):
+                continue
+            msg = email_lib.message_from_bytes(data[0][1], policy=email.policy.default)
+            msgid = (msg.get("Message-ID") or "").strip() or hashlib.sha1(data[0][1][:2000]).hexdigest()
+            if msgid in done:
+                continue
+            out.append((msgid, str(msg.get("From", "")), str(msg.get("Subject", "")), str(msg.get("Date", "")), msg))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def mail_calendar(msg):
+    """The iCalendar texts attached to an e-mail."""
+    out = []
+    for part in msg.walk():
+        ct, fn = part.get_content_type(), (part.get_filename() or "").lower()
+        if ct in ("text/calendar", "application/ics") or fn.endswith(".ics"):
+            try:
+                c = part.get_content()
+            except Exception:
+                c = part.get_payload(decode=True) or b""
+            out.append(c.decode("utf-8", "replace") if isinstance(c, bytes) else c)
+    return out
+
+
+def interview_from_mail(cfg, sender, subject, sent, msg, companies):
+    """What an e-mail says about an interview: {company, role, start, minutes, place, people, notes, uid, cancelled}
+    or None. A calendar invitation gives the exact time; Claude (if set) decides whether it is an interview and reads
+    the e-mails that have no invitation. Without Claude only invitations that look like an interview count."""
+    import cvgen
+    text, _links = mail_body(msg)
+    events = [ev for c in mail_calendar(msg) for ev in parse_ics(c)]
+    ev = next((x for x in events if x["start"] or x["cancelled"]), None)
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    found = None
+    if key:
+        cal = ""
+        if ev:
+            cal = "Summary: %s\nStart: %s\nEnd: %s\nLocation: %s\nOrganizer: %s\nAttendees: %s\nStatus: %s\n\n%s" % (
+                ev["summary"], ev["start"] and to_local(ev["start"]).isoformat(timespec="minutes"),
+                ev["end"] and to_local(ev["end"]).isoformat(timespec="minutes"), ev["location"], ev["organizer"],
+                ", ".join(ev["attendees"][:10]), "cancelled" if ev["cancelled"] else "confirmed", ev["description"][:2500])
+        d = cvgen.interview_from_email(key, sender, subject, sent, text, cal, local_tz_name(),
+                                       datetime.now().astimezone().isoformat(timespec="minutes"), companies)
+        if not d.get("is_interview"):
+            return None
+        start = None
+        if ev and ev["start"]:
+            start = to_local(ev["start"])
+        elif d.get("start"):
+            try:
+                start = to_local(datetime.fromisoformat(d["start"]))
+            except ValueError:
+                start = None
+        minutes = d.get("minutes") or (int((ev["end"] - ev["start"]).total_seconds() // 60) if ev and ev["start"] and ev["end"] else 60)
+        found = {"company": d.get("company") or "", "role": d.get("role") or "", "start": start, "minutes": minutes or 60,
+                 "place": d.get("place") or (ev and (meeting_link(ev["location"], ev["description"]) or ev["location"])) or "",
+                 "people": d.get("people") or "", "notes": d.get("summary") or "", "uid": (ev or {}).get("uid", ""),
+                 "cancelled": bool(d.get("cancelled") or (ev and ev["cancelled"]))}
+    elif ev and IV_RX.search(" ".join((subject, ev["summary"], ev["description"][:1500]))):
+        mins = int((ev["end"] - ev["start"]).total_seconds() // 60) if ev["start"] and ev["end"] else 60
+        org = re.sub(r".*@", "", ev["organizer"]) if "@" in ev["organizer"] else ev["organizer"]
+        found = {"company": org.split(".")[0].title() if "@" in ev["organizer"] else org, "role": "", "minutes": mins or 60,
+                 "start": to_local(ev["start"]) if ev["start"] else None, "notes": ev["summary"],
+                 "place": meeting_link(ev["location"], ev["description"]) or ev["location"],
+                 "people": ", ".join(a for a in ev["attendees"][:6] if "@" not in a), "uid": ev["uid"],
+                 "cancelled": ev["cancelled"]}
+    return found
+
+
+def scan_interview_mails():
+    """Finds interviews in the mailbox (new e-mails only), saves them, and tells you on ntfy. Returns a message."""
+    if not IV_LOCK.acquire(blocking=False):
+        return "A mailbox scan is already running."
+    try:
+        with CFG_LOCK:
+            cfg = load_config()
+        if not interview_cfg(cfg)["from_mail"]:
+            return "Finding interviews in the e-mails is turned off."
+        try:
+            mails = read_interview_mails(cfg)
+        except Exception as ex:
+            return "Cannot read the mailbox: %s" % ex
+        with db() as con:
+            companies = [r["company"] for r in con.execute(
+                "SELECT DISTINCT company FROM jobs WHERE company<>'' AND (status IN ('applied','saved') OR id IN "
+                "(SELECT job_id FROM cvs)) LIMIT 80")]
+        added, changed, errs = [], 0, []
+        for msgid, sender, subject, sent, msg in mails:
+            try:
+                found = interview_from_mail(cfg, sender, subject, sent, msg, companies)
+            except Exception as ex:
+                errs.append("%s: %s" % (subject[:50], ex))
+                continue   # tried again next time
+            with db() as con:
+                if found and (found["start"] or found["cancelled"]):
+                    same = None
+                    if found["uid"]:
+                        same = con.execute("SELECT * FROM interviews WHERE uid=?", (found["uid"],)).fetchone()
+                    if not same and found["start"]:
+                        day = found["start"].date().isoformat()
+                        same = con.execute("SELECT * FROM interviews WHERE lower(company)=lower(?) AND substr(starts,1,10)=?",
+                                           (found["company"], day)).fetchone()
+                    if not same and found["cancelled"] and found["company"]:
+                        same = con.execute("SELECT * FROM interviews WHERE lower(company)=lower(?) AND status='planned' "
+                                           "ORDER BY starts LIMIT 1", (found["company"],)).fetchone()
+                    if found["cancelled"]:
+                        if same and same["status"] == "planned":
+                            update_interview(con, same["id"], status="cancelled")
+                            changed += 1
+                            notify_interview(cfg, "Interview cancelled: %s" % (same["company"] or "?"),
+                                             "%s – the e-mail “%s” cancels it." % (fmt_iv_when(same), subject[:80]), same["id"])
+                    elif same:
+                        new = found["start"].isoformat(timespec="minutes")
+                        if new != same["starts"]:
+                            update_interview(con, same["id"], starts=new, minutes=found["minutes"],
+                                             place=found["place"] or same["place"], status="planned")
+                            changed += 1
+                            notify_interview(cfg, "Interview moved: %s" % (same["company"] or "?"),
+                                             "New time: %s" % fmt_iv_when({"starts": new}), same["id"])
+                    else:
+                        iid = add_interview(con, found["company"], found["role"], found["start"], found["minutes"],
+                                            found["place"], found["people"], found["notes"], source="mail",
+                                            uid=found["uid"], msgid=msgid)
+                        added.append(iid)
+                con.execute("INSERT OR REPLACE INTO interview_mail_seen(msgid, processed_at, found) VALUES(?,?,?)",
+                            (msgid, now_iso(), 1 if found else 0))
+        for iid in added:
+            with db() as con:
+                r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
+            notify_interview(cfg, "Interview found: %s" % (r["company"] or "?"),
+                             "%s%s\nFrom your e-mail; check it in jobwatch." % (
+                                 fmt_iv_when(r), (" – " + r["role"]) if r["role"] else ""), iid)
+            if interview_cfg(cfg)["research"]:
+                start_research(iid)
+        if errs:
+            log.warning("Interview e-mail errors: %s", "; ".join(errs))
+        msg = "%d e-mail(s) checked: %d new interview(s)%s." % (len(mails), len(added),
+                                                               (", %d changed" % changed) if changed else "")
+        return msg + (" Errors: %s" % "; ".join(errs)[:300] if errs else "")
+    finally:
+        IV_LOCK.release()
+
+
+def notify_interview(cfg, title, message, iid):
+    if not (cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic")):
+        return
+    base = (cfg.get("public_url") or "").rstrip("/")
+    try:
+        send_ntfy(cfg, title, message, click=("%s/interviews/%d" % (base, iid)) if base else None, priority=4)
+    except Exception:
+        log.exception("Interview notification failed")
+
+
+def fmt_iv_when(r):
+    st = iv_start(r)
+    return st.strftime("%a %d %b %Y, %H:%M") if st else "time not set"
+
+
+def rel_when(st, now=None):
+    now = now or datetime.now().astimezone()
+    days = (st.date() - now.date()).days
+    if st < now:
+        return "past"
+    if days == 0:
+        mins = int((st - now).total_seconds() // 60)
+        return "in %d min" % mins if mins < 60 else "today"
+    return "tomorrow" if days == 1 else "in %d days" % days
+
+
+# ---- pages
+def md_inline(s):
+    s = e(s)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2" target="_blank" rel="noopener noreferrer">\1</a>', s)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    return s
+
+
+def md_html(text):
+    """A small, safe renderer for the research briefing: headings, bullet lists, paragraphs, bold and links."""
+    out, in_list = [], False
+    for line in (text or "").splitlines():
+        t = line.strip()
+        bullet = re.match(r"(?:[-*•]|\d+[.)])\s+(.*)", t)
+        if bullet:
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append("<li>%s</li>" % md_inline(bullet.group(1)))
+            continue
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+        if not t:
+            continue
+        if t.startswith("#"):
+            out.append("<h3>%s</h3>" % md_inline(t.lstrip("#").strip()))
+        else:
+            out.append("<p>%s</p>" % md_inline(t))
+    if in_list:
+        out.append("</ul>")
+    return "".join(out)
+
+
+def iv_form(r=None, job=None, action="/interviews"):
+    """The add / edit form of an interview."""
+    r = r or {}
+    st = iv_start(r) if r.get("starts") else None
+    company = r.get("company") or (job and job["company"]) or ""
+    role = r.get("role") or (job and job["title"]) or ""
+    return ('<form method="post" action="' + e(action) + '" class="ui-grid">'
+            + (('<input type="hidden" name="job_id" value="%s">' % e(job["id"])) if job else "")
+            + ui_field("iv_company", "Company", company, extra=" required maxlength=\"120\"")
+            + ui_field("iv_role", "Role", role, extra=" maxlength=\"200\"")
+            + ui_field("iv_date", "Date", st.strftime("%Y-%m-%d") if st else "", "date", extra=" required")
+            + ui_field("iv_time", "Time", st.strftime("%H:%M") if st else "", "time", "Your local time.", " required")
+            + ui_field("iv_minutes", "Length (minutes)", r.get("minutes") or 60, "number", extra=' min="5" max="600"')
+            + ui_field("iv_place", "Where", r.get("place") or "", help_="Meeting link (Zoom, Teams, Meet…), address or phone.")
+            + ui_field("iv_people", "With", r.get("people") or "", help_="Interviewers' names and titles, if you know them.",
+                       wide=True)
+            + '<div class="wide"><label for="iv_notes">Notes</label><textarea class="textarea" id="iv_notes" name="iv_notes" '
+              'rows="3">%s</textarea></div>' % e(r.get("notes") or "")
+            + '<div class="wide ui-inline"><button class="btn btn-primary btn-sm" name="act" value="save">%s</button></div></form>'
+            % ("Save changes" if r.get("id") else "Add interview"))
+
+
+def iv_row(r, logos, now):
+    st = iv_start(r)
+    end = st + timedelta(minutes=r["minutes"] or 60) if st else None
+    badges = []
+    if r["source"] == "mail":
+        badges.append('<span class="badge badge-soft badge-info">%s from e-mail</span>' % ic("mail"))
+    if r["status"] != "planned":
+        badges.append('<span class="badge badge-soft badge-neutral">%s</span>' % e(INTERVIEW_STATUS.get(r["status"], r["status"])))
+    rs = r["research_status"]
+    if rs == "done":
+        badges.append('<span class="badge badge-soft badge-success">%s research ready</span>' % ic("travel_explore"))
+    elif rs == "running":
+        badges.append('<span class="badge badge-soft badge-warning">%s researching…</span>' % ic("hourglass_top"))
+    join = ('<a class="btn btn-sm btn-primary" href="%s" target="_blank" rel="noopener noreferrer">%s Join</a>' % (
+        e(r["place"]), ic("videocam"))) if (r["place"] or "").startswith("http") and r["status"] == "planned" else ""
+    gcal = google_calendar_link(r)
+    return ('<div class="ui-row iv%s"><div class="iv-when"><b>%s</b><span>%s</span><small>%s</small></div>'
+            '<div class="ui-row-main"><div class="ui-row-title">%s<a href="/interviews/%d">%s</a>%s</div>'
+            '<div class="muted iv-sub">%s%s</div><div class="chips" style="margin-top:6px">%s</div></div>'
+            '<div class="ui-btns">%s<a class="btn btn-sm btn-outline" href="/interviews/%d">Open</a>%s'
+            '<a class="btn btn-sm btn-ghost" href="/interviews/%d.ics" title="Download for your calendar">%s .ics</a></div></div>') % (
+        " past" if (st and st < now) or r["status"] != "planned" else "",
+        e(st.strftime("%a %d %b")) if st else "?", e("%s–%s" % (st.strftime("%H:%M"), end.strftime("%H:%M"))) if st else "",
+        e(rel_when(st, now)) if st and r["status"] == "planned" else "",
+        logo_html(r["company"], logos, 28), r["id"], e(r["company"] or "?"),
+        (' <span class="muted" style="font-weight:400">· %s</span>' % e(r["role"])) if r["role"] else "",
+        ("%s %s" % (ic("location_on"), e(r["place"][:80]))) if r["place"] else "",
+        (" · %s %s" % (ic("person"), e(r["people"][:120]))) if r["people"] else "",
+        "".join(badges), join, r["id"],
+        ('<a class="btn btn-sm btn-ghost" href="%s" target="_blank" rel="noopener noreferrer" title="Add to Google Calendar">'
+         '%s Google</a>' % (e(gcal), ic("calendar_month"))) if gcal else "", r["id"], ic("download"))
+
+
+def interviews_page(q, flash=""):
+    with CFG_LOCK:
+        cfg = load_config()
+    ivc = interview_cfg(cfg)
+    now = datetime.now().astimezone()
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM interviews ORDER BY starts")]
+        job = con.execute("SELECT * FROM jobs WHERE id=?", (q.get("job"),)).fetchone() if q.get("job") else None
+    logos = logo_files()
+    soon = [r for r in rows if r["status"] == "planned" and (iv_start(r) or now) >= now - timedelta(hours=2)]
+    past = [r for r in reversed(rows) if r not in soon]
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    ntfy_on = cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic")
+    try:
+        mail_login(cfg)
+        mailbox = True
+    except Exception:
+        mailbox = False
+    feed = "%s/calendar/%s.ics" % ((cfg.get("public_url") or "").rstrip("/"), calendar_token())
+    head = ('<div class="ui-head"><h1>Interviews</h1><p>Your interviews, with a reminder on your phone on the day (from %s) and '
+            '%d minutes before.%s</p></div>') % (
+        e(ivc["morning"]), int(ivc["before_min"] or 0),
+        "" if ntfy_on else ' <b>Push notifications are off:</b> turn them on in <a href="/settings#notify">Settings → Notifications</a>.')
+    add = ui_sec("add", "Add an interview", "From a posting: open it and click “Interview”. "
+                 + ("Claude then researches the company and the interviewers on the web." if key and ivc["research"] else ""),
+                 iv_form(job=job))
+    if not job and rows:
+        add = add.replace('<section class="ui-section" id="add"', '<details class="ui-section iv-add" id="add"><summary>%s Add an interview</summary><section' % ic("add"), 1)
+        add += "</details>"
+    upcoming = ui_sec("upcoming", "Coming up", "", "".join(iv_row(r, logos, now) for r in soon) if soon else
+                      '<div class="ui-empty">No interviews planned.%s</div>' % (
+                          " When an invitation arrives by e-mail, it shows up here." if mailbox and ivc["from_mail"] else ""))
+    upcoming = upcoming.replace('<div class="ui-body">', '<div class="ui-body flush">', 1)
+    old = ""
+    if past:
+        old = ('<details class="ui-section iv-past"><summary>Past and cancelled · %d</summary>%s</details>' % (
+            len(past), "".join(iv_row(r, logos, now) for r in past)))
+    chk = lambda b: " checked" if b else ""
+    settings = ui_sec("ivset", "Reminders and calendar", "",
+        '<form method="post" action="/interviews/settings" class="ui-grid">'
+        + ui_field("iv_morning", "Reminder on the day, at", ivc["morning"], "time", "Sent on the interview's day.")
+        + ui_field("iv_before", "And before it (minutes)", ivc["before_min"], "number", "0: none.", ' min="0" max="1440"')
+        + '<div><label>From the mailbox</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
+          'class="toggle toggle-sm toggle-primary" name="iv_from_mail"%s> Find interviews in my e-mails</label><span class="help">%s'
+          '</span></div>' % (chk(ivc["from_mail"]),
+                             ("Every 30 minutes the e-mails of the last %d days whose subject looks like an interview are read "
+                              "(calendar invitations directly%s). Nothing is marked as read." % (
+                                  int(ivc["mail_days"] or 14), ", the others by Claude" if key else "; set a Claude key to "
+                                  "read the others too")) if mailbox else
+                             'Needs a mailbox: the e-mail account in <a href="/settings#notify">Settings → Notifications</a>.')
+        + '<div><label>Research</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
+          'class="toggle toggle-sm toggle-primary" name="iv_research"%s> Research the company for each new interview</label>'
+          '<span class="help">Claude searches the web: the company, recent news, the interviewers\' professional background, '
+          'likely questions. About 10–30 cents per interview.%s</span></div>' % (
+              chk(ivc["research"]), "" if key else ' Needs a <a href="/settings#claude">Claude API key</a>.')
+        + '<div class="wide ui-inline"><button class="btn btn-sm btn-primary">Save</button>'
+          '<button class="btn btn-sm btn-outline" formaction="/interviews/scan"%s>%s Check the e-mails now</button></div></form>'
+          % ("" if mailbox and ivc["from_mail"] else " disabled", ic("mail"))
+        + '<div class="iv-feed"><label for="iv_feed">Calendar feed</label><div class="join" style="width:100%%">'
+          '<input class="input join-item ui-mono" id="iv_feed" value="%s" readonly style="flex:1">'
+          '<button type="button" class="btn join-item" onclick="var i=document.getElementById(\'iv_feed\');i.select();'
+          'navigator.clipboard&&navigator.clipboard.writeText(i.value);this.textContent=\'Copied\'">Copy</button></div>'
+          '<span class="help">Subscribe to it in your calendar app (“add calendar from URL”) to see the interviews there. '
+          'It works where the calendar can reach this address (Google Calendar needs it to be reachable from the internet; '
+          'otherwise use “Google” or “.ics” on an interview). Keep it private: anyone with it can see your interviews.</span></div>'
+          % e(feed))
+    return page("Interviews", '<div class="ui">%s%s%s%s%s</div>' % (head, add, upcoming, old, settings), flash)
+
+
+def interview_page(iid, flash=""):
+    with db() as con:
+        r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
+        job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
+    if not r:
+        return page("Not found", '<div class="ui"><section class="ui-section"><div class="ui-body ui-empty">This interview '
+                                 'is not here any more. <a href="/interviews">All interviews</a></div></section></div>', flash)
+    r = dict(r)
+    now = datetime.now().astimezone()
+    with CFG_LOCK:
+        cfg = load_config()
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    st = iv_start(r)
+    act = lambda v, label, cls="btn-outline": '<button class="btn btn-sm %s" name="act" value="%s">%s</button>' % (cls, v, label)
+    acts = "".join([
+        act("done", ic("task_alt") + " Mark done") if r["status"] == "planned" else act("planned", ic("undo") + " Planned again"),
+        act("cancelled", "Mark cancelled", "btn-ghost") if r["status"] == "planned" else "",
+        act("research", ic("travel_explore") + (" Research again" if r["research"] else " Research the company"))
+        if key and r["research_status"] != "running" else ""])
+    rs = r["research_status"]
+    if rs == "done" and r["research"]:
+        try:
+            srcs = json.loads(r["research_sources"] or "[]")
+        except ValueError:
+            srcs = []
+        research = '<div class="iv-research">%s</div>%s<p class="muted" style="font-size:13px">Researched %s by Claude with web search: check anything important.</p>' % (
+            md_html(r["research"]),
+            ('<details class="why"><summary>Sources · %d</summary><ul class="iv-src">%s</ul></details>' % (len(srcs), "".join(
+                '<li><a href="%s" target="_blank" rel="noopener noreferrer">%s</a></li>' % (e(u), e(t[:120])) for t, u in srcs[:40])))
+            if srcs else "", e(fmt_dt(r["research_at"])))
+    elif rs == "running":
+        research = ('<p>%s Claude is researching the company and the interviewers… This takes a minute or two; the page '
+                    'updates by itself.</p>' % ic("hourglass_top"))
+    elif rs == "error":
+        research = '<div class="ui-err">The research failed: %s</div>' % e(r["research_error"] or "")
+    else:
+        research = ('<p class="muted">Not researched yet.%s</p>' % (
+            "" if key else ' Set a <a href="/settings#claude">Claude API key</a> to have the company researched.'))
+    gcal = google_calendar_link(r)
+    info = ('<div class="ui-head"><a href="/interviews" style="font-size:13px">%s Interviews</a><div class="job-head" style="margin-top:6px">%s'
+            '<div><h1>%s</h1><p style="margin-top:2px"><b>%s</b>%s · %d min · %s</p></div></div>'
+            '<div class="chips" style="margin-top:10px">%s%s%s</div>'
+            '<div class="ui-btns" style="margin-top:12px">%s%s<a class="btn btn-sm btn-ghost" href="/interviews/%d.ics">%s .ics</a>%s</div></div>') % (
+        ic("arrow_back"), logo_html(r["company"], logo_files(), 52),
+        e("%s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else "")),
+        e(fmt_iv_when(r)), (" (%s)" % e(rel_when(st, now))) if st and r["status"] == "planned" else "", r["minutes"] or 60,
+        e(INTERVIEW_STATUS.get(r["status"], r["status"])),
+        ('<span class="chip">%s %s</span>' % (ic("location_on"), e(r["place"]))) if r["place"] else "",
+        ('<span class="chip">%s %s</span>' % (ic("person"), e(r["people"]))) if r["people"] else "",
+        '<span class="chip">%s %s</span>' % (ic("notifications"), e(
+            "reminded" if r["reminded_soon"] else ("reminded on the day" if r["reminded_day"] else "reminders on")))
+        if r["status"] == "planned" else "",
+        ('<a class="btn btn-sm btn-primary" href="%s" target="_blank" rel="noopener noreferrer">%s Join</a>' % (
+            e(r["place"]), ic("videocam"))) if (r["place"] or "").startswith("http") else "",
+        ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">%s Add to Google Calendar</a>' % (
+            e(gcal), ic("calendar_month"))) if gcal else "", r["id"], ic("download"),
+        ('<a class="btn btn-sm btn-ghost" href="/cv/%s">The posting and your CV</a>' % e(urllib.parse.quote(job["id"], safe="")))
+        if job else "")
+    body = (info
+            + ui_sec("prep", "Preparation", "", research
+                     + '<form method="post" action="/interviews/%d" class="ui-inline" style="margin-top:12px">%s</form>' % (r["id"], acts))
+            + (ui_sec("notes", "Notes", "", '<p style="white-space:pre-wrap">%s</p>' % e(r["notes"])) if r["notes"] else "")
+            + '<details class="ui-section iv-add"><summary>Edit</summary><div class="ui-body">%s'
+              '<form method="post" action="/interviews/%d" style="margin-top:14px"><details><summary class="text-error" '
+              'style="cursor:pointer">Delete this interview…</summary><button class="btn btn-sm btn-error" name="act" '
+              'value="delete" style="margin-top:8px">Yes, delete it</button></details></form></div></details>' % (
+                  iv_form(r, action="/interviews/%d" % r["id"]), r["id"]))
+    return page("Interview: %s" % (r["company"] or "?"), '<div class="ui">%s</div>' % body, flash,
+                refresh=10 if rs == "running" else 0)
+
+
+def interview_form_values(f):
+    start = parse_local(f.get("iv_date", ""), f.get("iv_time", ""))
+    try:
+        minutes = max(5, min(600, int(f.get("iv_minutes") or 60)))
+    except ValueError:
+        minutes = 60
+    return start, minutes
+
+
+def interview_post(path, f):
+    """POST /interviews…: returns where to go (with a message)."""
+    if path == "/interviews/settings":
+        with CFG_LOCK:
+            cfg = load_config()
+            iv = cfg.setdefault("interviews", {})
+            if re.fullmatch(r"\d{1,2}:\d{2}", f.get("iv_morning", "")):
+                iv["morning"] = f["iv_morning"]
+            try:
+                iv["before_min"] = max(0, min(1440, int(f.get("iv_before") or 0)))
+            except ValueError:
+                pass
+            iv["from_mail"] = "iv_from_mail" in f
+            iv["research"] = "iv_research" in f
+            save_config(cfg)
+        return "/interviews", "Saved."
+    if path == "/interviews/scan":
+        return "/interviews", scan_interview_mails()
+    if path == "/interviews":
+        start, minutes = interview_form_values(f)
+        if not start or not f.get("iv_company", "").strip():
+            return "/interviews#add", "Give the company, the date and the time."
+        with db() as con:
+            job_id = f.get("job_id") or None
+            if job_id and not con.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone():
+                job_id = None
+            iid = add_interview(con, f["iv_company"].strip(), f.get("iv_role", "").strip(), start, minutes,
+                                f.get("iv_place", "").strip(), f.get("iv_people", "").strip(), f.get("iv_notes", "").strip(),
+                                job_id=job_id)
+        with CFG_LOCK:
+            cfg = load_config()
+        researching = interview_cfg(cfg)["research"] and start_research(iid)
+        return "/interviews/%d" % iid, "Interview added; you get a reminder on the day and before it." + (
+            " Claude is researching the company." if researching else "")
+    m = re.fullmatch(r"/interviews/(\d+)", path)
+    if not m:
+        return "/interviews", "Nothing to do."
+    iid, act = int(m.group(1)), f.get("act", "")
+    with db() as con:
+        if not con.execute("SELECT 1 FROM interviews WHERE id=?", (iid,)).fetchone():
+            return "/interviews", "This interview is not here any more."
+        if act == "save":
+            start, minutes = interview_form_values(f)
+            if not start or not f.get("iv_company", "").strip():
+                return "/interviews/%d" % iid, "Give the company, the date and the time."
+            update_interview(con, iid, company=f["iv_company"].strip()[:120], role=f.get("iv_role", "").strip()[:200],
+                             starts=start.isoformat(timespec="minutes"), minutes=minutes,
+                             place=f.get("iv_place", "").strip()[:500], people=f.get("iv_people", "").strip()[:500],
+                             notes=f.get("iv_notes", "").strip()[:4000])
+            return "/interviews/%d" % iid, "Saved."
+        if act in INTERVIEW_STATUS:
+            update_interview(con, iid, status=act)
+            return "/interviews/%d" % iid, "Marked %s." % INTERVIEW_STATUS[act].lower()
+        if act == "delete":
+            con.execute("DELETE FROM interviews WHERE id=?", (iid,))
+            return "/interviews", "Interview deleted."
+    if act == "research":
+        return "/interviews/%d" % iid, ("Claude is researching the company…" if start_research(iid, force=True)
+                                        else "Set a Claude API key first (Settings → Claude API).")
+    return "/interviews/%d" % iid, "Nothing to do."
+
+
 def scheduler():
     time.sleep(5)
     while True:
@@ -2385,6 +3230,20 @@ nav.tabs a:hover{background:var(--soft);text-decoration:none}nav.tabs a.on{backg
   border-radius:6px;background:none;color:var(--muted);cursor:pointer;font-size:12.5px}
 .pp-x:hover,.pp-x:focus-visible{background:color-mix(in oklab,var(--color-error) 16%,transparent);color:var(--color-error)}
 .pp-x.sure{background:var(--color-error);color:var(--color-error-content);font-weight:600}
+.iv{align-items:center}.iv.past{opacity:.7}
+.iv-when{flex:none;width:96px;display:flex;flex-direction:column;line-height:1.25}
+.iv-when b{font-size:15px}.iv-when span{font-size:13.5px}.iv-when small{color:var(--acc);font-weight:600;font-size:12.5px}
+.iv-sub{font-size:13.5px;margin-top:2px;overflow-wrap:anywhere}
+.ui-body.flush{padding:0}
+details.iv-add,details.iv-past{padding:0}
+details.iv-add>summary,details.iv-past>summary{cursor:pointer;padding:14px 18px;font-weight:650}
+details.iv-add>section{border:0;margin:0;background:none}
+details.iv-past>.ui-row:first-of-type{border-top:1px solid var(--line)}
+.iv-research h3{font-size:15px;font-weight:650;margin:18px 0 6px}.iv-research h3:first-child{margin-top:0}
+.iv-research ul{margin:0 0 8px 20px;padding:0;list-style:disc}.iv-research li{margin:3px 0}
+.iv-src{margin:6px 0 0 18px;list-style:disc;font-size:13px}
+.iv-feed{margin-top:16px}
+@media (max-width:640px){.iv{flex-wrap:wrap}.iv-when{width:auto;flex-direction:row;gap:8px;align-items:baseline}}
 .rf-wrap{position:relative}
 .rf-menu{position:absolute;right:0;top:100%;margin-top:6px;z-index:20;min-width:230px;width:max-content;max-width:calc(100vw - 32px);padding:10px 12px;background:var(--card);
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 10px 28px rgba(0,0,0,.25);
@@ -2660,7 +3519,8 @@ def refresh_menu():
 
 def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
-    tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/sources", "Sources"),
+    tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/interviews", "Interviews"),
+            ("/sources", "Sources"),
             ("/profile", "CV profile"), ("/settings", "Settings")]
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
@@ -3154,6 +4014,7 @@ def job_detail_html(jid, back="/", modal=False):
         s_, ic(icn), "Seen" if s_ == "seen" else t) for s_, icn, t in STATUS_BUTTONS if s_ != r["status"])
     cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ' + ic("check") + '</a>' if has_cv else
               '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
+    cv_btn += '<a class="btn btn-sm btn-outline" href="/interviews?job=%s#add">%s Interview</a>' % (qid, ic("event"))
     text = r["desc_html"] or clean_posting_html(r["description"] or "")
     loading = not r["desc_html"]
     body = ('<div class="ui jd">%s'
@@ -4930,7 +5791,7 @@ class Handler(BaseHTTPRequestHandler):
     def require_login(self):
         """Sends 401 and returns False unless the request is allowed."""
         path = urllib.parse.urlparse(self.path).path
-        if path in AUTH_PUBLIC_PATHS or auth_ok(self.headers.get("Authorization"), AUTH_PASSWORD):
+        if path in AUTH_PUBLIC_PATHS or re.fullmatch(r"/calendar/[A-Za-z0-9_-]{20,}\.ics", path) or auth_ok(self.headers.get("Authorization"), AUTH_PASSWORD):
             return True
         body = "Login required.".encode("utf-8")
         self.send_response(401)
@@ -4949,6 +5810,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(b)
+
+    def send_bytes(self, data, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename)
+        self.end_headers()
+        self.wfile.write(data)
 
     def redirect(self, to):
         self.send_response(303)
@@ -4989,6 +5860,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(jobs_page(q))
             if u.path == "/sources":
                 return self.send_html(sources_page(q.get("msg", "")))
+            if u.path == "/interviews":
+                return self.send_html(interviews_page(q, q.get("msg", "")))
+            m = re.fullmatch(r"/interviews/(\d+)(\.ics)?", u.path)
+            if m:
+                if m.group(2):
+                    with db() as con:
+                        rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE id=?", (int(m.group(1)),))]
+                    with CFG_LOCK:
+                        cfg_ = load_config()
+                    return self.send_bytes(interviews_ics(rows, cfg_).encode("utf-8"), "text/calendar; charset=utf-8",
+                                           "interview-%s.ics" % m.group(1))
+                return self.send_html(interview_page(int(m.group(1)), q.get("msg", "")))
+            m = re.fullmatch(r"/calendar/([A-Za-z0-9_-]{20,})\.ics", u.path)
+            if m:
+                with CFG_LOCK:
+                    cfg_ = load_config()
+                if not secrets.compare_digest(m.group(1), interview_cfg(cfg_).get("cal_token") or "-"):
+                    return self.send_html("Not found", 404)
+                with db() as con:
+                    rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE status<>'cancelled' OR "
+                                                          "starts > ? ORDER BY starts", (
+                                                              (datetime.now() - timedelta(days=60)).isoformat(),))]
+                return self.send_bytes(interviews_ics(rows, cfg_).encode("utf-8"), "text/calendar; charset=utf-8")
             if u.path == "/outreach":
                 return self.send_html(outreach_page(q, q.get("msg", "")))
             if u.path == "/outreach/lookup":
@@ -5137,6 +6031,10 @@ class Handler(BaseHTTPRequestHandler):
             f = self.form()
             if u.path == "/profile/import":
                 return self.profile_import_text(f.get("cv_text", ""))
+            if u.path == "/interviews" or u.path.startswith("/interviews/"):
+                to, msg = interview_post(u.path, f)
+                path_, _, frag = to.partition("#")
+                return self.redirect(path_ + "?msg=" + urllib.parse.quote(msg) + ("#" + frag if frag else ""))
             if u.path == "/reset-jobs":
                 reset_job_cache()
                 if f.get("refetch"):
@@ -5311,6 +6209,7 @@ def main():
         cfg = load_config()
     log.info("jobwatch starting: port %d, ntfy topic: %s", PORT, cfg["ntfy"]["topic"])
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=interview_loop, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

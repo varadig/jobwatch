@@ -1528,3 +1528,194 @@ class HeaderRefreshMenu(unittest.TestCase):
         html_ = app.page("x", "<p>x</p>")
         self.assertNotIn("Test push", html_)
         self.assertIn('class="rf-wrap"', html_)
+
+
+ICS_INVITE = (
+    "BEGIN:VCALENDAR\r\n"
+    "METHOD:REQUEST\r\n"
+    "BEGIN:VEVENT\r\n"
+    "UID:abc123@google.com\r\n"
+    "DTSTART;TZID=Europe/Budapest:20301203T140000\r\n"
+    "DTEND;TZID=Europe/Budapest:20301203T144500\r\n"
+    "SUMMARY:Interview: Unity Developer\\, Acme\r\n"
+    "LOCATION:https://meet.google.com/abc-defg-hij\r\n"
+    "DESCRIPTION:Technical interview\\nwith the game team\r\n"
+    "ORGANIZER;CN=Anna Recruiter:mailto:anna@acme.com\r\n"
+    "ATTENDEE;CN=Bob Lead:mailto:bob@acme.com\r\n"
+    "ATTENDEE;CN=gabor@example.com:mailto:gabor@example.com\r\n"
+    "END:VEVENT\r\n"
+    "END:VCALENDAR\r\n")
+
+
+def mail_with(subject, sender, text, ics=None, msgid="<m1>"):
+    import email
+    import email.policy
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m["Subject"], m["From"], m["Message-ID"] = subject, sender, msgid
+    m.set_content(text)
+    if ics:
+        m.add_attachment(ics.encode(), maintype="text", subtype="calendar", filename="invite.ics")
+    return email.message_from_bytes(m.as_bytes(), policy=email.policy.default)
+
+
+class Interviews(unittest.TestCase):
+    def setUp(self):
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            con.execute("DELETE FROM interviews")
+            con.execute("DELETE FROM interview_mail_seen")
+
+    def add(self, when, **kw):
+        with app.db() as con:
+            return app.add_interview(con, kw.pop("company", "Acme"), kw.pop("role", "Unity Developer"), when, **kw)
+
+    def cfg(self, **iv):
+        cfg = app.load_config()
+        cfg["ntfy"] = dict(cfg["ntfy"], enabled=True, topic="t")
+        cfg["interviews"] = dict({"morning": "08:00", "before_min": 60}, **iv)
+        return cfg
+
+    def test_ics_is_read_with_its_time_zone_and_text(self):
+        ev = app.parse_ics(ICS_INVITE)[0]
+        self.assertEqual(ev["uid"], "abc123@google.com")
+        self.assertEqual(ev["start"].utcoffset(), app.timedelta(hours=1))   # Budapest in December
+        self.assertEqual((ev["end"] - ev["start"]).seconds, 45 * 60)
+        self.assertEqual(ev["summary"], "Interview: Unity Developer, Acme")
+        self.assertEqual(ev["description"], "Technical interview\nwith the game team")
+        self.assertEqual(ev["organizer"], "Anna Recruiter")
+        self.assertFalse(ev["cancelled"])
+        self.assertEqual(app.meeting_link(ev["location"]), "https://meet.google.com/abc-defg-hij")
+        self.assertTrue(app.parse_ics(ICS_INVITE.replace("METHOD:REQUEST", "METHOD:CANCEL"))[0]["cancelled"])
+        utc = app.parse_ics(ICS_INVITE.replace("DTSTART;TZID=Europe/Budapest:20301203T140000", "DTSTART:20301203T130000Z"))[0]
+        self.assertEqual(utc["start"], ev["start"])
+
+    def test_reminders_on_the_day_and_before(self):
+        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        iid = self.add(start, minutes=45, place="https://meet.google.com/x")
+        sent, cfg, td = [], self.cfg(), app.timedelta
+        with mock.patch.object(app, "load_config", lambda: cfg), \
+                mock.patch.object(app, "send_ntfy", lambda c, t, m, click=None, priority=3: sent.append((t, click, priority))):
+            self.assertEqual(app.interview_reminders(start - td(days=1)), [])        # the day before: nothing
+            self.assertEqual(app.interview_reminders(start.replace(hour=7)), [])     # before the morning time
+            self.assertEqual(app.interview_reminders(start.replace(hour=8, minute=1)), [(iid, "day")])
+            self.assertEqual(app.interview_reminders(start.replace(hour=9)), [])     # only once
+            self.assertEqual(app.interview_reminders(start - td(minutes=55)), [(iid, "soon")])
+            self.assertEqual(app.interview_reminders(start - td(minutes=50)), [])
+        self.assertIn("today at 14:00", sent[0][0])
+        self.assertIn("Interview in 55 min", sent[1][0])
+        self.assertEqual(sent[1][1], "https://meet.google.com/x")   # tapping it opens the meeting
+        with app.db() as con:   # a new time starts the reminders again
+            app.update_interview(con, iid, starts=(start + td(days=1)).isoformat(timespec="minutes"))
+            r = con.execute("SELECT reminded_day, reminded_soon FROM interviews WHERE id=?", (iid,)).fetchone()
+        self.assertEqual((r["reminded_day"], r["reminded_soon"]), (None, None))
+
+    def test_added_late_on_the_day_reminds_at_once(self):
+        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        iid = self.add(start)
+        cfg = self.cfg()
+        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "send_ntfy", lambda *a, **k: None):
+            self.assertEqual(app.interview_reminders(start - app.timedelta(minutes=20)), [(iid, "soon")])
+
+    def test_form_adds_links_the_posting_and_marks_it_applied(self):
+        with app.db() as con:
+            con.execute("DELETE FROM jobs WHERE id='iv:1'")
+            con.execute("INSERT INTO jobs(id,source,title,company,url,status,score) VALUES('iv:1','rss','Unity Dev','Zeta Games',"
+                        "'https://x.test/1','seen',5)")
+        with mock.patch.object(app, "start_research", lambda iid, force=False: False):
+            to, msg = app.interview_post("/interviews", {"iv_company": "Zeta Games", "iv_role": "Unity Dev",
+                                                         "iv_date": "2030-12-03", "iv_time": "10:30", "iv_minutes": "50",
+                                                         "job_id": "iv:1"})
+        iid = int(to.rsplit("/", 1)[1])
+        with app.db() as con:
+            r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
+            st = con.execute("SELECT status FROM jobs WHERE id='iv:1'").fetchone()["status"]
+        self.assertEqual((r["job_id"], r["minutes"], r["starts"][:16]), ("iv:1", 50, "2030-12-03T10:30"))
+        self.assertEqual(st, "applied")
+        self.assertIn("Zeta Games", app.interviews_page({}))
+        self.assertIn("Zeta Games", app.interview_page(iid))
+        self.assertIn('value="Zeta Games"', app.interviews_page({"job": "iv:1"}))   # opened from the posting: filled in
+        app.interview_post("/interviews/%d" % iid, {"act": "cancelled"})
+        with app.db() as con:
+            self.assertEqual(con.execute("SELECT status FROM interviews WHERE id=?", (iid,)).fetchone()["status"], "cancelled")
+            con.execute("DELETE FROM jobs WHERE id='iv:1'")
+        self.assertEqual(app.interview_post("/interviews", {"iv_company": "", "iv_date": ""})[0], "/interviews#add")
+        app.interview_post("/interviews/%d" % iid, {"act": "delete"})
+        with app.db() as con:
+            self.assertIsNone(con.execute("SELECT 1 FROM interviews WHERE id=?", (iid,)).fetchone())
+
+    def test_calendar_files(self):
+        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        iid = self.add(start, minutes=45, place="Office, Main St. 1", people="Bob, CTO")
+        with app.db() as con:
+            rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE id=?", (iid,))]
+        ics = app.interviews_ics(rows, app.load_config())
+        self.assertIn("SUMMARY:Interview: Acme – Unity Developer", ics)
+        self.assertIn("LOCATION:Office\\, Main St. 1", ics)
+        back = app.parse_ics(ics)[0]   # what we write reads back the same
+        self.assertEqual(back["start"], start)
+        self.assertEqual((back["end"] - back["start"]).seconds, 45 * 60)
+        self.assertIn("dates=", app.google_calendar_link(rows[0]))
+
+    def test_invitation_without_claude_is_saved_and_a_cancel_cancels_it(self):
+        msg = mail_with("Invitation: Interview", "anna@acme.com", "See the invite.", ICS_INVITE)
+        cfg = self.cfg(from_mail=True, research=False)
+        cfg["anthropic_api_key"] = ""
+        mails = [("<m1>", "anna@acme.com", "Invitation: Interview", "", msg)]
+        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "read_interview_mails", lambda c: mails), \
+                mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), mock.patch.object(app, "notify_interview", lambda *a: None):
+            self.assertIn("1 new interview", app.scan_interview_mails())
+            with app.db() as con:
+                r = con.execute("SELECT * FROM interviews").fetchone()
+            self.assertEqual((r["source"], r["uid"], r["minutes"], r["place"]),
+                             ("mail", "abc123@google.com", 45, "https://meet.google.com/abc-defg-hij"))
+            self.assertIn("Bob Lead", r["people"])
+            cancel = mail_with("Canceled: Interview", "anna@acme.com", "Cancelled.",
+                               ICS_INVITE.replace("METHOD:REQUEST", "METHOD:CANCEL"), "<m2>")
+            mails[:] = [("<m2>", "anna@acme.com", "Canceled: Interview", "", cancel)]
+            self.assertIn("1 changed", app.scan_interview_mails())
+            with app.db() as con:
+                self.assertEqual(con.execute("SELECT status FROM interviews").fetchone()["status"], "cancelled")
+                self.assertEqual(con.execute("SELECT COUNT(*) c FROM interview_mail_seen").fetchone()["c"], 2)
+
+    def test_an_ordinary_invitation_is_not_an_interview_without_claude(self):
+        ics = ICS_INVITE.replace("Interview: Unity Developer\\, Acme", "Team lunch").replace("Technical interview", "Pizza")
+        msg = mail_with("Invitation: Team lunch", "a@b.test", "Lunch!", ics)
+        cfg = self.cfg()
+        cfg["anthropic_api_key"] = ""
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertIsNone(app.interview_from_mail(cfg, "a@b.test", "Invitation: Team lunch", "", msg, []))
+
+    def test_claude_reads_an_email_without_invitation(self):
+        msg = mail_with("Next steps", "hr@zeta.test", "Let's meet tomorrow at 3pm on Zoom: https://zoom.us/j/123")
+        cfg = self.cfg()
+        cfg["anthropic_api_key"] = "k"
+        got = {"is_interview": True, "cancelled": False, "company": "Zeta", "role": "Dev", "start": "2030-12-04T15:00",
+               "minutes": 0, "place": "https://zoom.us/j/123", "people": "", "summary": "Call with HR"}
+        import cvgen
+        with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: got):
+            found = app.interview_from_mail(cfg, "hr@zeta.test", "Next steps", "", msg, [])
+        self.assertEqual((found["company"], found["start"].hour, found["minutes"], found["place"]),
+                         ("Zeta", 15, 60, "https://zoom.us/j/123"))
+        got["is_interview"] = False
+        with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: got):
+            self.assertIsNone(app.interview_from_mail(cfg, "x", "Newsletter", "", msg, []))
+
+    def test_research_text_is_rendered_safely(self):
+        h = app.md_html("## At a glance\n- **Big** studio <script>x</script>\n- [Site](https://acme.test)\n\nPlain")
+        self.assertIn("<h3>At a glance</h3>", h)
+        self.assertIn("<li><b>Big</b> studio &lt;script&gt;", h)
+        self.assertIn('<a href="https://acme.test"', h)
+        self.assertNotIn("<script>", h)
+
+    def test_posting_detail_has_an_interview_button_and_the_feed_is_public(self):
+        with app.db() as con:
+            con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,url,status,score) "
+                        "VALUES('iv:2','rss','A','B','https://x.test/2','seen',1)")
+        _, h = app.job_detail_html("iv:2")
+        with app.db() as con:
+            con.execute("DELETE FROM jobs WHERE id='iv:2'")
+        self.assertIn('href="/interviews?job=iv%3A2#add"', h)
+        self.assertGreaterEqual(len(app.calendar_token()), 20)
+        self.assertIn('/interviews', app.page("x", "y"))
