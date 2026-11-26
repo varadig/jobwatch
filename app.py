@@ -750,7 +750,30 @@ def dedupe_existing(con):
     return hidden
 
 
-WORK_MODES = {"remote": "🏠 Remote", "hybrid": "🏢🏠 Hybrid", "onsite": "🏢 On-site", "unknown": "❔ Not stated"}
+WORK_MODES = {"remote": "Remote", "hybrid": "Hybrid", "onsite": "On-site", "unknown": "Not stated"}
+WORK_ICONS = {"remote": "home", "hybrid": "home_work", "onsite": "apartment", "unknown": "help"}
+
+# Material Symbols Outlined (Google, Apache License 2.0). static/material-symbols.woff2 holds only these icons, each at
+# its own code point: after adding one here, rebuild it with tools/make_symbols.py.
+ICONS = {
+    "location_on": 0xe0c8, "home": 0xe88a, "home_work": 0xea09, "apartment": 0xea40, "help": 0xe887,
+    "edit": 0xe150, "auto_awesome": 0xe65f, "autorenew": 0xe028, "history": 0xe28e, "hourglass_top": 0xea5b,
+    "work": 0xe8f9, "notifications": 0xe7f4, "refresh": 0xe5d5, "delete": 0xe872, "check_circle": 0xe86c,
+    "error": 0xe000, "event_busy": 0xe615, "fiber_new": 0xe05e, "move_to_inbox": 0xe168, "star": 0xe838,
+    "visibility": 0xe417, "visibility_off": 0xe8f5, "calendar_today": 0xe935, "target": 0xe719, "repeat": 0xe040,
+    "open_in_new": 0xe895, "close": 0xe14c, "arrow_back": 0xe5c4, "subdirectory_arrow_right": 0xe5da,
+    "check": 0xe5ca, "circle": 0xef4a, "expand_more": 0xe5cf,
+}
+
+
+def ic(name, fill=False):
+    """An icon (decorative: the text next to it, or the button's label, says what it means)."""
+    return '<span class="ms%s" aria-hidden="true">&#x%x;</span>' % (" fill" if fill else "", ICONS[name])
+
+
+def wm_html(k):
+    """A work mode with its icon."""
+    return ic(WORK_ICONS.get(k, "help")) + " " + e(WORK_MODES.get(k, k))
 WT_LINKEDIN = {"2": "remote", "3": "hybrid", "1": "onsite"}
 
 
@@ -1882,19 +1905,24 @@ def mode_why(r):
     return "From the posting text."
 
 
+STATUS_BUTTONS = (("saved", "star", "Save"), ("applied", "check_circle", "Applied"), ("seen", "visibility", "Mark seen"),
+                  ("hidden", "visibility_off", "Hide"), ("new", "history", "Mark new again"))
+
+
 def mode_picker(r):
     """The work-mode chip on a card: shows where the value comes from, and opens a menu to set it by hand."""
     wm = r.get("work_mode") or "unknown"
     src = r.get("mode_src") or ""
-    mark = {"manual": " ✎", "claude": " ✦"}.get(src, "")
+    mark = {"manual": " " + ic("edit"), "claude": " " + ic("auto_awesome")}.get(src, "")
     qid = e(urllib.parse.quote(r["id"], safe=""))
     opts = "".join('<button class="btn btn-xs btn-ghost%s" name="work_mode" value="%s">%s</button>' % (
-        " btn-active" if k == wm and src == "manual" else "", k, e(WORK_MODES[k])) for k in ("remote", "hybrid", "onsite"))
+        " btn-active" if k == wm and src == "manual" else "", k, wm_html(k)) for k in ("remote", "hybrid", "onsite"))
     why_short = (' <span class="wm-why">· %s</span>' % e(unknown_reason(r)[0])) if wm == "unknown" and src != "manual" else ""
     return ('<details class="wm-pick"><summary class="chip wm-%s" title="%s">%s%s%s ▾</summary>'
             '<form class="wm-menu" method="post" action="/job/%s"><div class="muted">%s</div>%s'
-            '<button class="btn btn-xs btn-ghost" name="work_mode" value="auto" title="Let jobwatch decide again">↺ Automatic</button>'
-            '</form></details>') % (e(wm), e(mode_why(r)), e(WORK_MODES.get(wm, wm)), mark, why_short, qid, e(mode_why(r)), opts)
+            '<button class="btn btn-xs btn-ghost" name="work_mode" value="auto" title="Let jobwatch decide again">%s Automatic</button>'
+            '</form></details>') % (e(wm), e(mode_why(r)), wm_html(wm), mark, why_short, qid, e(mode_why(r)), opts,
+                                    ic("autorenew"))
 
 
 def mode_quick(r):
@@ -1904,7 +1932,7 @@ def mode_quick(r):
     return ('<form class="wm-quick" method="post" action="/job/%s"><span>Set:</span>%s</form>' % (
         e(urllib.parse.quote(r["id"], safe="")), "".join(
             '<button class="btn btn-xs btn-ghost" name="work_mode" value="%s" title="Set by hand: %s">%s</button>' % (
-                k, e(WORK_MODES[k]), e(WORK_MODES[k])) for k in ("remote", "hybrid", "onsite"))))
+                k, e(WORK_MODES[k]), wm_html(k)) for k in ("remote", "hybrid", "onsite"))))
 
 
 def mode_from_page(source, url):
@@ -2142,6 +2170,12 @@ def scheduler():
 
 # ---------------------------------------------------------------- web UI
 CSS = """
+@font-face{font-family:"Material Symbols";font-style:normal;font-weight:400;font-display:block;src:url(/material-symbols.woff2) format("woff2")}
+.ms{font-family:"Material Symbols";font-weight:400;font-style:normal;font-size:1.2em;line-height:1;display:inline-block;
+  vertical-align:-.22em;letter-spacing:normal;text-transform:none;white-space:nowrap;direction:ltr;user-select:none;
+  -webkit-font-smoothing:antialiased;font-variation-settings:"FILL" 0}
+.ms.fill{font-variation-settings:"FILL" 1}
+.btn .ms{font-size:1.25em}
 :root{--bg:var(--color-base-200);--card:var(--color-base-100);--fg:var(--color-base-content);
 --muted:color-mix(in oklab,var(--color-base-content) 65%,transparent);--line:var(--color-base-300);
 --soft:color-mix(in oklab,var(--color-base-content) 7%,var(--color-base-100));
@@ -2394,7 +2428,7 @@ def page(title, body, flash="", refresh=0):
             ("/profile", "CV profile"), ("/settings", "Settings")]
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
-    running = '<span class="badge badge-soft badge-warning">⏳ refresh running…</span>' if STATE["running"] else ""
+    running = '<span class="badge badge-soft badge-warning">' + ic("hourglass_top") + ' refresh running…</span>' if STATE["running"] else ""
     return ("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
 <script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 (function () {  // a click outside an open dialog's box closes it (only if the press started outside too: not while selecting text)
@@ -2405,12 +2439,13 @@ def page(title, body, flash="", refresh=0):
 })();</script>
 <title>%s · jobwatch</title>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
-<link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">💼 jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
-<div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">🔔 Test push</button></form>
-<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">↻ Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form>
-<button type="button" class="btn btn-sm btn-ghost text-error" onclick="document.getElementById('clear_dlg').showModal()">🗑 Clear cache</button></div></div></header>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">%s jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
+<div class="right">%s<form method="post" action="/test"><button class="btn btn-sm" name="what" value="ntfy" title="Test push notification to your phone">%s Test push</button></form>
+<form method="post" action="/run" class="join"><button class="btn btn-primary btn-sm join-item" title="Fetch all sources now">%s Refresh all</button><a class="btn btn-primary btn-outline btn-sm join-item" href="/sources#refresh" title="Choose which sources to fetch">Choose…</a></form>
+<button type="button" class="btn btn-sm btn-ghost text-error" onclick="document.getElementById('clear_dlg').showModal()">%s Clear cache</button></div></div></header>
 <main>%s%s</main>%s</body></html>"""
-            % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, nav, running,
+            % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, ic("work"), nav, running, ic("notifications"),
+               ic("refresh"), ic("delete"),
                '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body), CLEAR_DIALOG))
 
 
@@ -2486,7 +2521,7 @@ def progress_html():
     parts = []
     if prog:
         pct = int(100 * prog["done"] / prog["total"]) if prog["total"] else 100
-        icons = {"fetching": "⏳", "done": "✅", "error": "❌"}
+        icons = {"fetching": ic("hourglass_top"), "done": ic("check_circle"), "error": ic("error")}
         rows = "".join('<span class="chip">%s %s: %s</span>' % (
             icons.get(str(s).split(" ")[0], "•"), e(n), e(s)) for n, s in prog["sources"].items())
         parts.append('<div class="card"><b>Refreshing sources… %d of %d done</b>'
@@ -2583,7 +2618,7 @@ def jobs_page(q):
 
     def chip(label, cnt, **chg):
         on = all(base_q.get(k) == v for k, v in chg.items())
-        return '<a class="fchip%s" href="%s">%s%s</a>' % (" on" if on else "", e(link(**chg)), e(label),
+        return '<a class="fchip%s" href="%s">%s%s</a>' % (" on" if on else "", e(link(**chg)), label,
                                                        ("<small>%d</small>" % cnt) if cnt is not None else "")
 
     # summary tiles (active postings, together with the work-mode filter)
@@ -2595,11 +2630,13 @@ def jobs_page(q):
     fresh = sum(1 for r in act_rows if parse_dt(r["posted"]) and days_ago(parse_dt(r["posted"])) <= 2)
     today = sum(1 for r in act_rows if parse_dt(r["first_seen"]) and days_ago(parse_dt(r["first_seen"])) == 0)
     stats = """<div class="stats">
-<a class="stat" href="%s"><b>%d</b><span>🆕 fresh (≤2 days old)</span></a>
-<a class="stat" href="%s"><b>%d</b><span>📥 collected today</span></a>
-<a class="stat" href="%s"><b>%d</b><span>● new, not viewed yet</span></a>
-<a class="stat" href="%s"><b>%d</b><span>⭐ saved</span></a>
-<a class="stat" href="%s"><b>%d</b><span>✅ applied</span></a></div>""" % (
+<a class="stat" href="%s"><b>%d</b><span>{fiber_new} fresh (≤2 days old)</span></a>
+<a class="stat" href="%s"><b>%d</b><span>{move_to_inbox} collected today</span></a>
+<a class="stat" href="%s"><b>%d</b><span>{circle} new, not viewed yet</span></a>
+<a class="stat" href="%s"><b>%d</b><span>{star} saved</span></a>
+<a class="stat" href="%s"><b>%d</b><span>{check_circle} applied</span></a></div>""".format(
+        fiber_new=ic("fiber_new"), move_to_inbox=ic("move_to_inbox"), circle=ic("circle", True), star=ic("star"),
+        check_circle=ic("check_circle")) % (
         e(link(age="3", sort="posted", status="active")), fresh, e(link(age="1", sort="seen", status="active")), today,
         e(link(status="new")), counts.get("new", 0), e(link(status="saved")), counts.get("saved", 0),
         e(link(status="applied")), counts.get("applied", 0))
@@ -2608,13 +2645,14 @@ def jobs_page(q):
                         chip("Saved", counts.get("saved", 0), status="saved"),
                         chip("Applied", counts.get("applied", 0), status="applied"),
                         chip("Hidden", counts.get("hidden", 0), status="hidden"), chip("All", None, status="all")])
-    wm_chips = "".join([chip("🏠 Remote only", wcount.get("remote", 0), work="remote"),
-                        chip("Remote + ❔", wcount.get("remote", 0) + wcount.get("unknown", 0), work="remote_unknown"),
+    wm_chips = "".join([chip(ic("home") + " Remote only", wcount.get("remote", 0), work="remote"),
+                        chip("Remote + " + ic("help"), wcount.get("remote", 0) + wcount.get("unknown", 0), work="remote_unknown"),
                         chip("Remote + hybrid", None, work="remote_hybrid"),
-                        chip("🏢🏠 Hybrid", wcount.get("hybrid", 0), work="hybrid"),
-                        chip("🏢 On-site", wcount.get("onsite", 0), work="onsite"), chip("All", None, work="all")])
-    sort_chips = "".join([chip("📅 Posted", None, sort="posted"), chip("📥 Collected", None, sort="seen"),
-                          chip("🎯 Score", None, sort="score")])
+                        chip(wm_html("hybrid"), wcount.get("hybrid", 0), work="hybrid"),
+                        chip(wm_html("onsite"), wcount.get("onsite", 0), work="onsite"), chip("All", None, work="all")])
+    sort_chips = "".join([chip(ic("calendar_today") + " Posted", None, sort="posted"),
+                          chip(ic("move_to_inbox") + " Collected", None, sort="seen"),
+                          chip(ic("target") + " Score", None, sort="score")])
     age_chips = "".join([chip("Any time", None, age="all"), chip("24 h", None, age="1"), chip("3 days", None, age="3"),
                          chip("7 days", None, age="7"), chip("30 days", None, age="30")])
     # sources: toggle chips, several can be on at once; "All" clears the choice
@@ -2662,35 +2700,36 @@ def jobs_page(q):
         qid = e(urllib.parse.quote(r["id"], safe=""))
         chips = [mode_picker(r), mode_quick(r)]
         if r["location"] and r["location"].strip().lower() not in ("remote", "(remote)", "anywhere"):
-            chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:60]))
+            chips.append('<span class="chip">%s %s</span>' % (ic("location_on"), e(r["location"][:60])))
         if r["_closed"]:
-            chips.append('<span class="chip closed">❌ probably closed</span>')
+            chips.append('<span class="chip closed">%s probably closed</span>' % ic("event_busy"))
         if r["_posted_known"]:
             cls_age = "age-new" if r["_pdays"] <= 2 else ("age-old" if r["_pdays"] > 30 else "")
-            chips.append('<span class="chip %s" title="Posted: %s">📅 %s</span>' % (
-                cls_age, e(r["_posted"].astimezone().strftime("%Y-%m-%d")),
-                e(("posted " + rel_day(r["_pdays"])) if r["_pdays"] > 2 else "🆕 " + rel_day(r["_pdays"]))))
+            fresh_ = r["_pdays"] <= 2
+            chips.append('<span class="chip %s" title="Posted: %s">%s %s</span>' % (
+                cls_age, e(r["_posted"].astimezone().strftime("%Y-%m-%d")), ic("fiber_new" if fresh_ else "calendar_today"),
+                e(rel_day(r["_pdays"]) if fresh_ else "posted " + rel_day(r["_pdays"]))))
         else:
-            chips.append('<span class="chip" title="The source does not give the posting date">📅 posted date unknown</span>')
-        chips.append('<span class="chip" title="Collected: %s">📥 %s</span>' % (e(fmt_dt(r["first_seen"])), e(rel_day(r["_sdays"]))))
+            chips.append('<span class="chip" title="The source does not give the posting date">%s posted date unknown</span>'
+                         % ic("calendar_today"))
+        chips.append('<span class="chip" title="Collected: %s">%s %s</span>' % (
+            e(fmt_dt(r["first_seen"])), ic("move_to_inbox"), e(rel_day(r["_sdays"]))))
         if r["status"] != "new":
             chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
         if r.get("also_sources"):
-            chips.append('<span class="chip" title="The same posting came from these sources too">🔁 also on %s</span>' % e(
+            chips.append('<span class="chip" title="The same posting came from these sources too">' + ic("repeat") + ' also on %s</span>' % e(
                 ", ".join(SOURCES_INFO.get(x, (x,))[0] for x in r["also_sources"].split(",") if x)))
         icon_btns = "".join('<button class="btn btn-sm btn-ghost btn-square" name="status" value="%s" title="%s" aria-label="%s">%s</button>'
-                            % (s_, t, t, ic) for s_, ic, t in (
-            ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Mark seen"),
-            ("hidden", "🚫", "Hide"), ("new", "↺", "Mark new again")) if s_ != r["status"])
-        cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if r["id"] in has_cv else
+                            % (s_, t, t, ic(icn)) for s_, icn, t in STATUS_BUTTONS if s_ != r["status"])
+        cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ' + ic("check") + '</a>' if r["id"] in has_cv else
                   '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
         cards.append("""<article class="job st-%s%s" data-href="/job/%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
-<div><div class="job-head">%s<div><div class="jt"><a href="/job/%s">%s</a> <a class="ext" href="/open/%s" target="_blank" rel="noopener noreferrer" title="Open the original posting" aria-label="Open the original posting">↗</a></div>
+<div><div class="job-head">%s<div><div class="jt"><a href="/job/%s">%s</a> <a class="ext" href="/open/%s" target="_blank" rel="noopener noreferrer" title="Open the original posting" aria-label="Open the original posting">%s</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div></div></div><div class="chips">%s</div>
 <details class="why"><summary>Why this score?</summary>%s</details></div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
             e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", qid, cls, sc,
-            logo_html(r["company"], logos), qid, e(r["title"]), qid, e(r["company"] or "?"),
+            logo_html(r["company"], logos), qid, e(r["title"]), qid, ic("open_in_new"), e(r["company"] or "?"),
             e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
@@ -2698,7 +2737,7 @@ def jobs_page(q):
                      'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
     busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
     top = ('<div class="ui-head"><h1>Jobs</h1><p>Postings from your sources, scored against your CV. '
-           'Click a title for the details and the full posting; ↗ opens the original. “CV + Resume” writes documents tailored to it.</p>'
+           'Click a title for the details and the full posting; ' + ic("open_in_new") + ' opens the original. “CV + Resume” writes documents tailored to it.</p>'
            '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
            'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
            '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
@@ -2817,7 +2856,7 @@ def job_detail_html(jid, back="/", modal=False):
         has_cv = bool(r and con.execute("SELECT 1 FROM cvs WHERE job_id=? AND status='done'", (jid,)).fetchone())
     if not r:
         return None, ('<div class="ui">%s<section class="ui-section"><div class="ui-body ui-empty">This posting is not in '
-                      'the list any more.</div></section></div>') % ("" if modal else '<a class="btn btn-sm btn-ghost" href="/">← Jobs</a>')
+                      'the list any more.</div></section></div>') % ("" if modal else '<a class="btn btn-sm btn-ghost" href="/">%s Jobs</a>' % ic("arrow_back"))
     r = dict(r)
     with CFG_LOCK:
         cfg = load_config()
@@ -2826,18 +2865,18 @@ def job_detail_html(jid, back="/", modal=False):
     cls = "s-hi" if sc >= cfg["notify_min_score"] else ("s-mid" if sc >= cfg["min_score"] else "")
     chips = [mode_picker(r), mode_quick(r)]
     if r["location"]:
-        chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:80]))
+        chips.append('<span class="chip">%s %s</span>' % (ic("location_on"), e(r["location"][:80])))
     posted = parse_dt(r["posted"])
-    chips.append('<span class="chip">📅 %s</span>' % (e("posted " + posted.astimezone().strftime("%Y-%m-%d")) if posted else "posted date unknown"))
-    chips.append('<span class="chip">📥 collected %s</span>' % e(fmt_dt(r["first_seen"])))
+    chips.append('<span class="chip">%s %s</span>' % (ic("calendar_today"), e("posted " + posted.astimezone().strftime("%Y-%m-%d"))
+                                                      if posted else "posted date unknown"))
+    chips.append('<span class="chip">%s collected %s</span>' % (ic("move_to_inbox"), e(fmt_dt(r["first_seen"]))))
     chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
     if r.get("also_sources"):
-        chips.append('<span class="chip">🔁 also on %s</span>' % e(
+        chips.append('<span class="chip">' + ic("repeat") + ' also on %s</span>' % e(
             ", ".join(SOURCES_INFO.get(x, (x,))[0] for x in r["also_sources"].split(",") if x)))
-    acts = "".join('<button class="btn btn-sm btn-ghost" name="status" value="%s">%s %s</button>' % (s_, ic, t) for s_, ic, t in (
-        ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Seen"), ("hidden", "🚫", "Hide"),
-        ("new", "↺", "Mark new again")) if s_ != r["status"])
-    cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if has_cv else
+    acts = "".join('<button class="btn btn-sm btn-ghost" name="status" value="%s">%s %s</button>' % (
+        s_, ic(icn), "Seen" if s_ == "seen" else t) for s_, icn, t in STATUS_BUTTONS if s_ != r["status"])
+    cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ' + ic("check") + '</a>' if has_cv else
               '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
     text = r["desc_html"] or clean_posting_html(r["description"] or "")
     loading = not r["desc_html"]
@@ -2847,15 +2886,15 @@ def job_detail_html(jid, back="/", modal=False):
             '<div class="score %s jd-score" title="Score against your CV">%d<small>pts</small></div></div>'
             '<div class="chips">%s</div>'
             '<div class="jd-acts">%s<a class="btn btn-sm btn-outline" href="/open/%s" target="_blank" rel="noopener noreferrer">'
-            'Open the original ↗</a><form method="post" action="/job/%s" class="jd-status">'
+            'Open the original %s</a><form method="post" action="/job/%s" class="jd-status">'
             '<input type="hidden" name="next" value="%s">%s</form></div>'
             '<details class="why"><summary>Why this score?</summary>%s</details></div></section>'
             '<section class="ui-section" aria-labelledby="jd-post-h"><header><div><h2 id="jd-post-h">The posting</h2>'
             '<p class="ui-desc" id="jd-src">%s</p></div></header><div class="ui-body"><div class="jd-text" id="jd-text"%s>%s</div>'
             '</div></section></div>') % (
-        "" if modal else '<a class="btn btn-sm btn-ghost" href="%s">← Back to the list</a>' % e(back),
+        "" if modal else '<a class="btn btn-sm btn-ghost" href="%s">%s Back to the list</a>' % (e(back), ic("arrow_back")),
         logo_html(r["company"], logo_files(), 56), e(r["title"]), e(r["company"] or "?"),
-        e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, qid, e(back), acts,
+        e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, ic("open_in_new"), qid, e(back), acts,
         e(r["matched"] or "-"),
         "Loading the full posting from its page…" if loading else "From the posting's own page.",
         ' data-preview="/job/%s/preview"' % qid if loading else "",
@@ -2886,7 +2925,7 @@ def job_page(jid, back="/", flash=""):
 # tab. The buttons (on a card or in the dialog) save in the background, without reloading the page: a card that no
 # longer fits the filters slides away, the others are updated in place, and the counters follow.
 JOB_MODAL = """<dialog id="job_dlg" class="modal" aria-labelledby="jd-title"><div class="modal-box jd-modal">
-<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">✕</button></form>
+<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">""" + ic("close") + """</button></form>
 <div id="job_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
 <div id="jw_live" class="sr-only" aria-live="polite"></div>
 <script>(function () {
@@ -3049,13 +3088,13 @@ def sources_page(flash=""):
             for src in cfg.get("custom_sources") or []:
                 son = on and src.get("enabled", True)
                 rows.append('<tr class="sub%s"><td><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="run_cs_%s" '
-                            'aria-label="Select %s"%s></td><td colspan="6">↳ %s <span class="muted">· %s</span></td>'
+                            'aria-label="Select %s"%s></td><td colspan="6">%s %s <span class="muted">· %s</span></td>'
                             '<td><button class="btn btn-xs btn-ghost" name="one" value="cs:%s"%s>Refresh</button></td></tr>' % (
                                 "" if son else " off", e(src["id"]), e(src.get("name") or src["url"]), "" if son else " disabled",
-                                e(src.get("name") or src["url"]), e(CUSTOM_TYPES.get(src.get("type"), src.get("type"))),
+                                ic("subdirectory_arrow_right"), e(src.get("name") or src["url"]), e(CUSTOM_TYPES.get(src.get("type"), src.get("type"))),
                                 e(src["id"]), "" if son and not busy else " disabled"))
     uns = "".join('<tr><td>%s</td><td class="muted">%s</td></tr>' % (
-        ('<a href="%s" target="_blank" rel="noopener">%s ↗</a>' % (e(u), e(n))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
+        ('<a href="%s" target="_blank" rel="noopener">%s %s</a>' % (e(u), e(n), ic("open_in_new"))) if u else e(n), e(why)) for n, u, why in UNSUPPORTED)
     body = """<div class="ui"><div class="ui-head"><h1>Sources</h1><p>Where postings come from, and how the last refresh went.
 Sources are turned on and off in <a href="/settings#search">Settings → Job search</a>.</p></div>%s
 <section class="ui-section" id="refresh"><header><div><h2>Watched sources</h2><p class="ui-desc">Refreshed automatically every %d minutes
@@ -3216,7 +3255,7 @@ def settings_page(flash=""):
     src_boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
         k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items() if k in FETCHED_SOURCES)
     modes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="nwm_%s"%s> %s</label>' % (
-        k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), e(v)) for k, v in WORK_MODES.items())
+        k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), wm_html(k)) for k in WORK_MODES)
     filt = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
                    for k, l in (("remote", "Remote only"), ("remote_unknown", "Remote + unknown"),
                                 ("remote_hybrid", "Remote + hybrid"), ("all", "All")))
@@ -4058,7 +4097,7 @@ LinkedIn does not allow sending from other programs: copy the message and open t
 <div><button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></form></article>""" % (who, e(r["error"]), oid))
             continue
         is_mail = "@" in (r["contact"] or "") and not (r["contact"] or "").startswith("http")
-        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile ↗</a>' % e(safe_url(r["contact"]))
+        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile %s</a>' % (e(safe_url(r["contact"])), ic("open_in_new"))
                     if (r["contact"] or "").startswith("http") else "")
         send_btn = ('<button class="btn btn-sm btn-outline" name="act" value="send" title="Send to %s with the e-mail settings">Send e-mail</button>'
                     % e(r["contact"]) if is_mail and r["channel"] == "email" else "")
@@ -4085,10 +4124,10 @@ LinkedIn does not allow sending from other programs: copy the message and open t
 onclick="event.stopPropagation(); oview(%d)">%s</button><div class="muted" style="font-size:12.5px">%s</div></td>
 <td class="hide-sm">%s</td><td class="hide-sm">%s</td><td class="when">%s</td></tr>""" % (
             oid, oid, e(r["name"]), e(r["title"] or ""), e(role or "—"), e(label), e(fmt_dt(r["sent_at"]))))
-        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile ↗</a>' % e(safe_url(r["contact"]))
+        open_btn = ('<a class="btn btn-sm btn-outline" href="%s" target="_blank" rel="noopener noreferrer">Open profile %s</a>' % (e(safe_url(r["contact"])), ic("open_in_new"))
                     if (r["contact"] or "").startswith("http") else "")
         dialogs.append("""<dialog class="modal" id="dlg%d" aria-labelledby="dlgt%d"><div class="modal-box rc-modal ui">
-<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost" style="position:absolute;right:10px;top:10px" aria-label="Close">✕</button></form>
+<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost" style="position:absolute;right:10px;top:10px" aria-label="Close">%s</button></form>
 <h3 id="dlgt%d">%s</h3><div class="sub">%s%s · %s · sent %s</div>
 <label for="os%d">Subject</label><div class="join" style="width:100%%;margin-bottom:12px"><input class="input join-item" id="os%d" value="%s" readonly style="flex:1">
 <button type="button" class="btn join-item" id="ocs%d" onclick="ocopy(%d, 1)">Copy</button></div>
@@ -4097,7 +4136,7 @@ onclick="event.stopPropagation(); oview(%d)">%s</button><div class="muted" style
 <div><button class="btn btn-sm btn-ghost" name="act" value="unsent">Move back to drafts</button>
 <button class="btn btn-sm btn-ghost text-error" name="act" value="delete">Delete</button></div></form></div>
 <form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>""" % (
-            oid, oid, oid, e(r["name"]), e(r["title"] or ""), (" · " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
+            oid, oid, ic("close"), oid, e(r["name"]), e(r["title"] or ""), (" · " + e(role)) if role else "", e(label), e(fmt_dt(r["sent_at"])),
             oid, oid, e(r["subject"] or ""), oid, oid, oid, oid, e(r["message"] or ""), oid, oid, oid, open_btn))
     sent_sec = ("""<section class="ui-section" aria-labelledby="se-h"><header><h2 id="se-h">Sent</h2>
 <span class="muted" style="font-size:13px">Select a row to see the message.</span></header>
@@ -4315,11 +4354,12 @@ def cv_page(jid, flash=""):
         job = dict(r)
         cv = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
     qid = e(urllib.parse.quote(jid, safe=""))
-    head = """<div class="ui-head"><a href="/" style="font-size:13px">← Jobs</a><div class="job-head" style="margin-top:6px">%s<div><h1>%s</h1>
-<p style="margin-top:2px">%s · %s · %s · <b>%d points</b> · <a href="%s" target="_blank" rel="noopener">posting ↗</a></p></div></div>
+    head = """<div class="ui-head"><a href="/" style="font-size:13px">%s Jobs</a><div class="job-head" style="margin-top:6px">%s<div><h1>%s</h1>
+<p style="margin-top:2px">%s · %s · %s · <b>%d points</b> · <a href="%s" target="_blank" rel="noopener">posting %s</a></p></div></div>
 <div class="ui-btns" style="margin-top:12px"><a class="btn btn-sm btn-outline" href="/outreach?job=%s">Message a recruiter about this posting</a></div></div>""" % (
-        logo_html(job["company"], logo_files(), 52), e(job["title"]), e(job["company"] or "?"), e(job["location"] or "-"),
-        e(WORK_MODES.get(job.get("work_mode") or "unknown", "")), job["score"], e(safe_url(job["url"])), qid)
+        ic("arrow_back"), logo_html(job["company"], logo_files(), 52), e(job["title"]), e(job["company"] or "?"),
+        e(job["location"] or "-"), wm_html(job.get("work_mode") or "unknown"), job["score"], e(safe_url(job["url"])),
+        ic("open_in_new"), qid)
     if cv and cv["status"] == "running":
         return page("Generating CV", '<div class="ui">%s<section class="ui-section"><div class="ui-body ui-empty">'
                     '<span class="loading loading-spinner loading-md"></span><p>Claude is writing the CV, Resume and cover letter for this posting '
@@ -4417,11 +4457,11 @@ def docs_page():
             status = ('<span class="badge badge-soft badge-success">Sent %s → %s</span>' % (e(fmt_dt(s_["sent_at"])), e(s_["sent_to"]))
                       if s_ and s_["sent_at"] else "")
             jobs_html.append("""<div class="ui-row"><div class="ui-row-main"><div class="ui-row-title">%s %s</div>
-<div class="muted" style="font-size:13px">Generated %s%s · %s · <a href="%s" target="_blank" rel="noopener">posting ↗</a></div>
+<div class="muted" style="font-size:13px">Generated %s%s · %s · <a href="%s" target="_blank" rel="noopener">posting %s</a></div>
 <div class="ui-btns" style="margin-top:8px">%s</div></div><div>%s</div></div>""" % (
                 e(info.get("title") or jd), status,
                 e(fmt_dt(info.get("generated"))), (" · %d earlier version(s)" % older) if older else "",
-                e(WORK_MODES.get(info.get("work_mode") or "unknown", "")), e(safe_url(info.get("url", ""))), files,
+                wm_html(info.get("work_mode") or "unknown"), e(safe_url(info.get("url", ""))), ic("open_in_new"), files,
                 ('<a class="btn btn-sm btn-primary" href="/cv/%s">Open</a>' % e(urllib.parse.quote(info["job_id"], safe="")))
                 if info.get("job_id") else ""))
         if jobs_html:
@@ -4462,6 +4502,7 @@ AUTH_PUBLIC_PATHS = ("/health",)  # the platform's health check must get through
 # the icons too: browsers fetch them without the password, and they hold nothing private
 STATIC_DIR = os.path.join(BASE, "static")
 ICON_FILES = {"/favicon.ico": ("favicon.ico", "image/x-icon"), "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+              "/material-symbols.woff2": ("material-symbols.woff2", "font/woff2"),
               "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"), "/icon-192.png": ("icon-192.png", "image/png")}
 MANIFEST = json.dumps({"name": "jobwatch", "short_name": "jobwatch", "start_url": "/", "display": "standalone",
                        "background_color": "#1d232a", "theme_color": "#5b5bd6",
