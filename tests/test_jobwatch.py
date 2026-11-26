@@ -1719,3 +1719,20 @@ class Interviews(unittest.TestCase):
         self.assertIn('href="/interviews?job=iv%3A2#add"', h)
         self.assertGreaterEqual(len(app.calendar_token()), 20)
         self.assertIn('/interviews', app.page("x", "y"))
+
+
+class InterviewMailFilter(unittest.TestCase):
+    def test_noise_does_not_reach_claude(self):
+        import cvgen
+        cfg = app.load_config()
+        cfg["anthropic_api_key"] = "k"
+        calls = []
+        with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: calls.append(a) or {"is_interview": False}):
+            for subj, text in (("Anna accepted your invitation, explore their network", "Say hi on Thursday at 10:00"),
+                               ("Last Call! Save up to 50%", "Ends Friday"),
+                               ("A focused next step for your search", "Here are 5 jobs for you.")):
+                self.assertIsNone(app.interview_from_mail(cfg, "x@y.test", subj, "", mail_with(subj, "x@y.test", text), []))
+            self.assertEqual(calls, [])
+            app.interview_from_mail(cfg, "hr@z.test", "Next steps", "", mail_with("Next steps", "hr@z.test",
+                                                                                  "Could we talk tomorrow at 15:00?"), [])
+            self.assertEqual(len(calls), 1)

@@ -2352,8 +2352,15 @@ INTERVIEW_DEFAULTS = {"morning": "08:00", "before_min": 60, "from_mail": True, "
 INTERVIEW_STATUS = {"planned": "Planned", "done": "Done", "cancelled": "Cancelled"}
 IV_LOCK = threading.Lock()        # one e-mail scan at a time
 IV_SCAN_EVERY = 30 * 60           # seconds between e-mail scans
-IV_MAIL_KEYWORDS = ("interview", "interj", "invitation", "invite", "meeting", "call", "calendly", "scheduled", "confirmed",
-                    "next step", "einladung", "gespr", "entretien", "rozmow", "colloquio", "entrevista")
+IV_MAIL_KEYWORDS = ("interview", "interj", "invitation", "invite", "meeting", "call with", "intro call", "video call",
+                    "phone call", "calendly", "scheduled", "confirmed", "next step", "megh", "einladung", "gespr",
+                    "entretien", "rozmow", "colloquio", "entrevista", "screening")
+# not an interview, whatever the subject says: no Claude call for these
+IV_NOT_RX = re.compile(r"accepted your invitation|invitation to connect|wants to connect|invited you to (?:join|follow)|"
+                       r"\bsale\b|% off|discount|kedvezm|webinar|newsletter|last call", re.I)
+# a fixed time is mentioned (a clock time, a weekday or "tomorrow"), in a few languages
+IV_TIME_RX = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s?(?:am|pm)\b|\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\b|"
+                        r"tomorrow|holnap|h[ée]tf[őo]|kedd|szerd[aá]|cs[üu]t[öo]rt[öo]k|p[ée]ntek|morgen|demain|jutro", re.I)
 IV_RX = re.compile(r"interview|interj|screening|technical (?:call|round)|hiring|recruit|gespr[äa]ch|entretien|rozmow"
                    r"|colloquio|entrevista|bewerbung|candidate", re.I)
 
@@ -2743,6 +2750,8 @@ def interview_from_mail(cfg, sender, subject, sent, msg, companies):
     text, _links = mail_body(msg)
     events = [ev for c in mail_calendar(msg) for ev in parse_ics(c)]
     ev = next((x for x in events if x["start"] or x["cancelled"]), None)
+    if not ev and (IV_NOT_RX.search(subject) or not IV_TIME_RX.search(subject + " " + text[:6000])):
+        return None   # no invitation and no fixed time, or clearly not an interview: not worth a Claude call
     key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     found = None
     if key:
