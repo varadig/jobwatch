@@ -762,8 +762,16 @@ ICONS = {
     "error": 0xe000, "event_busy": 0xe615, "fiber_new": 0xe05e, "move_to_inbox": 0xe168, "star": 0xe838,
     "visibility": 0xe417, "visibility_off": 0xe8f5, "calendar_today": 0xe935, "target": 0xe719, "repeat": 0xe040,
     "open_in_new": 0xe895, "close": 0xe14c, "arrow_back": 0xe5c4, "subdirectory_arrow_right": 0xe5da,
-    "check": 0xe5ca, "circle": 0xef4a, "expand_more": 0xe5cf,
+    "check": 0xe5ca, "circle": 0xef4a, "expand_more": 0xe5cf, "tune": 0xe429,
 }
+
+
+def _font_version():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "material-symbols.woff2"), "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()[:10]
+    except OSError:
+        return "0"
 
 
 def ic(name, fill=False):
@@ -2170,7 +2178,7 @@ def scheduler():
 
 # ---------------------------------------------------------------- web UI
 CSS = """
-@font-face{font-family:"Material Symbols";font-style:normal;font-weight:400;font-display:block;src:url(/material-symbols.woff2) format("woff2")}
+@font-face{font-family:"Material Symbols";font-style:normal;font-weight:400;font-display:block;src:url(/material-symbols.woff2?v=FONTVER) format("woff2")}
 .ms{font-family:"Material Symbols";font-weight:400;font-style:normal;font-size:1.2em;line-height:1;display:inline-block;
   vertical-align:-.22em;letter-spacing:normal;text-transform:none;white-space:nowrap;direction:ltr;user-select:none;
   -webkit-font-smoothing:antialiased;font-variation-settings:"FILL" 0}
@@ -2243,7 +2251,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 9px;border-bottom:1p
 .ui-btns{display:flex;gap:6px;flex-wrap:wrap}.ui-empty{color:var(--muted);text-align:center;padding:28px 18px}
 .ui-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;font-size:14px}.ui-inline .help{margin:0}
 .ui-list{margin:0;padding-left:20px}.ui-list li{margin:3px 0}
-.ui-addjob{margin-top:12px;width:100%;max-width:620px}.ui-addjob input{flex:1}
+.ui-addjob{margin-top:12px;width:100%}.ui-addjob input{flex:1}
 details.wm-pick{display:inline-block;position:relative}.wm-why{opacity:.8;font-weight:400}details.wm-pick>summary{list-style:none;cursor:pointer}
 details.wm-pick>summary::-webkit-details-marker{display:none}
 .wm-menu{position:absolute;z-index:6;top:calc(100% + 4px);left:0;min-width:230px;max-width:320px;display:flex;flex-direction:column;
@@ -2330,6 +2338,19 @@ section.ui-section{scroll-margin-top:70px}
 .ui-hint{min-height:20px;font-size:13px;color:var(--muted);margin-top:6px}
 .ui-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
   padding:14px 18px;border-top:1px solid var(--line);background:var(--soft);border-radius:0 0 var(--radius) var(--radius)}
+.flt-toggle{display:flex;align-items:center;gap:8px;width:100%;padding:12px 18px;background:none;border:0;cursor:pointer;
+  color:var(--fg);font-size:14px;text-align:left;border-radius:var(--radius)}
+.flt-toggle:hover{background:var(--soft)}.flt-toggle:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.flt-sum{flex:1;min-width:0;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flt-sum .ms{font-size:1.1em}
+.flt-chev{display:inline-flex;transition:transform .3s ease}.ui-filters.open .flt-chev{transform:rotate(180deg)}
+.flt-panel{display:grid;grid-template-rows:0fr;transition:grid-template-rows .32s ease}
+.flt-inner{overflow:hidden;min-height:0}
+.flt-inner>.ui-body{opacity:0;transform:translateY(-6px);transition:opacity .22s ease,transform .3s ease;border-top:1px solid var(--line)}
+.ui-filters.open .flt-panel{grid-template-rows:1fr}
+.ui-filters.open .flt-inner>.ui-body{opacity:1;transform:none;transition-delay:.06s}
+.ui-filters.no-anim .flt-panel,.ui-filters.no-anim .flt-inner>.ui-body,.ui-filters.no-anim .flt-chev{transition:none}
+@media (prefers-reduced-motion: reduce){.flt-panel,.flt-inner>.ui-body,.flt-chev{transition:none}}
 .ui-more summary{cursor:pointer;font-weight:600;font-size:13.5px;color:var(--acc);margin:4px 0}
 .ui-more[open] summary{margin-bottom:12px}
 .rc-draft{border-top:1px solid var(--line);padding:16px 18px}.rc-draft:first-child{border-top:0}
@@ -2353,6 +2374,7 @@ section.ui-section{scroll-margin-top:70px}
 @media (max-width:700px){.ui-grid,.ui-grid3{grid-template-columns:1fr}.rc-role,.rc-fields,.rc-actions,.rc-alert{margin-left:0}
   .rc-who .badges{display:none}.rc-sent .hide-sm{display:none}}
 """
+CSS = CSS.replace("FONTVER", _font_version())
 
 
 STATUS_LABEL = {"new": "new", "seen": "seen", "saved": "saved", "applied": "applied", "hidden": "hidden"}
@@ -2616,8 +2638,12 @@ def jobs_page(q):
         d = dict(base_q, **chg)
         return "/?" + urllib.parse.urlencode({k: v for k, v in d.items() if v not in ("", None)})
 
+    picked_labels = []   # what the filters are set to: shown on the folded filter panel's button
+
     def chip(label, cnt, **chg):
         on = all(base_q.get(k) == v for k, v in chg.items())
+        if on:
+            picked_labels.append(label)
         return '<a class="fchip%s" href="%s">%s%s</a>' % (" on" if on else "", e(link(**chg)), label,
                                                        ("<small>%d</small>" % cnt) if cnt is not None else "")
 
@@ -2667,7 +2693,15 @@ def jobs_page(q):
     hidden_inputs = "".join('<input type="hidden" name="%s" value="%s">' % (k, e(v))
                             for k, v in base_q.items() if k in ("status", "work", "sort", "age", "source") and v)
     more_open = " open" if (text or mn != cfg["min_score"]) else ""
-    filt = """<section class="ui-section ui-filters" aria-label="Filters"><div class="ui-body">
+    picked_labels += [e(SOURCES_INFO.get(k, (k,))[0]) for k in srcs]
+    if mn != cfg["min_score"]:
+        picked_labels.append("≥ %d pts" % mn)
+    if text:
+        picked_labels.append("“%s”" % e(text))
+    filt = """<section class="ui-section ui-filters" aria-label="Filters">
+<button type="button" class="flt-toggle" id="flt_btn" aria-expanded="false" aria-controls="flt_panel">%s<b>Filters</b>
+<span class="flt-sum">%s</span><span class="flt-chev">%s</span></button>
+<div class="flt-panel" id="flt_panel" inert><div class="flt-inner"><div class="ui-body">
 <div class="row-chips"><span class="lbl">Status</span>%s</div>
 <div class="row-chips"><span class="lbl">Work mode</span>%s</div>
 <div class="row-chips"><span class="lbl">Source</span>%s<span class="muted" style="font-size:12.5px">click several to combine</span></div>
@@ -2677,8 +2711,9 @@ def jobs_page(q):
 <form class="filters" method="get">%s
 <label class="ui-inline" style="margin:0;font-weight:400">Min. score <input class="input input-sm" type="number" name="min" value="%d" style="width:80px"></label>
 <input class="input input-sm" type="search" name="q" value="%s" placeholder="Search: title, company, location" aria-label="Search" style="width:260px">
-<button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/">Reset filters</a></form></details></div></section>""" % (
-        st_chips, wm_chips, src_chips, sort_chips, age_chips, more_open, hidden_inputs, mn, e(text))
+<button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/">Reset filters</a></form></details></div></div></div></section>
+""" % (
+        ic("tune"), " · ".join(picked_labels), ic("expand_more"), st_chips, wm_chips, src_chips, sort_chips, age_chips, more_open, hidden_inputs, mn, e(text))
     head = """<div class="listhead"><span><b>%d</b> posting%s · age refers to <b>%s</b> · notifications from %d pts</span>
 <form method="post" action="/mark-all-seen"><button class="btn btn-sm btn-ghost">Mark all new as seen</button></form></div>""" % (
         total, " (first 300 shown)" if total > 300 else "", "collected" if sort == "seen" else "posted",
@@ -2736,12 +2771,12 @@ def jobs_page(q):
         cards.append('<section class="ui-section"><div class="ui-body ui-empty">No postings match the filters. '
                      'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
     busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
-    top = ('<div class="ui-head"><h1>Jobs</h1><p>Postings from your sources, scored against your CV. '
-           'Click a title for the details and the full posting; ' + ic("open_in_new") + ' opens the original. “CV + Resume” writes documents tailored to it.</p>'
+    top = ('<div class="ui-head"><h1>Jobs</h1>'
            '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
            'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
            '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
-    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)) + JD_PREVIEW_JS + JOB_MODAL,
+    return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards))
+                + FILTERS_JS + JD_PREVIEW_JS + JOB_MODAL,
                 q.get("msg", ""), refresh=3 if busy else 0)
 
 
@@ -2900,6 +2935,29 @@ def job_detail_html(jid, back="/", modal=False):
         ' data-preview="/job/%s/preview"' % qid if loading else "",
         text or '<p class="muted">No text stored for this posting yet.</p>')
     return r["title"], body
+
+
+# The filter panel on the Jobs page is folded by default; the button opens it with an animation. Whether it is open is
+# remembered in this browser, so picking a filter (which reloads the page) does not fold it again.
+FILTERS_JS = """<script>(function () {
+var sec = document.querySelector(".ui-filters"), btn = document.getElementById("flt_btn"), panel = document.getElementById("flt_panel");
+if (!sec || !btn) return;
+function set(open, animate) {
+  if (!animate) sec.classList.add("no-anim");
+  sec.classList.toggle("open", open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) panel.removeAttribute("inert"); else panel.setAttribute("inert", "");
+  if (!animate) { void sec.offsetHeight; sec.classList.remove("no-anim"); }
+}
+var saved = null;
+try { saved = localStorage.getItem("jw_filters_open"); } catch (x) {}
+set(saved === "1", false);
+btn.addEventListener("click", function () {
+  var open = !sec.classList.contains("open");
+  set(open, true);
+  try { localStorage.setItem("jw_filters_open", open ? "1" : "0"); } catch (x) {}
+});
+})();</script>"""
 
 
 # Loads the full posting into a detail view (the page, or the dialog on the Jobs page).
