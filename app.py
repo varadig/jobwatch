@@ -370,13 +370,24 @@ def save_config(cfg):
 
 
 def db():
-    con = sqlite3.connect(DB_PATH, timeout=30)
+    # WAL (set in init_db): reading never waits for a write and the other way round, so a CV being saved, a refresh
+    # and the pages do not lock each other out ("database is locked"). Writers still take turns: wait up to 60 s.
+    con = sqlite3.connect(DB_PATH, timeout=60)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=60000")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
 def init_db():
     os.makedirs(DATA, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, timeout=60)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")   # stays set in the database file
+    except sqlite3.OperationalError as ex:
+        log.warning("Could not switch the database to WAL: %s", ex)
+    finally:
+        con.close()
     with db() as con:
         con.executescript("""
         CREATE TABLE IF NOT EXISTS jobs(
