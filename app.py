@@ -2348,7 +2348,7 @@ def rescore_all():
 # An interview: added by hand (optionally from a posting) or found in the mailbox (a calendar invitation, a booking
 # confirmation, a recruiter's e-mail). Reminders go to ntfy on the day (in the morning) and shortly before. Claude can
 # research the company and the interviewers on the web. The interviews are also an iCalendar feed to subscribe to.
-INTERVIEW_DEFAULTS = {"morning": "08:00", "before_min": 60, "from_mail": True, "mail_days": 14, "research": True, "cal_token": ""}
+INTERVIEW_DEFAULTS = {"morning": "08:00", "before_min": 60, "from_mail": True, "mail_days": 14, "research": False, "cal_token": ""}
 INTERVIEW_STATUS = {"planned": "Planned", "done": "Done", "cancelled": "Cancelled"}
 IV_LOCK = threading.Lock()        # one e-mail scan at a time
 IV_SCAN_EVERY = 30 * 60           # seconds between e-mail scans
@@ -3173,7 +3173,8 @@ def interviews_page(q, flash=""):
         e(ivc["morning"]), int(ivc["before_min"] or 0),
         "" if ntfy_on else ' <b>Push notifications are off:</b> turn them on in <a href="/settings#notify">Settings → Notifications</a>.')
     add = ui_sec("add", "Add an interview", "From a posting: open it and click “Interview”. "
-                 + ("Claude then researches the company and the interviewers on the web." if key and ivc["research"] else ""),
+                 + ("Claude then researches the company and the interviewers on the web." if key and ivc["research"] else
+                    "To have Claude research the company, open the interview and click “Research the company”." if key else ""),
                  iv_form(job=job))
     if not job and rows:
         add = add.replace('<section class="ui-section" id="add"', '<details class="ui-section iv-add" id="add"><summary>%s Add an interview</summary><section' % ic("add"), 1)
@@ -3200,9 +3201,9 @@ def interviews_page(q, flash=""):
                                   "read the others too")) if mailbox else
                              'Needs a mailbox: add one below.')
         + '<div><label>Research</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
-          'class="toggle toggle-sm toggle-primary" name="iv_research"%s> Research the company for each new interview</label>'
+          'class="toggle toggle-sm toggle-primary" name="iv_research"%s> Research every new interview automatically</label>'
           '<span class="help">Claude searches the web: the company, recent news, the interviewers\' professional background, '
-          'likely questions. About 10–30 cents per interview.%s</span></div>' % (
+          'likely questions, using your Claude API key (roughly 10–50 cents each). Off: it runs only when you click “Research the company” on an interview.%s</span></div>' % (
               chk(ivc["research"]), "" if key else ' Needs a <a href="/settings#claude">Claude API key</a>.')
         + '<div class="wide ui-inline"><button class="btn btn-sm btn-primary">Save</button>'
           '<button class="btn btn-sm btn-outline" formaction="/interviews/scan"%s>%s Check the e-mails now</button></div></form>'

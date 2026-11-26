@@ -1821,3 +1821,22 @@ class InterviewMailboxes(unittest.TestCase):
         self.assertEqual(len(mails), 1)
         self.assertEqual(errs, ["me@gmail.com: timeout"])
         self.assertEqual(app.mailbox_state("main")["error"], "timeout")
+
+
+
+class ResearchIsOptional(unittest.TestCase):
+    def test_adding_an_interview_does_not_start_research_by_default(self):
+        app.init_db()
+        cfg = app.load_config()
+        cfg["anthropic_api_key"] = "k"
+        cfg.pop("interviews", None)
+        started = []
+        with mock.patch.object(app, "load_config", lambda: cfg),                 mock.patch.object(app, "start_research", lambda iid, force=False: started.append(iid) or True):
+            to, msg = app.interview_post("/interviews", {"iv_company": "Acme", "iv_date": "2030-12-03", "iv_time": "10:00"})
+            self.assertEqual(started, [])
+            self.assertNotIn("researching", msg)
+            iid = int(to.rsplit("/", 1)[1])
+            app.interview_post("/interviews/%d" % iid, {"act": "research"})   # the button still works
+            self.assertEqual(started, [iid])
+        with app.db() as con:
+            con.execute("DELETE FROM interviews WHERE id=?", (iid,))
