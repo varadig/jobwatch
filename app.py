@@ -396,6 +396,8 @@ def init_db():
           msgid TEXT PRIMARY KEY, processed_at TEXT, found INTEGER);
         CREATE TABLE IF NOT EXISTS company_logos(
           ckey TEXT PRIMARY KEY, url TEXT, file TEXT, tried TEXT);
+        CREATE TABLE IF NOT EXISTS job_marks(
+          k TEXT PRIMARY KEY, status TEXT, title TEXT, company TEXT, at TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
           source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
           error TEXT, seeded INTEGER DEFAULT 0);
@@ -441,6 +443,11 @@ def migrate_db():
             if n:
                 log.info("Duplicates: %d posting(s) hidden", n)
             con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dedupe','1')")
+        # remember the decisions already in the list (hidden, saved, applied) so a cache reset keeps them
+        for r in con.execute("SELECT id, status, title, company, urlkey, dupkey FROM jobs WHERE status IN (%s)"
+                             % ",".join("?" * len(KEPT_STATUSES)), KEPT_STATUSES).fetchall():
+            con.executemany("INSERT OR IGNORE INTO job_marks(k, status, title, company, at) VALUES(?,?,?,?,?)",
+                            [(k, r["status"], r["title"], r["company"], now_iso()) for k in mark_keys(r["id"], r["urlkey"], r["dupkey"])])
         if not con.execute("SELECT 1 FROM meta WHERE k='cv_applied'").fetchone():
             con.execute("UPDATE jobs SET status='applied' WHERE COALESCE(status,'new') IN ('new','seen') "
                         "AND id IN (SELECT job_id FROM cvs WHERE status='done')")
@@ -620,6 +627,36 @@ def url_key(url):
 
 def dup_key(title, company, url):
     return norm(GENDER_TAGS.sub(" ", title or "")) + "|" + (norm_company(company) or url_key(url))
+
+
+# Your decisions on postings (hidden, saved, applied) are kept apart from the job cache, keyed by the posting's id,
+# link and title + company: after a cache reset or a new search the same posting, from any source, gets them back.
+KEPT_STATUSES = ("hidden", "saved", "applied")
+
+
+def mark_keys(jid, urlkey, dupkey):
+    return [k for k in ("id:" + (jid or ""), "u:" + (urlkey or ""), "d:" + (dupkey or "")) if len(k) > 3 and not k.endswith(":")]
+
+
+def set_job_status(con, jid, status):
+    """Sets a posting's status and remembers it (or forgets it, for new / seen)."""
+    con.execute("UPDATE jobs SET status=? WHERE id=?", (status, jid))
+    r = con.execute("SELECT title, company, urlkey, dupkey FROM jobs WHERE id=?", (jid,)).fetchone()
+    keys = mark_keys(jid, r["urlkey"], r["dupkey"]) if r else mark_keys(jid, "", "")
+    if status in KEPT_STATUSES:
+        con.executemany("INSERT OR REPLACE INTO job_marks(k, status, title, company, at) VALUES(?,?,?,?,?)",
+                        [(k, status, r["title"] if r else "", r["company"] if r else "", now_iso()) for k in keys])
+    else:  # forget it under every key of the same posting (also the ones from other sources)
+        con.executemany("DELETE FROM job_marks WHERE k=?", [(k,) for k in keys])
+        if r and r["title"]:
+            con.execute("DELETE FROM job_marks WHERE title=? AND COALESCE(company,'')=?", (r["title"], r["company"] or ""))
+
+
+def remembered_status(con, jid, urlkey, dupkey):
+    keys = mark_keys(jid, urlkey, dupkey)
+    r = con.execute("SELECT status FROM job_marks WHERE k IN (%s) ORDER BY at DESC LIMIT 1" % ",".join("?" * len(keys)),
+                    keys).fetchone() if keys else None
+    return r["status"] if r else None
 
 
 def find_duplicate(con, title, company, url):
@@ -1981,15 +2018,16 @@ def run_all(force=False, only=None, custom_ids=None):
                     if same:
                         merge_into(con, same, name, it)  # already listed from another source
                         continue
-                    notified = 0 if (seeded and sc >= cfg["notify_min_score"]
+                    kept = remembered_status(con, jid, url_key(it["url"]), dup)  # hidden / saved / applied before
+                    notified = 0 if (seeded and not kept and sc >= cfg["notify_min_score"]
                                      and wm in cfg.get("notify_work_modes", ["remote", "unknown"])) else 1
                     con.execute(
                         "INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,"
                         "dupkey,first_seen,last_seen,status,notified,work_mode,urlkey,mode_src,mode_note) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?)",
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (jid, name, it["title"], it["company"], it["location"], it["url"], it["posted"],
-                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, notified, wm, url_key(it["url"]),
-                         msrc, mnote))
+                         it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, kept or "new", notified, wm,
+                         url_key(it["url"]), msrc, mnote))
                     new += 1
                     if not notified:
                         to_notify.append(dict(id=jid, source=name, score=sc, **{
@@ -3201,7 +3239,9 @@ def cv_generate(jid, description):
             con.execute("UPDATE cvs SET status='done', error=NULL, data=?, created=? WHERE job_id=?",
                         (json.dumps(data, ensure_ascii=False), now_iso(), jid))
             # documents made: you have (probably) applied
-            con.execute("UPDATE jobs SET status='applied' WHERE id=? AND COALESCE(status,'new') IN ('new','seen')", (jid,))
+            r = con.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
+            if r and (r["status"] or "new") in ("new", "seen"):
+                set_job_status(con, jid, "applied")
     except Exception as ex:
         log.exception("CV generation error")
         with db() as con:
@@ -4296,7 +4336,7 @@ class Handler(BaseHTTPRequestHandler):
                 st = f.get("status")
                 if st in STATUS_LABEL:
                     with db() as con:
-                        con.execute("UPDATE jobs SET status=? WHERE id=?", (st, jid))
+                        set_job_status(con, jid, st)
                 wm = f.get("work_mode")
                 if wm in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten
                     with db() as con:
@@ -4374,7 +4414,7 @@ class Handler(BaseHTTPRequestHandler):
                                    f.get("body", ""), to=to, attachments=att)
                         with db() as con:
                             con.execute("UPDATE cvs SET sent_to=?, sent_at=? WHERE job_id=?", (to, now_iso(), jid))
-                            con.execute("UPDATE jobs SET status='applied' WHERE id=?", (jid,))
+                            set_job_status(con, jid, "applied")
                             cvrow = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
                         try:
                             write_job_info(os.path.dirname(paths["cv"]), job, json.loads(cvrow["data"]), cvrow)

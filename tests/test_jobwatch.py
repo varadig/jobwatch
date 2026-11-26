@@ -1304,3 +1304,39 @@ class ClearCacheButton(unittest.TestCase):
     def test_back_with_message(self):
         self.assertEqual(app.with_msg("/?work=all&msg=old", "Done"), "/?work=all&msg=Done")
         self.assertEqual(app.with_msg("//evil.example/x", "Hi"), "/?msg=Hi")
+
+
+class DecisionsSurviveReset(unittest.TestCase):
+    def test_hidden_stays_hidden_after_a_reset(self):
+        from unittest import mock
+        app.init_db()
+        app.migrate_db()
+        with app.db() as con:
+            for t in ("jobs", "job_marks", "cvs"):
+                con.execute("DELETE FROM %s" % t)
+        cfg = app.load_config()
+        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))
+        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        cfg["search_filter"] = {}
+        app.save_config(cfg)
+        items = [{"ext_id": "1", "title": "Unity Developer", "company": "Acme", "location": "", "url": "https://acme.example/jobs/1", "posted": ""},
+                 {"ext_id": "2", "title": "Game Programmer", "company": "Beta", "location": "", "url": "https://beta.example/jobs/2", "posted": ""}]
+        run = lambda srcs: app.run_all(force=True, only=srcs)
+        with mock.patch.dict(app.SOURCE_FUNCS, {"meetfrank": lambda c: [dict(i) for i in items],
+                                                "flexa": lambda c: [dict(i, ext_id="f" + i["ext_id"]) for i in items[:1]]}), \
+                mock.patch.object(app, "fetch_logos", lambda: None), mock.patch.object(app, "notify_jobs", lambda c, j: []):
+            run({"meetfrank"})
+            with app.db() as con:
+                app.set_job_status(con, "meetfrank:1", "hidden")
+                app.set_job_status(con, "meetfrank:2", "saved")
+            app.reset_job_cache()
+            run({"flexa"})          # the same posting from another source
+            run({"meetfrank"})
+        with app.db() as con:
+            st = {r["id"]: r["status"] for r in con.execute("SELECT id, status FROM jobs WHERE dup_of IS NULL")}
+        self.assertEqual(st, {"flexa:f1": "hidden", "meetfrank:2": "saved"})
+        with app.db() as con:                    # unhiding forgets it
+            app.set_job_status(con, "flexa:f1", "new")
+            self.assertIsNone(app.remembered_status(con, "meetfrank:1", app.url_key(items[0]["url"]), ""))
+            for t in ("jobs", "job_marks"):
+                con.execute("DELETE FROM %s" % t)
