@@ -441,6 +441,59 @@ def migrate_db():
             if n:
                 log.info("Duplicates: %d posting(s) hidden", n)
             con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dedupe','1')")
+        if not con.execute("SELECT 1 FROM meta WHERE k='cv_applied'").fetchone():
+            con.execute("UPDATE jobs SET status='applied' WHERE COALESCE(status,'new') IN ('new','seen') "
+                        "AND id IN (SELECT job_id FROM cvs WHERE status='done')")
+            con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('cv_applied','1')")
+
+
+def restore_cv_jobs(con=None):
+    """The postings you made a CV for stay in the list for good: a deleted one (cache reset, new search) comes back
+    from its documents (info.json in the documents folder, the posting text in the CV record), marked "applied".
+    A copy of it fetched again later is merged into it as a duplicate. Returns how many came back."""
+    own = con is None
+    con = con or db()
+    try:
+        with CFG_LOCK:
+            cfg = load_config()
+        back = 0
+        for cv in con.execute("SELECT c.* FROM cvs c LEFT JOIN jobs j ON j.id=c.job_id "
+                              "WHERE c.status='done' AND j.id IS NULL").fetchall():
+            info = {}
+            if cv["doc_dir"] and os.path.isfile(os.path.join(cv["doc_dir"], "info.json")):
+                try:
+                    with open(os.path.join(cv["doc_dir"], "info.json"), encoding="utf-8") as fh:
+                        info = json.load(fh)
+                except (OSError, ValueError):
+                    info = {}
+            it = {"title": info.get("title") or "", "company": info.get("company") or "", "location": info.get("location") or "",
+                  "url": info.get("url") or "", "posted": info.get("posted") or "", "description": cv["description"] or ""}
+            if not it["title"] or not it["url"]:
+                continue
+            sc, hits = score_job(cfg, it)
+            wm = info.get("work_mode") if info.get("work_mode") in ("remote", "hybrid", "onsite") else None
+            if wm:
+                msrc, mnote = "source", "from the saved documents"
+            else:
+                wm, mnote = classify_mode_ex(it["title"], it["location"], it["description"])
+                msrc = "text" if wm != "unknown" else None
+            ts = cv["created"] or info.get("generated") or now_iso()
+            con.execute(
+                "INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,first_seen,"
+                "last_seen,status,notified,work_mode,urlkey,mode_src,mode_note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'applied',1,?,?,?,?)",
+                (cv["job_id"], cv["job_id"].split(":", 1)[0], it["title"], it["company"], it["location"], it["url"], it["posted"],
+                 it["description"], sc, ", ".join(hits), dup_key(it["title"], it["company"], it["url"]), ts, ts, wm,
+                 url_key(it["url"]), msrc, mnote))
+            back += 1
+        if back:
+            dedupe_existing(con)  # a copy fetched meanwhile is hidden behind the one with the CV
+            log.info("Postings with a CV restored: %d", back)
+        if own:
+            con.commit()
+        return back
+    finally:
+        if own:
+            con.close()
 
 
 def now_iso():
@@ -1326,6 +1379,7 @@ def reset_job_cache():
         con.execute("DELETE FROM jobs")
         con.execute("DELETE FROM source_state")
         con.execute("DELETE FROM mail_seen")
+        restore_cv_jobs(con)  # the postings with a CV stay (from their documents)
 
 
 def mark_mails_done(done):
@@ -2884,7 +2938,7 @@ def settings_page(flash=""):
                "Settings, profile, CVs and documents are kept.')")
     danger = ui_sec("danger", "Maintenance", "",
         '<form method="post" action="/reset-jobs" class="ui-danger" onsubmit="%s"><div><b>Reset the job cache</b>'
-        '<span class="help">Deletes the found postings; settings, profile, CVs and documents are kept. '
+        '<span class="help">Deletes the found postings; settings, profile, CVs and documents are kept, and the postings you made a CV for stay in the list (marked applied). '
         'The next refresh starts from scratch.</span></div>'
         '<button class="btn btn-sm btn-error btn-outline" name="reset" value="1">Reset job cache</button></form>' % confirm)
 
@@ -3127,6 +3181,8 @@ def cv_generate(jid, description):
         with db() as con:
             con.execute("UPDATE cvs SET status='done', error=NULL, data=?, created=? WHERE job_id=?",
                         (json.dumps(data, ensure_ascii=False), now_iso(), jid))
+            # documents made: you have (probably) applied
+            con.execute("UPDATE jobs SET status='applied' WHERE id=? AND COALESCE(status,'new') IN ('new','seen')", (jid,))
     except Exception as ex:
         log.exception("CV generation error")
         with db() as con:
@@ -4200,7 +4256,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.profile_import_text(f.get("cv_text", ""))
             if u.path == "/reset-jobs":
                 reset_job_cache()
-                return self.redirect("/settings?msg=" + urllib.parse.quote("Job cache cleared. Press Refresh to fetch again."))
+                return self.redirect("/settings?msg=" + urllib.parse.quote(
+                    "Job cache cleared; the postings you made a CV for stay, marked applied. Press Refresh to fetch again."))
             if u.path == "/run":
                 only, cids = run_selection(f)
                 if only is None and not cids and not f.get("all") and ("one" in f or "selected" in f):
@@ -4355,6 +4412,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     init_db()
     migrate_db()
+    restore_cv_jobs()
     threading.Thread(target=backfill_docs, daemon=True).start()
     with CFG_LOCK:
         cfg = load_config()

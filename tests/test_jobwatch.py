@@ -1266,3 +1266,28 @@ class PresetPickedInTheForm(unittest.TestCase):
         self.assertIn('id="preset_data"', h)
         self.assertIn('"tpl:game-designer"', h)
         self.assertNotIn('value="load"', h)   # no server-side switch button any more
+
+
+class CvPostingsStay(unittest.TestCase):
+    def test_reset_brings_back_the_postings_with_a_cv(self):
+        app.init_db()
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "info.json"), "w", encoding="utf-8") as fh:
+            json.dump({"job_id": "linkedin:777", "title": "Senior Unity Developer", "company": "Acme", "location": "Remote",
+                       "url": "https://www.linkedin.com/jobs/view/777/", "work_mode": "remote", "posted": "2026-11-20"}, fh)
+        with app.db() as con:
+            con.execute("DELETE FROM cvs")
+            con.execute("INSERT INTO cvs(job_id,status,description,created,doc_dir) VALUES('linkedin:777','done','We use Unity.','2026-11-21T10:00:00+00:00',?)", (d,))
+            con.execute("INSERT INTO cvs(job_id,status) VALUES('linkedin:888','error')")   # no documents: nothing to bring back
+        app.reset_job_cache()
+        with app.db() as con:
+            rows = [dict(r) for r in con.execute("SELECT id, status, title, company, work_mode, urlkey FROM jobs")]
+        self.assertEqual(rows, [{"id": "linkedin:777", "status": "applied", "title": "Senior Unity Developer", "company": "Acme",
+                                 "work_mode": "remote", "urlkey": app.url_key("https://www.linkedin.com/jobs/view/777/")}])
+        # fetched again later (e.g. from an alert e-mail): merged into the one with the CV, not a second card
+        with app.db() as con:
+            same = app.find_duplicate(con, "Senior Unity Developer", "Acme", "https://www.linkedin.com/jobs/view/777/?trk=x")
+        self.assertEqual(same["id"], "linkedin:777")
+        with app.db() as con:
+            con.execute("DELETE FROM cvs")
+            con.execute("DELETE FROM jobs")
