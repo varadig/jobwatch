@@ -8,11 +8,12 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
-from jobwatch.sources.base import Filtering, JobSource
+
+from jobwatch.net import http
 from jobwatch.search import search_keywords
+from jobwatch.sources.base import Filtering, JobSource
 from jobwatch.util.text import strip_tags
 from jobwatch.util.timeutil import epoch_iso, rfc822_iso
-from jobwatch.net import http
 
 
 class MeetFrankSource(JobSource):

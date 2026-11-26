@@ -3,9 +3,10 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
@@ -14,15 +15,11 @@ from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.documents import restore_cv_jobs
 from jobwatch.services.enrich import enrich_pending_linkedin, enrich_work_modes
 from jobwatch.services.logos import fetch_logos, remember_logo
-
+from jobwatch.services.notify import notifier
 from jobwatch.services.state import RUN_LOCK, STATE
 from jobwatch.sources.mail import mark_mails_done
 from jobwatch.sources.registry import SOURCES
 from jobwatch.util.timeutil import now_iso
-from jobwatch.config import config_store
-from jobwatch.db import database
-from jobwatch.services.notify import notifier
-
 
 # Settings that decide WHAT is fetched. When one changes, the postings found so far are cleared and fetched again.
 SEARCH_SETTINGS = ("sources", "search_terms", "search_locations", "search_filter", "studios", "rss_feeds", "custom_sources")

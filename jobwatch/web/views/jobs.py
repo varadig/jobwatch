@@ -4,9 +4,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.models import SOURCES_INFO, STATUS_LABEL
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.logos import logo_files
@@ -15,9 +16,9 @@ from jobwatch.services.refresh import refresher
 from jobwatch.services.state import STATE
 from jobwatch.util.text import e
 from jobwatch.util.timeutil import bucket_of, days_ago, fmt_dt, parse_dt, rel_day
-from jobwatch.web.components import STATUS_BUTTONS, ic, logo_html, mode_picker, mode_quick, page, progress_html, wm_html
-from jobwatch.config import config_store
-from jobwatch.db import database
+from jobwatch.web.components import (
+    STATUS_BUTTONS, ic, logo_html, mode_picker, mode_quick, page, progress_html, script, wm_html
+)
 
 
 def jobs_page(q):
@@ -305,38 +306,11 @@ def job_detail_html(jid, back="/", modal=False):
 
 # The filter panel on the Jobs page is folded by default; the button opens it with an animation. Whether it is open is
 # remembered in this browser, so picking a filter (which reloads the page) does not fold it again.
-FILTERS_JS = """<script>(function () {
-var sec = document.querySelector(".ui-filters"), btn = document.getElementById("flt_btn"), panel = document.getElementById("flt_panel");
-if (!sec || !btn) return;
-function set(open, animate) {
-  if (!animate) sec.classList.add("no-anim");
-  sec.classList.toggle("open", open);
-  btn.setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) panel.removeAttribute("inert"); else panel.setAttribute("inert", "");
-  if (!animate) { void sec.offsetHeight; sec.classList.remove("no-anim"); }
-}
-var saved = null;
-try { saved = localStorage.getItem("jw_filters_open"); } catch (x) {}
-set(saved === "1", false);
-btn.addEventListener("click", function () {
-  var open = !sec.classList.contains("open");
-  set(open, true);
-  try { localStorage.setItem("jw_filters_open", open ? "1" : "0"); } catch (x) {}
-});
-})();</script>"""
+FILTERS_JS = script("filters")
 
 
 # Loads the full posting into a detail view (the page, or the dialog on the Jobs page).
-JD_PREVIEW_JS = """<script>(function () {
-window.jdLoadPreview = function (root) {
-  var box = root.querySelector("#jd-text[data-preview]"), src = root.querySelector("#jd-src");
-  if (!box) return;
-  fetch(box.dataset.preview).then(function (r) { return r.ok ? r.text() : ""; }).then(function (h) {
-    if (h) { box.innerHTML = h; src.textContent = "From the posting's own page."; }
-    else src.textContent = "The full posting could not be read from its page (it may need a login); this is the text jobwatch has. Use \\u201cOpen the original \\u2197\\u201d.";
-  }).catch(function () { src.textContent = "The full posting could not be loaded; this is the text jobwatch has."; });
-};
-})();</script>"""
+JD_PREVIEW_JS = script("posting-preview")
 
 
 def job_page(jid, back="/", flash=""):
@@ -351,115 +325,4 @@ def job_page(jid, back="/", flash=""):
 JOB_MODAL = """<dialog id="job_dlg" class="modal" aria-labelledby="jd-title"><div class="modal-box jd-modal">
 <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">""" + ic("close") + """</button></form>
 <div id="job_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
-<div id="jw_live" class="sr-only" aria-live="polite"></div>
-<script>(function () {
-var dlg = document.getElementById("job_dlg"), body = document.getElementById("job_dlg_body"), live = document.getElementById("jw_live");
-var changed = false, cur = null, curCard = null;
-var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-// ---- updating the list in place
-function swapCounts(doc) {
-  [".stats", ".listhead"].forEach(function (sel) {
-    var a = document.querySelector(sel), b = doc.querySelector(sel);
-    if (a && b) a.replaceWith(document.importNode(b, true));
-  });
-  var A = document.querySelectorAll(".ui-filters .row-chips"), B = doc.querySelectorAll(".ui-filters .row-chips");
-  if (A.length === B.length) A.forEach(function (x, i) { x.replaceWith(document.importNode(B[i], true)); });
-}
-function bucketOf(el) {
-  while (el && !(el.classList && el.classList.contains("bucket"))) el = el.previousElementSibling;
-  return el;
-}
-function fixBucket(b) {
-  if (!b) return;
-  var n = 0, x = b.nextElementSibling;
-  while (x && !x.classList.contains("bucket")) { if (x.matches("article.job")) n++; x = x.nextElementSibling; }
-  if (!n) b.remove(); else { var sp = b.querySelector("span"); if (sp) sp.textContent = "\\u00b7 " + n; }
-}
-function leave(card) {
-  var b = bucketOf(card);
-  function done() { card.remove(); fixBucket(b); }
-  if (reduce) return done();
-  card.style.height = card.offsetHeight + "px";
-  void card.offsetHeight;
-  card.classList.add("leaving");
-  setTimeout(done, 420);
-}
-function refreshCard(card, what) {
-  if (!card || !card.isConnected) return;
-  var href = card.dataset.href, title = (card.querySelector(".jt a") || {}).textContent || "";
-  card.classList.add("busy");
-  fetch(location.href, {cache: "no-store"}).then(function (r) { return r.text(); }).then(function (h) {
-    var doc = new DOMParser().parseFromString(h, "text/html");
-    swapCounts(doc);
-    var fresh = doc.querySelector('article.job[data-href="' + href + '"]');
-    if (fresh) {
-      fresh = document.importNode(fresh, true);
-      card.replaceWith(fresh);
-      if (!reduce) { fresh.classList.add("updated"); setTimeout(function () { fresh.classList.remove("updated"); }, 900); }
-    } else leave(card);
-    if (what) live.textContent = title + ": " + what;
-  }).catch(function () { location.reload(); });
-}
-var LABEL = {hidden: "hidden", seen: "marked seen", saved: "saved", applied: "marked applied", "new": "marked new"};
-function post(form, submitter) {
-  var fd = new FormData(form, submitter);
-  return fetch(form.action, {method: "POST", body: new URLSearchParams(fd)}).then(function () { return fd; });
-}
-// buttons on the cards
-document.addEventListener("submit", function (ev) {
-  var form = ev.target, card = form.closest && form.closest("article.job[data-href]");
-  if (!card || dlg.contains(form) || (form.method || "").toLowerCase() !== "post") return;
-  ev.preventDefault();
-  var d = form.closest("details"); if (d) d.open = false;
-  post(form, ev.submitter).then(function (fd) {
-    refreshCard(card, LABEL[fd.get("status")] || (fd.get("work_mode") ? "work mode set" : ""));
-  });
-}, true);
-// ---- the dialog
-function load(href) {
-  cur = href;
-  return fetch(href + "?partial=1").then(function (r) { if (!r.ok) throw r; return r.text(); })
-    .then(function (h) { body.innerHTML = h; if (window.jdLoadPreview) window.jdLoadPreview(body); });
-}
-function open(href, card) {
-  curCard = card; changed = !!(card && card.classList.contains("st-new"));   // opening marks it seen
-  body.innerHTML = '<p class="muted" style="padding:20px">Loading\\u2026</p>';
-  dlg.showModal();
-  load(href).catch(function () { location.href = href; });
-}
-var lastStatus = "";
-dlg.addEventListener("close", function () {
-  body.innerHTML = "";
-  if (changed) { changed = false; refreshCard(curCard, LABEL[lastStatus] || ""); }
-  lastStatus = "";
-});
-body.addEventListener("submit", function (ev) {
-  var f = ev.target;
-  if (!f.action || (f.method || "").toLowerCase() !== "post") return;
-  ev.preventDefault();
-  post(f, ev.submitter).then(function (fd) {
-    changed = true;
-    if (fd.has("status")) { lastStatus = fd.get("status"); dlg.close(); } else load(cur);   // status: done; work mode: show it
-  });
-});
-function cardOf(ev) {
-  var a = ev.target.closest('.jt a[href^="/job/"]');
-  if (a) return {card: a.closest("article.job"), link: true};
-  var card = ev.target.closest("article.job[data-href]");
-  if (!card || ev.target.closest("a,button,summary,details,form,input,select,textarea,label")) return null;
-  if (String(window.getSelection && window.getSelection()).trim()) return null;   // selecting text, not clicking
-  return {card: card, link: false};
-}
-document.addEventListener("click", function (ev) {
-  if (ev.button !== 0 || dlg.contains(ev.target)) return;
-  var t = cardOf(ev);
-  if (!t || !t.card) return;
-  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { if (!t.link) window.open(t.card.dataset.href, "_blank"); return; }
-  ev.preventDefault();
-  open(t.card.dataset.href, t.card);
-});
-document.addEventListener("auxclick", function (ev) {
-  var t = cardOf(ev);
-  if (t && t.card && !t.link && ev.button === 1) { ev.preventDefault(); window.open(t.card.dataset.href, "_blank"); }
-});
-})();</script>"""
+<div id="jw_live" class="sr-only" aria-live="polite"></div>""" + script("job-dialog")

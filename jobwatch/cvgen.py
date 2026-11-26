@@ -631,8 +631,9 @@ def render_cv_pdf(path, profile, cv, font_dir, photo_path=None, scale=1.0, compa
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import (HRFlowable, Image, KeepTogether, ListFlowable, ListItem, Paragraph,
-                                    SimpleDocTemplate, Spacer, Table, TableStyle)
+    from reportlab.platypus import (
+        HRFlowable, Image, KeepTogether, ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    )
 
     cv = _merge_links(profile, _normalize(json.loads(json.dumps(cv))))
     R, B, SB, I, L = _fonts(font_dir)

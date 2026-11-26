@@ -10,18 +10,15 @@ import urllib.parse
 import urllib.request
 
 from jobwatch import cvgen
-
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.env import log
-
+from jobwatch.net import http
 from jobwatch.services.documents import load_profile
-
+from jobwatch.services.notify import notifier
 from jobwatch.sources.linkedin import linkedin_detail
 from jobwatch.util.text import strip_tags
 from jobwatch.util.timeutil import now_iso
-from jobwatch.config import config_store
-from jobwatch.db import database
-from jobwatch.net import http
-from jobwatch.services.notify import notifier
 
 
 def parse_recruiters(text):

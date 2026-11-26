@@ -1,7 +1,11 @@
 """Every source, in the order they are shown, and what the pages need to know about them."""
 from jobwatch.sources.base import Filtering
 from jobwatch.sources.custom import CustomSource
-from jobwatch.sources.feeds import MeetFrankSource, FourDayWeekSource, FlexaSource, RemotiveSource, RemoteOkSource, WeWorkRemotelySource, HimalayasSource, JobicySource, WorkingNomadsSource, ArbeitnowSource, RemoteGameJobsSource, WorkWithIndiesSource, RssSource
+from jobwatch.sources.feeds import (
+    ArbeitnowSource, FlexaSource, FourDayWeekSource, HimalayasSource, JobicySource, MeetFrankSource,
+    RemoteGameJobsSource, RemoteOkSource, RemotiveSource, RssSource, WeWorkRemotelySource, WorkingNomadsSource,
+    WorkWithIndiesSource
+)
 from jobwatch.sources.linkedin import LinkedInSource
 from jobwatch.sources.mail import MailAlertSource
 from jobwatch.sources.studios import StudiosSource

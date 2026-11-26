@@ -7,15 +7,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from jobwatch.sources.base import JobSource
-from jobwatch import cvgen
 
+from jobwatch import cvgen
+from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.services.state import STATE
+from jobwatch.sources.base import JobSource
 from jobwatch.util.text import html_attr, strip_tags
 from jobwatch.util.timeutil import now_iso, parsedate_iso
-from jobwatch.db import database
-
 
 MAIL_SKIP_TEXT = re.compile(r"unsubscribe|leiratkoz|preferences|settings|privacy|help|view (it )?in (your )?browser|"
                             r"see all|show all|manage|terms|sign in|log ?in|download the app|feedback|^here$|^click", re.I)

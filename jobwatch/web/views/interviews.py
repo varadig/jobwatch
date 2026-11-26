@@ -4,9 +4,10 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.models import INTERVIEW_STATUS
 from jobwatch.services.interviews.core import calendar_token, fmt_iv_when, interview_cfg, iv_start, rel_when
 from jobwatch.services.interviews.ics import google_calendar_link
@@ -14,9 +15,7 @@ from jobwatch.services.interviews.mailboxes import APP_PASSWORD_HELP, interview_
 from jobwatch.services.logos import logo_files
 from jobwatch.util.text import e
 from jobwatch.util.timeutil import fmt_dt
-from jobwatch.web.components import ic, logo_html, md_html, page, ui_field, ui_sec
-from jobwatch.config import config_store
-from jobwatch.db import database
+from jobwatch.web.components import ic, logo_html, md_html, page, script, ui_field, ui_sec
 
 
 def mailboxes_html(cfg):
@@ -263,73 +262,4 @@ def interview_page(iid, flash="", modal=False):
 IV_MODAL = """<dialog id="iv_dlg" class="modal" aria-labelledby="iv-title"><div class="modal-box jd-modal">
 <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">""" + ic("close") + """</button></form>
 <div id="iv_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
-<div id="iv_live" class="sr-only" aria-live="polite"></div>
-<script>(function () {
-var dlg = document.getElementById("iv_dlg"), body = document.getElementById("iv_dlg_body"), live = document.getElementById("iv_live");
-var cur = null, timer = 0, changed = false;
-function refreshList() {
-  fetch(location.pathname, {cache: "no-store"}).then(function (r) { return r.text(); }).then(function (h) {
-    var doc = new DOMParser().parseFromString(h, "text/html"), a = document.getElementById("iv_lists"), b = doc.getElementById("iv_lists");
-    if (a && b) a.innerHTML = b.innerHTML;
-  });
-}
-function watch() {
-  clearTimeout(timer);
-  if (dlg.open && body.querySelector("[data-running]")) timer = setTimeout(function () {
-    load(cur).then(function () { if (!body.querySelector("[data-running]")) refreshList(); });
-  }, 6000);
-}
-function load(href) {
-  cur = href;
-  return fetch(href + "?partial=1", {cache: "no-store"}).then(function (r) { if (!r.ok) throw r; return r.text(); })
-    .then(function (h) { body.innerHTML = h; watch(); });
-}
-function note(msg) {
-  if (!msg) return;
-  live.textContent = msg;
-  var d = document.createElement("div"); d.className = "alert alert-info iv-flash"; d.textContent = msg;
-  if (body.firstChild) body.insertBefore(d, body.firstChild);
-}
-function open(href) {
-  body.innerHTML = '<p class="muted" style="padding:20px">Loading\u2026</p>';
-  dlg.showModal();
-  load(href).catch(function () { location.href = href; });
-}
-dlg.addEventListener("close", function () {
-  clearTimeout(timer); body.innerHTML = "";
-  if (changed) { changed = false; refreshList(); }
-});
-body.addEventListener("submit", function (ev) {
-  var f = ev.target;
-  if ((f.method || "").toLowerCase() !== "post") return;
-  ev.preventDefault();
-  var fd = new FormData(f, ev.submitter);
-  f.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
-  fetch(f.action, {method: "POST", body: new URLSearchParams(fd)}).then(function (r) {
-    var u = new URL(r.url), msg = u.searchParams.get("msg") || "";
-    changed = true;
-    if (!/^[/]interviews[/][0-9]+$/.test(u.pathname)) { dlg.close(); live.textContent = msg; return; }   // deleted
-    return load(cur).then(function () { note(msg); });
-  }).catch(function () { location.reload(); });
-});
-function rowOf(ev) {
-  var a = ev.target.closest("a"), row = ev.target.closest(".iv[data-href]");
-  if (!row) return null;
-  if (a) return /^[/]interviews[/][0-9]+$/.test(a.getAttribute("href") || "") ? {row: row, link: true} : null;   // "Open"
-  if (ev.target.closest("button,summary,details,form,input,select,textarea,label")) return null;
-  if (String(window.getSelection && window.getSelection()).trim()) return null;   // selecting text
-  return {row: row, link: false};
-}
-document.addEventListener("click", function (ev) {
-  if (ev.button !== 0 || dlg.contains(ev.target)) return;
-  var t = rowOf(ev);
-  if (!t) return;
-  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { if (!t.link) window.open(t.row.dataset.href, "_blank"); return; }
-  ev.preventDefault();
-  open(t.row.dataset.href);
-});
-document.addEventListener("auxclick", function (ev) {
-  var t = rowOf(ev);
-  if (t && !t.link && ev.button === 1) { ev.preventDefault(); window.open(t.row.dataset.href, "_blank"); }
-});
-})();</script>"""
+<div id="iv_live" class="sr-only" aria-live="polite"></div>""" + script("interview-dialog")

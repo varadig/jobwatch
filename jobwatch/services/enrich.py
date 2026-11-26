@@ -4,20 +4,17 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 
 from jobwatch import cvgen
-
+from jobwatch.db import database
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import FLEXA_MODE, FOURDAY_MODE, classify_mode_ex
 from jobwatch.env import log
-
+from jobwatch.net import http
 from jobwatch.services.state import ENRICH_LOCK, MODE_LOCK, STATE
 from jobwatch.sources.linkedin import enrich_linkedin
 from jobwatch.util.timeutil import now_iso
-from jobwatch.db import database
-from jobwatch.net import http
 
 
 def enrich_pending_linkedin(cfg, limit=60):

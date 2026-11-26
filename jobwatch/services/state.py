@@ -1,7 +1,6 @@
 """Runtime state shared by the background work and the pages."""
 import threading
 
-
 RUN_LOCK = threading.Lock()
 
 

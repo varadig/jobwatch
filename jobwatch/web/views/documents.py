@@ -6,16 +6,14 @@ import urllib.parse
 import urllib.request
 
 from jobwatch import cvgen
-
+from jobwatch.db import database
 from jobwatch.env import DOCS_ROOT
-
+from jobwatch.net import http
 from jobwatch.services.documents import DOC_LABEL, cv_paths, doc_names, load_profile, smb_path
 from jobwatch.services.logos import logo_files
 from jobwatch.util.text import e, safe_url, strip_tags
 from jobwatch.util.timeutil import fmt_dt
 from jobwatch.web.components import ic, logo_html, page, wm_html
-from jobwatch.db import database
-from jobwatch.net import http
 
 
 def cv_page(jid, flash=""):

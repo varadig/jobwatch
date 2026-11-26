@@ -1,13 +1,13 @@
 """The Sources page."""
 
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.models import FETCHED_SOURCES, SOURCES_INFO, UNSUPPORTED
 from jobwatch.services.state import STATE
 from jobwatch.sources.custom import CUSTOM_TYPES
 from jobwatch.util.text import e
 from jobwatch.util.timeutil import fmt_dt
 from jobwatch.web.components import ic, page, progress_html
-from jobwatch.config import config_store
-from jobwatch.db import database
 
 
 def sources_page(flash=""):

@@ -7,8 +7,10 @@ import urllib.parse
 from jobwatch import cvgen
 from jobwatch.db import database
 from jobwatch.env import CV_DIR, DATA, DOCS_ROOT, FONT_DIR, PHOTO_PATH, PROFILE_PATH
-from jobwatch.services.documents import (MAX_PDF_BYTES, applications, cv_filename, cv_paths, load_profile, owner_prefix,
-                                         pdf_from_multipart, pdf_text, profile_from_cv_text)
+from jobwatch.services.documents import (
+    MAX_PDF_BYTES, applications, cv_filename, cv_paths, load_profile, owner_prefix, pdf_from_multipart, pdf_text,
+    profile_from_cv_text
+)
 from jobwatch.web.components import page
 from jobwatch.web.controllers.base import Controller
 from jobwatch.web.http import Response

@@ -2,10 +2,10 @@
 import threading
 import time
 
+from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.services.interviews.core import IV_SCAN_EVERY, reminders
 from jobwatch.services.interviews.mailboxes import scan_interview_mails
-from jobwatch.db import database
 
 
 def interview_loop():

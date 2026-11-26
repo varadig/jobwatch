@@ -3,7 +3,6 @@ import re
 
 from jobwatch.models import SOURCES_INFO
 
-
 WT_LINKEDIN = {"2": "remote", "3": "hybrid", "1": "onsite"}
 
 

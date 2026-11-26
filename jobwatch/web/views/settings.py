@@ -1,16 +1,15 @@
 """The Settings page."""
 import json
 
+from jobwatch.config import config_store
 from jobwatch.domain.scoring import DESC_MAX, SCORING_KINDS
 from jobwatch.models import FETCHED_SOURCES, SOURCES_INFO, WORK_MODES
-from jobwatch.sources.registry import OPTIONAL_BOARDS, SEARCH_FILTERABLE
 from jobwatch.services.presets import NEW_PRESET, preset_label, template_presets
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH
+from jobwatch.sources.registry import OPTIONAL_BOARDS, SEARCH_FILTERABLE
 from jobwatch.util.text import e
-from jobwatch.web.components import ic, page, ui_field, ui_sec, ui_toggle, wm_html
+from jobwatch.web.components import page, script, ui_field, ui_sec, ui_toggle, wm_html
 from jobwatch.web.views.sources import custom_sources_card
-from jobwatch.config import config_store
-
 
 SETTINGS_NAV = (("presets", "Presets"), ("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("mail", "E-mail alerts"), ("scoring", "Scoring"),
                 ("claude", "Claude API"), ("general", "General"), ("danger", "Maintenance"))
@@ -150,7 +149,7 @@ def settings_page(flash=""):
             e(preset_label(active)) if active else "custom settings (no preset)", opts, e(active),
             "", e(NEW_PRESET),
             pbtn("rename", "Rename the preset in use") if active in mine else "", e(NEW_PRESET),
-            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/"))) + PRESET_PICKER_JS % {"x": ic("close")}
+            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/"))) + PRESET_PICKER_JS
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
@@ -208,290 +207,18 @@ def settings_page(flash=""):
             '</button><button type="button" class="btn btn-primary" id="leave_save">Save</button></div></div>'
             '<form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>') % (
         nav, presets, notify, search, own, scoring, claude, general, danger, e(KEPT_ON_NEW_SEARCH))
-    return page("Settings", body + CHIPS_JS % json.dumps(
-        {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}) + LEAVE_JS, flash)
+    return page("Settings", body + '<script type="application/json" id="jw_scoring">%s</script>' % json.dumps(
+        {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}) + CHIPS_JS + LEAVE_JS, flash)
 
 
-CHIPS_JS = """<script>(function () {
-var P = %s;
-function pts(k, i) { var p = P[k]; return i < p.t.length ? p.t[i] : p.rest; }
-function fmt(n) { return (n >= 0 ? "+" : "\u2212") + Math.abs(n); }
-function alts(c) { return c.toLowerCase().split(/\\s+\\/\\s+/).map(function (s) { return s.trim(); }).filter(Boolean); }
-function esc(s) { return s.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"); }
-function hit(as, txt) {
-  for (var i = 0; i < as.length; i++)
-    if (new RegExp("(?<![a-z0-9])" + esc(as[i]) + "(?![a-z0-9#+])").test(txt)) return as[i];
-  return null;
-}
-document.querySelectorAll("textarea.chips-src").forEach(function (ta) {
-  var k = ta.dataset.kind, ordered = P[k].t.length > 0, drag = null;
-  var items = ta.value.split("\\n").map(function (s) { return s.trim(); }).filter(Boolean);
-  var box = document.createElement("div"), inp = document.createElement("input");
-  box.className = "chips"; box.setAttribute("role", "list");
-  inp.type = "text"; inp.id = ta.id + "_in"; inp.placeholder = "Add… (Enter)"; inp.autocomplete = "off";
-  var lab = document.querySelector('label[for="' + ta.id + '"]');
-  if (lab) { lab.htmlFor = inp.id; inp.setAttribute("aria-label", "Add to: " + lab.textContent); }
-  ta.hidden = true; ta.after(box);
-  function sync(focus) {
-    ta.value = items.join("\\n"); render();
-    if (focus) { var el = box.querySelector(focus); if (el) el.focus(); }
-    document.dispatchEvent(new Event("chips"));
-  }
-  function button(label, text, fn) {
-    var b = document.createElement("button"); b.type = "button"; b.textContent = text;
-    b.setAttribute("aria-label", label); b.title = label; b.onclick = fn; return b;
-  }
-  function render() {
-    box.textContent = "";
-    items.forEach(function (t, i) {
-      var c = document.createElement("span"), p = pts(k, i), b = document.createElement("b");
-      c.className = "chip" + (p < 0 ? " neg" : ""); c.setAttribute("role", "listitem"); c.draggable = true;
-      b.className = "pts"; b.textContent = fmt(p); c.append(b, document.createTextNode(t));
-      if (ordered) {
-        if (i > 0) c.append(button("Move " + t + " up", "\u2039", function () {
-          items.splice(i - 1, 0, items.splice(i, 1)[0]); sync(".chip:nth-child(" + i + ") button"); }));
-        if (i < items.length - 1) c.append(button("Move " + t + " down", "\u203a", function () {
-          items.splice(i + 1, 0, items.splice(i, 1)[0]); sync(".chip:nth-child(" + (i + 2) + ") button:last-of-type"); }));
-      }
-      c.append(button("Remove " + t, "\u00d7", function () { items.splice(i, 1); sync("input"); }));
-      c.addEventListener("dragstart", function (ev) { drag = i; c.classList.add("dragging"); ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData("text/plain", t); });
-      c.addEventListener("dragend", function () { drag = null; c.classList.remove("dragging"); });
-      c.addEventListener("dragover", function (ev) { if (drag !== null) { ev.preventDefault(); c.classList.add("over"); } });
-      c.addEventListener("dragleave", function () { c.classList.remove("over"); });
-      c.addEventListener("drop", function (ev) {
-        ev.preventDefault(); c.classList.remove("over");
-        if (drag === null || drag === i) return;
-        items.splice(i, 0, items.splice(drag, 1)[0]); drag = null; sync();
-      });
-      box.append(c);
-    });
-    box.append(inp);
-  }
-  function add(focus) {
-    var v = inp.value.replace(/,+$/, "").trim();
-    if (!v) return;
-    if (!items.some(function (x) { return x.toLowerCase() === v.toLowerCase(); })) items.push(v);
-    inp.value = ""; sync(focus ? "input" : null);
-  }
-  inp.addEventListener("keydown", function (ev) {
-    if (ev.key === "Enter" || ev.key === ",") { ev.preventDefault(); add(true); }
-    else if (ev.key === "Backspace" && !inp.value && items.length) { items.pop(); sync("input"); }
-  });
-  inp.addEventListener("change", function () { add(false); });
-  ta.setChips = function (list) { items = (list || []).slice(); sync(); };
-  render();
-});
-var tr = document.getElementById("score_try"), out = document.getElementById("score_try_out");
-if (!tr) return;
-var hint = out.textContent;
-function lines(k) { var t = document.getElementById("sc_" + k); return t ? t.value.split("\\n").map(function (s) { return s.trim(); }).filter(Boolean) : []; }
-function num(id, d) { var el = document.getElementById(id); return el && el.value !== "" ? +el.value : d; }
-function calc() {
-  var t = tr.value.toLowerCase().trim();
-  if (!t) { out.textContent = hint; return; }
-  var s = 0, parts = [];
-  ["interests", "less", "never"].forEach(function (k) {
-    lines(k).forEach(function (c, i) { var a = hit(alts(c), t); if (a) { var p = pts(k, i); s += p; parts.push(a + " " + fmt(p)); } });
-  });
-  var min = num("min_score", 4), note = num("notify_min_score", 7);
-  out.textContent = (parts.length ? parts.join(", ") : "nothing matches") + "  =  " + s + " points (title only) \u00b7 " +
-    (s >= note ? "listed and notified" : s >= min ? "listed" : "hidden; the description can add up to +" + P.desc.t[0] + "\u2026+4");
-}
-tr.addEventListener("input", calc); document.addEventListener("chips", calc);
-document.querySelectorAll("#min_score,#notify_min_score").forEach(function (el) { el.addEventListener("input", calc); });
-})();</script>"""
+CHIPS_JS = script("scoring-chips")
 
 
 # Settings: notices unsaved changes; leaving the page or switching a preset asks first.
-LEAVE_JS = """<script>(function () {
-var form = document.getElementById("settings"), dlg = document.getElementById("leave_dlg");
-if (!form || !dlg) return;
-var SEARCH = ["search", "own"], SKIP = /^(preset_pick|preset_name|preset_do|what|next|save_first)$/;
-function snap() {
-  var out = {};
-  form.querySelectorAll("section.ui-section").forEach(function (sec) {
-    var v = [];
-    sec.querySelectorAll("input,select,textarea").forEach(function (el) {
-      if (!el.name || SKIP.test(el.name) || el.type === "button" || el.type === "submit") return;
-      v.push(el.name + "=" + (el.type === "checkbox" || el.type === "radio" ? el.checked : el.value));
-    });
-    out[sec.id] = v.join("\\u0001");
-  });
-  return out;
-}
-var base = snap(), leaving = false, pending = null;
-function dirty() {
-  var now = snap(), out = [];
-  Object.keys(now).forEach(function (k) { if (now[k] !== base[k]) out.push(k); });
-  return out;
-}
-function title(id) { var h = document.getElementById(id + "-h"); return h ? h.textContent : id; }
-var note = document.getElementById("savebar_note"), note0 = note.textContent;
-var PF = /^(search_terms|search_locations|min_score|sf_.*|sc_.*)$/;
-function psnap() {
-  var v = [];
-  form.querySelectorAll("input,textarea").forEach(function (el) {
-    if (el.name && PF.test(el.name)) v.push(el.name + "=" + (el.type === "checkbox" ? el.checked : el.value)); });
-  return v.join("\\u0001");
-}
-var pbase = psnap();
-function newPreset() {
-  if (psnap() === pbase) return "";
-  var n = (document.getElementById("preset_name").value || "").trim() || document.getElementById("preset_name").placeholder;
-  return " Saving keeps them as the preset \\u201c" + n + "\\u201d.";
-}
-function update() {
-  var d = dirty();
-  if (!d.length) { note.textContent = note0; return; }
-  note.textContent = "Unsaved changes: " + d.map(title).join(", ") +
-    (d.some(function (x) { return SEARCH.indexOf(x) >= 0; }) ? ". The search changed: saving clears the found postings and searches again." : ".") +
-    newPreset();
-}
-form.addEventListener("input", update); form.addEventListener("change", update); document.addEventListener("chips", update);
-form.addEventListener("submit", function () { leaving = true; });
-window.addEventListener("beforeunload", function (ev) { if (!leaving && dirty().length) { ev.preventDefault(); ev.returnValue = ""; } });
-function ask(onSave, onDiscard, saveLabel, discardLabel) {
-  var d = dirty();
-  document.getElementById("leave_what").textContent = "You changed: " + d.map(title).join(", ") + "." + newPreset();
-  document.getElementById("leave_search").hidden = !d.some(function (x) { return SEARCH.indexOf(x) >= 0; });
-  document.getElementById("leave_save").textContent = saveLabel;
-  document.getElementById("leave_discard").textContent = discardLabel;
-  pending = {save: onSave, discard: onDiscard};
-  dlg.showModal();
-}
-document.getElementById("leave_stay").onclick = function () { pending = null; dlg.close(); };
-document.getElementById("leave_save").onclick = function () { var p = pending; dlg.close(); if (p) { leaving = true; p.save(); } };
-document.getElementById("leave_discard").onclick = function () { var p = pending; dlg.close(); if (p) { leaving = true; p.discard(); } };
-// links and other forms that leave the page
-document.addEventListener("click", function (ev) {
-  var a = ev.target.closest("a[href]");
-  if (!a || ev.defaultPrevented || ev.ctrlKey || ev.metaKey || ev.shiftKey || a.target === "_blank") return;
-  var href = a.getAttribute("href");
-  if (!href || href.charAt(0) === "#" || !dirty().length) return;
-  ev.preventDefault();
-  ask(function () { document.getElementById("settings_next").value = a.pathname + a.search;
-                    form.requestSubmit(document.getElementById("settings_save")); },
-      function () { location.href = a.href; }, "Save and continue", "Don't save");
-}, true);
-document.querySelectorAll("form").forEach(function (f) {
-  if (f === form || f.method === "dialog") return;
-  f.addEventListener("submit", function (ev) {
-    if (leaving || !dirty().length) return;
-    ev.preventDefault();
-    var sub = ev.submitter;
-    ask(function () { document.getElementById("settings_next").value = "/settings";
-                      form.requestSubmit(document.getElementById("settings_save")); },
-        function () { leaving = true; f.requestSubmit(sub || undefined); }, "Save (stay here)", "Don't save, continue");
-  });
-});
-// picking a preset or template fills in the form; it is applied only when you save
-var pick = document.getElementById("preset_pick"), data = JSON.parse(document.getElementById("preset_data").textContent || "{}");
-pick.addEventListener("change", function () {
-  var p = data[pick.value];
-  if (!p) return;
-  function set(id, v) { var el = document.getElementById(id); if (el && v !== undefined) el.value = v; }
-  if (p.search_terms) set("search_terms", p.search_terms.join("\\n"));
-  if (p.search_locations) set("search_locations", p.search_locations.join("\\n"));
-  if (p.min_score !== undefined) set("min_score", p.min_score);
-  if (p.search_filter) form.querySelectorAll("input[name^=sf_]").forEach(function (c) { c.checked = !!p.search_filter[c.name.slice(3)]; });
-  if (p.scoring) Object.keys(p.scoring).forEach(function (k) {
-    var ta = document.getElementById("sc_" + k); if (ta && ta.setChips) ta.setChips(p.scoring[k]); });
-  var tpl = pick.value.indexOf("tpl:") === 0;
-  document.getElementById("active_preset_set").value = pick.value;
-  pbase = psnap();   // this is the picked preset; changes from here on make a new one
-  document.getElementById("preset_state").innerHTML = "";
-  document.getElementById("preset_state").append("Loaded \\u201c" + pick.options[pick.selectedIndex].text + "\\u201d" +
-    (tpl ? " (template)" : "") + " into the settings below. Nothing is applied until you click Save changes.");
-  update();
-});
-})();</script>"""
+LEAVE_JS = script("settings-leave")
 
 
 # Settings → Presets: the preset list as a dropdown whose own presets have an ✕ to delete them (a second click confirms).
 # The hidden <select> stays the form field, so loading, saving and the unsaved-changes check work as before. Deleting is
 # a background request: the page is not reloaded, so unsaved settings are not lost.
-PRESET_PICKER_JS = """<script>(function () {
-var sel = document.getElementById("preset_pick"), btn = document.getElementById("pp_btn"), list = document.getElementById("pp_list");
-var label = document.getElementById("pp_label"), state = document.getElementById("preset_state");
-var X = '%(x)s', data = JSON.parse(document.getElementById("preset_data").textContent || "{}");
-function showLabel() { var o = sel.options[sel.selectedIndex]; label.textContent = o ? o.text : ""; }
-function build() {
-  list.innerHTML = "";
-  Array.prototype.forEach.call(sel.children, function (node) {
-    var opts = node.tagName === "OPTGROUP" ? node.children : [node];
-    if (node.tagName === "OPTGROUP") {
-      if (!opts.length) return;
-      var g = document.createElement("li"); g.className = "pp-group"; g.setAttribute("role", "presentation");
-      g.textContent = node.label; list.appendChild(g);
-    }
-    Array.prototype.forEach.call(opts, function (o) {
-      var li = document.createElement("li"), mine = node.tagName === "OPTGROUP" && o.value && o.value.indexOf("tpl:") !== 0;
-      li.setAttribute("role", "option"); li.dataset.value = o.value; li.id = "pp_o" + list.children.length;
-      li.setAttribute("aria-selected", o.selected ? "true" : "false");
-      var t = document.createElement("span"); t.className = "pp-t"; t.textContent = o.text; li.appendChild(t);
-      if (mine) {
-        var x = document.createElement("button"); x.type = "button"; x.className = "pp-x"; x.innerHTML = X;
-        x.setAttribute("aria-label", "Delete preset " + o.text); x.title = "Delete this preset";
-        li.appendChild(x);
-      }
-      list.appendChild(li);
-    });
-  });
-}
-function items() { return Array.prototype.slice.call(list.querySelectorAll("[role=option]")); }
-function setActive(li) {
-  items().forEach(function (x) { x.classList.toggle("act", x === li); });
-  if (li) { list.setAttribute("aria-activedescendant", li.id); li.scrollIntoView({block: "nearest"}); }
-}
-function open() {
-  build(); list.classList.add("open"); btn.setAttribute("aria-expanded", "true");
-  setActive(list.querySelector("[aria-selected=true]") || items()[0]); list.focus();
-}
-function close(focus) {
-  list.classList.remove("open"); btn.setAttribute("aria-expanded", "false");
-  if (focus) btn.focus();
-}
-function choose(li) {
-  if (!li) return;
-  sel.value = li.dataset.value; showLabel(); close(true);
-  sel.dispatchEvent(new Event("change", {bubbles: true}));
-}
-function remove(li, x) {
-  if (!x.classList.contains("sure")) {   // first click: ask
-    x.classList.add("sure"); x.textContent = "Delete?"; x.setAttribute("aria-label", "Click again to delete");
-    setTimeout(function () { if (x.isConnected && x.classList.contains("sure")) { x.classList.remove("sure"); x.innerHTML = X; } }, 3500);
-    return;
-  }
-  var name = li.dataset.value;
-  li.classList.add("busy");
-  fetch("/preset", {method: "POST", body: new URLSearchParams({preset_do: "delete", preset_pick: name})}).then(function (r) {
-    if (!r.ok) throw r;
-    var o = Array.prototype.find.call(sel.options, function (op) { return op.value === name; }), was = o && o.selected;
-    if (o) { var g = o.parentNode; o.remove(); if (g.tagName === "OPTGROUP" && !g.children.length) g.remove(); }
-    delete data[name];
-    var act = document.getElementById("active_preset_set");
-    if (act && act.value === name) act.value = "";
-    if (was) { sel.value = ""; showLabel(); }
-    li.remove(); build(); setActive(items()[0]);
-    state.textContent = "Preset \u201c" + name + "\u201d deleted. The settings below did not change.";
-  }).catch(function () { li.classList.remove("busy"); state.textContent = "Could not delete \u201c" + name + "\u201d; try again."; });
-}
-btn.addEventListener("click", function () { list.classList.contains("open") ? close(true) : open(); });
-btn.addEventListener("keydown", function (ev) { if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); open(); } });
-list.addEventListener("click", function (ev) {
-  var li = ev.target.closest("[role=option]"); if (!li) return;
-  var x = ev.target.closest(".pp-x");
-  if (x) { ev.stopPropagation(); remove(li, x); } else choose(li);
-});
-list.addEventListener("keydown", function (ev) {
-  var all = items(), cur = list.querySelector(".act"), i = all.indexOf(cur);
-  if (ev.key === "ArrowDown") { ev.preventDefault(); setActive(all[Math.min(i + 1, all.length - 1)]); }
-  else if (ev.key === "ArrowUp") { ev.preventDefault(); setActive(all[Math.max(i - 1, 0)]); }
-  else if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); choose(cur); }
-  else if (ev.key === "Delete" && cur && cur.querySelector(".pp-x")) { ev.preventDefault(); remove(cur, cur.querySelector(".pp-x")); }
-  else if (ev.key === "Escape" || ev.key === "Tab") { if (ev.key === "Escape") ev.preventDefault(); close(ev.key === "Escape"); }
-});
-document.addEventListener("click", function (ev) { if (!ev.target.closest("#pp")) close(false); });
-sel.addEventListener("change", showLabel);
-showLabel();
-})();</script>"""
+PRESET_PICKER_JS = script("preset-picker")

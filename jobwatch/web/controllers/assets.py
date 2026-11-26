@@ -4,6 +4,7 @@ import os
 
 from jobwatch.env import LOGO_DIR, STATIC_DIR
 from jobwatch.services.logos import LOGO_TYPES, logo_files
+from jobwatch.web.components import font_version
 from jobwatch.web.controllers.base import Controller
 from jobwatch.web.http import Response
 
@@ -40,7 +41,10 @@ class AssetsController(Controller):
         path = os.path.realpath(os.path.join(STATIC_DIR, req.params[0]))
         if not path.startswith(os.path.realpath(STATIC_DIR) + os.sep):
             return Response.empty(404)
-        return self._file(path)
+        resp = self._file(path)
+        if path.endswith(".css") and resp.status == 200:   # the icon font's address carries its checksum
+            resp.body = resp.body.replace(b"FONTVER", font_version().encode())
+        return resp
 
     def logo(self, req):
         fname = logo_files().get(req.params[0])

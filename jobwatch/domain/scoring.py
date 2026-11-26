@@ -3,7 +3,6 @@ import re
 
 from jobwatch.util.text import term_re
 
-
 # Scoring: what interests you, as chips. In the ordered lists the position is the score (first = most points);
 # the other lists give the same points to every chip. "unity / unity3d": words that count as one.
 SCORING_KINDS = {  # kind: (points by position, points after the table / for every chip)

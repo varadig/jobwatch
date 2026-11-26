@@ -5,13 +5,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from jobwatch.sources.base import JobSource
+
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import log
-
-from jobwatch.search import linkedin_plan
-from jobwatch.util.text import strip_tags
 from jobwatch.net import http
+from jobwatch.search import linkedin_plan
+from jobwatch.sources.base import JobSource
+from jobwatch.util.text import strip_tags
 
 
 class LinkedInSource(JobSource):

@@ -2,14 +2,13 @@
 import html
 import json
 import time
-from datetime import datetime
-from datetime import timezone
-from jobwatch.sources.base import Filtering, JobSource
+from datetime import datetime, timezone
+
 from jobwatch.domain.workmode import norm_mode
 from jobwatch.env import log
-
-from jobwatch.util.text import strip_tags
 from jobwatch.net import http
+from jobwatch.sources.base import Filtering, JobSource
+from jobwatch.util.text import strip_tags
 
 
 class StudiosSource(JobSource):

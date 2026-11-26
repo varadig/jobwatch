@@ -8,7 +8,8 @@ import unicodedata
 from datetime import datetime
 
 from jobwatch import cvgen
-
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
@@ -16,8 +17,6 @@ from jobwatch.env import DOCS_ROOT, FONT_DIR, PHOTO_PATH, PROFILE_PATH, SMB_BASE
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.util.text import safe_name
 from jobwatch.util.timeutil import now_iso
-from jobwatch.config import config_store
-from jobwatch.db import database
 
 
 def restore_cv_jobs(con=None):
@@ -91,6 +90,7 @@ def pdf_from_multipart(content_type, body):
 def pdf_text(data):
     """Reads the text of a PDF (pypdf). A scanned PDF saved as an image has no text."""
     import io
+
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()

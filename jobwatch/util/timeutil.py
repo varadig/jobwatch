@@ -1,8 +1,7 @@
 """Time helpers: ISO strings, parsing and formatting dates, the local time zone."""
 import os
 import time
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 

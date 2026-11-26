@@ -7,7 +7,6 @@ import threading
 
 from jobwatch.env import CFG_PATH, PORT
 
-
 DEFAULT_CONFIG = {
     # Generic defaults. The concrete job type (keywords, searches, sources) comes from
     # templates/: tools/new_profile.py <name> --template <template>.

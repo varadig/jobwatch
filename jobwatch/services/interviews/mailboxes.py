@@ -9,7 +9,8 @@ import time
 from datetime import datetime
 
 from jobwatch import cvgen
-
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.services.interviews.core import fmt_iv_when, interview_cfg, notify_interview, researcher
@@ -17,9 +18,6 @@ from jobwatch.services.interviews.ics import meeting_link, parse_ics
 from jobwatch.services.state import IV_LOCK
 from jobwatch.sources.mail import mail_body, mail_login
 from jobwatch.util.timeutil import local_tz_name, now_iso, to_local
-from jobwatch.config import config_store
-from jobwatch.db import database
-
 
 IV_MAIL_KEYWORDS = ("interview", "interj", "invitation", "invite", "meeting", "call with", "intro call", "video call",
                     "phone call", "calendly", "scheduled", "confirmed", "next step", "megh", "einladung", "gespr",

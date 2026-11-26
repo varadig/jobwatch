@@ -5,21 +5,20 @@ import json
 import re
 import threading
 
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import log
 from jobwatch.models import SOURCES_INFO
-
+from jobwatch.net import http
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.enrich import enrich_work_modes
 from jobwatch.services.logos import fetch_logos, remember_logo
 from jobwatch.services.outreach import LINKEDIN_JOB_RE, linkedin_job
 from jobwatch.util.text import strip_tags
 from jobwatch.util.timeutil import now_iso
-from jobwatch.config import config_store
-from jobwatch.db import database
-from jobwatch.net import http
 
 
 def job_from_page(url):

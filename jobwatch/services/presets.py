@@ -7,7 +7,6 @@ import re
 from jobwatch.config import migrate_scoring, migrate_search
 from jobwatch.env import TEMPLATE_DIR
 
-
 # A preset is a named "what am I looking for": the search and the scoring. Switching re-scores every posting.
 PRESET_KEYS = ("search_terms", "search_locations", "search_filter", "scoring", "min_score")
 

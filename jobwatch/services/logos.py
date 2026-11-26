@@ -6,14 +6,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 
+from jobwatch.db import database
 from jobwatch.env import LOGO_DIR, UA, log
 from jobwatch.util.text import norm
 from jobwatch.util.timeutil import now_iso
-from jobwatch.db import database
-
 
 LOGO_MAX_BYTES = 300 * 1024
 

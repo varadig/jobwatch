@@ -1,16 +1,16 @@
 """Tests for jobwatch. Run from the repo root:  python3 -m unittest discover -s tests -v"""
+import contextlib
 import importlib
 import io
 import json
 import os
-import contextlib
 import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,46 +18,24 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 # app.py reads its data folder when it is imported, so point it at a throwaway one.
 os.environ.setdefault("JOBWATCH_DATA", tempfile.mkdtemp(prefix="jobwatch-test-"))
-from jobwatch import cvgen
+from jobwatch import config, cvgen, env, models, search
 from jobwatch.config import config_store
 from jobwatch.db import database
+from jobwatch.domain import identity, scoring, workmode
 from jobwatch.net import http
-from jobwatch.services.notify import notifier
-from jobwatch import config
-from jobwatch.domain import identity
-from jobwatch.domain import scoring
-from jobwatch.domain import workmode
-from jobwatch import env
-from jobwatch import models
 from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.repositories.jobs import JobRepository
-from jobwatch import search
-from jobwatch.services import documents
-from jobwatch.services import enrich
-from jobwatch.services.interviews import core as ivcore
-from jobwatch.services.interviews import ics as ical
-from jobwatch.services.interviews import loop as ivloop
-from jobwatch.services.interviews import mailboxes
-from jobwatch.services import logos
-from jobwatch.services import outreach
-from jobwatch.services import postings
-from jobwatch.services import presets
-from jobwatch.services import refresh
-from jobwatch.services import settings
-from jobwatch.services import state
-from jobwatch.sources import custom
-from jobwatch.sources import linkedin
-from jobwatch.sources import mail as mailsrc
-from jobwatch.sources import registry
+from jobwatch.services import documents, enrich, logos, outreach, postings, presets, refresh, settings, state
+from jobwatch.services.interviews import core as ivcore, ics as ical, loop as ivloop, mailboxes
+from jobwatch.services.notify import notifier
+from jobwatch.sources import custom, linkedin, mail as mailsrc, registry
 from jobwatch.util import text as textutil
-from jobwatch.web import components
-from jobwatch.web import server
+from jobwatch.web import components, server
 from jobwatch.web.controllers import jobs as jobs_controller
 from jobwatch.web.http import Request
-from jobwatch.web.views import interviews as interviews_view
-from jobwatch.web.views import jobs as jobs_view
-from jobwatch.web.views import outreach as outreach_view
-from jobwatch.web.views import settings as settings_view
+from jobwatch.web.views import (
+    interviews as interviews_view, jobs as jobs_view, outreach as outreach_view, settings as settings_view
+)
 
 database.init()
 database.migrate()  # the tests share one throwaway database with the current columns
@@ -214,11 +192,11 @@ class PasswordProtection(unittest.TestCase):
         self.assertFalse(server.auth_ok("Basic !!!not-base64", "s3cret"))
 
     def test_server_asks_for_login_and_lets_health_through(self):
+        import base64
         import threading
         import urllib.error
         import urllib.request
         from http.server import ThreadingHTTPServer
-        import base64
         database.init()  # the front page reads the database; main() also runs the migrations
         database.migrate()
         old = server.AUTH_PASSWORD
@@ -244,6 +222,7 @@ class PasswordProtection(unittest.TestCase):
 class CvImport(unittest.TestCase):
     def _pdf(self, lines):
         import io
+
         from reportlab.pdfgen import canvas
         buf = io.BytesIO()
         c = canvas.Canvas(buf)
@@ -272,6 +251,7 @@ class CvImport(unittest.TestCase):
 
     def test_scanned_pdf_without_text_gives_a_clear_error(self):
         import io
+
         from pypdf import PdfWriter
         buf = io.BytesIO()
         w = PdfWriter()
@@ -363,6 +343,7 @@ class ResetCache(unittest.TestCase):
         con.commit()
         con.close()
         import io
+
         # the handler clears the tables; call the same SQL the route runs
         with database.connect() as con:
             con.execute("DELETE FROM jobs")
@@ -696,8 +677,8 @@ class Logos(unittest.TestCase):
             con.execute("DELETE FROM company_logos")
 
     def test_one_logo_per_company_and_download(self):
-        from unittest import mock
         import io
+        from unittest import mock
         with database.connect() as con:
             logos.remember_logo(con, "Super Cell Oy", "https://cdn.example/a.png")
             logos.remember_logo(con, "supercell oy", "https://cdn.example/b.png")  # same company, kept first
@@ -722,8 +703,8 @@ class Logos(unittest.TestCase):
         self.assertIn('src="/logo/supercelloy"', components.logo_html("Super Cell Oy", files))
 
     def test_svg_and_html_are_not_stored(self):
-        from unittest import mock
         import io
+        from unittest import mock
         with database.connect() as con:
             logos.remember_logo(con, "Evil", "https://cdn.example/x.svg")
 

@@ -3,20 +3,16 @@ import json
 import os
 import secrets
 import threading
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from jobwatch import cvgen
-
+from jobwatch.config import config_store
+from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.services.documents import load_profile
-
-from jobwatch.util.timeutil import now_iso, to_local
-from jobwatch.config import config_store
-from jobwatch.db import database
 from jobwatch.services.notify import notifier
-
+from jobwatch.util.timeutil import now_iso, to_local
 
 # An interview: added by hand (optionally from a posting) or found in the mailbox (a calendar invitation, a booking
 # confirmation, a recruiter's e-mail). Reminders go to ntfy on the day (in the morning) and shortly before. Claude can

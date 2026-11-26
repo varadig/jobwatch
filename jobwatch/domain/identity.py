@@ -3,7 +3,6 @@ import re
 
 from jobwatch.util.text import norm
 
-
 # The same posting often comes from several places (a LinkedIn search and a LinkedIn alert e-mail, a company
 # board and Flexa…). Two postings are the same when their link points to the same posting, or when the title
 # and the company match after the noise is removed (legal forms, gender tags).

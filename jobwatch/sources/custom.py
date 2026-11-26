@@ -6,12 +6,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from jobwatch.sources.base import Filtering, JobSource
+
+from jobwatch.db import database
 from jobwatch.env import UA, log
+from jobwatch.sources.base import Filtering, JobSource
 from jobwatch.sources.feeds import parse_rss
 from jobwatch.util.text import html_attr, strip_tags
-from jobwatch.db import database
-
 
 # Each entry of cfg["custom_sources"]: {"id", "enabled", "type", "name", "url", "pattern",
 # "login_url", "username", "password"}. A source with a username + password logs in first, through the
