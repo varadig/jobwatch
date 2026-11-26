@@ -147,7 +147,26 @@ MIT, see [LICENSE](LICENSE).
 python3 -m unittest discover -s tests -v
 ```
 
-The tests cover scoring per profile, document names, the daisyUI markup helper, and the profile tool.
+About 130 tests: scoring, the sources' parsers (with recorded responses), deduplication and remembered decisions,
+the refresh, presets, interviews (iCalendar, reminders, e-mail detection), the routes and the password check.
+
+### Architecture
+
+The code is a layered MVC application in the `jobwatch` package; each layer only uses the ones below it.
+
+| Layer | Package | What is there |
+| --- | --- | --- |
+| Web: controllers | `web/controllers/` | One controller per area (Jobs, Interviews, Recruiters, Documents, Settings, Assets). It registers its routes on the `Router`, reads the `Request`, calls services and returns a `Response`. |
+| Web: views | `web/views/`, `web/components.py`, `static/` | The pages as HTML (layout, form fields, sections); the CSS and the scripts are static files. |
+| Web: HTTP | `web/server.py`, `web/router.py`, `web/http.py` | The standard-library server adapter, the password check, routing. |
+| Services | `services/` | The work: `Refresher` (fetch, dedupe, score, notify), enrichment of descriptions and work modes, `Applications` (documents), presets, interviews (`Researcher`, `Reminders`, mailbox scan, iCalendar), `Notifier`. |
+| Sources | `sources/` | `JobSource` and one subclass per job board; each says how its postings are narrowed to the search and how often it may run. |
+| Domain | `domain/`, `search.py`, `models.py` | Scoring, work-mode rules, duplicate keys, search terms: plain logic without storage. |
+| Data | `repositories/`, `db.py`, `config.py` | `JobRepository`, `InterviewRepository` on a connection; `Database` (SQLite, WAL, migrations); `ConfigStore`. |
+| Infrastructure | `env.py`, `net.py`, `cvgen.py` | Paths and environment, `HttpClient`, the Claude API calls and the PDF rendering. |
+
+Shared objects (`config_store`, `database`, `http`, `notifier`, `refresher`) are module-level instances, so a test
+replaces one in a single place.
 
 ## Notes on sources
 
@@ -163,8 +182,9 @@ The tests cover scoring per profile, document names, the daisyUI markup helper, 
 
 | File | Purpose |
 | --- | --- |
-| `app.py` | HTTP server, scheduler, sources, scoring, notifications, UI |
-| `cvgen.py` | Claude tailoring and PDF rendering (reportlab) |
+| `app.py` | starts the server (the code is in `jobwatch/`, see Architecture) |
+| `jobwatch/` | the application package |
+| `static/` | CSS, JavaScript, icons and the icon font (`tools/make_symbols.py` builds it) |
 | `tools/new_profile.py` | creates a profile folder from a template |
 | `templates/` | search and keyword templates; `profile.example.json` for a CV profile |
 | `tests/` | unit tests |

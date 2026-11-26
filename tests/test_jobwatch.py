@@ -1,12 +1,16 @@
 """Tests for jobwatch. Run from the repo root:  python3 -m unittest discover -s tests -v"""
+import contextlib
 import importlib
 import io
 import json
 import os
-import contextlib
 import sys
 import tempfile
+import time
 import unittest
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,10 +18,48 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 # app.py reads its data folder when it is imported, so point it at a throwaway one.
 os.environ.setdefault("JOBWATCH_DATA", tempfile.mkdtemp(prefix="jobwatch-test-"))
-app = importlib.import_module("app")
-app.init_db()
-app.migrate_db()  # the tests share one throwaway database with the current columns
+from jobwatch import config, cvgen, env, models, search
+from jobwatch.config import config_store
+from jobwatch.db import database
+from jobwatch.domain import identity, scoring, workmode
+from jobwatch.net import http
+from jobwatch.repositories.interviews import InterviewRepository
+from jobwatch.repositories.jobs import JobRepository
+from jobwatch.services import documents, enrich, logos, outreach, postings, presets, refresh, settings, state
+from jobwatch.services.interviews import core as ivcore, ics as ical, loop as ivloop, mailboxes
+from jobwatch.services.notify import notifier
+from jobwatch.sources import custom, linkedin, mail as mailsrc, registry
+from jobwatch.util import text as textutil
+from jobwatch.web import components, server
+from jobwatch.web.controllers import jobs as jobs_controller
+from jobwatch.web.http import Request
+from jobwatch.web.views import (
+    interviews as interviews_view, jobs as jobs_view, outreach as outreach_view, settings as settings_view
+)
+
+database.init()
+database.migrate()  # the tests share one throwaway database with the current columns
 new_profile = importlib.import_module("new_profile")
+
+
+
+@contextlib.contextmanager
+def fake_sources(results):
+    """Every source's fetch replaced: results {key: fetch(cfg)}; the others find nothing."""
+    with contextlib.ExitStack() as stack:
+        for source in registry.SOURCES:
+            stack.enter_context(mock.patch.object(source, "fetch", results.get(source.key, lambda cfg: [])))
+        yield
+
+
+
+def post(path, form):
+    """Sends a form through the router as the browser would: (where it redirects, without the message; the message)."""
+    req = Request("POST", path, {}, lambda n: b"")
+    req._form = dict(form)
+    resp = server.dispatch(req)
+    loc = urllib.parse.urlparse(dict(resp.headers)["Location"])
+    return loc.path + ("#" + loc.fragment if loc.fragment else ""), urllib.parse.parse_qs(loc.query).get("msg", [""])[0]
 
 
 def template(name):
@@ -29,33 +71,33 @@ def template(name):
 def enrich_now(cfg):
     """Runs the work-mode pass now: waits until a background pass started by an earlier test (a refresh starts one) has
     finished, otherwise this call would return at once and the test would race it."""
-    assert app.MODE_LOCK.acquire(timeout=30), "a background work-mode pass did not finish"
-    app.MODE_LOCK.release()
-    app.enrich_work_modes(cfg)
+    assert state.MODE_LOCK.acquire(timeout=30), "a background work-mode pass did not finish"
+    state.MODE_LOCK.release()
+    enrich.enrich_work_modes(cfg)
 
 
 class DocumentNames(unittest.TestCase):
     def test_accents_become_ascii_underscored_prefix(self):
-        self.assertEqual(app.owner_prefix({"name": "Zoé Ünal"}), "Zoe_Unal")
+        self.assertEqual(documents.owner_prefix({"name": "Zoé Ünal"}), "Zoe_Unal")
 
     def test_missing_name_falls_back(self):
-        self.assertEqual(app.owner_prefix({"name": ""}), "Candidate")
+        self.assertEqual(documents.owner_prefix({"name": ""}), "Candidate")
 
     def test_doc_names_follow_the_prefix(self):
-        names = app.doc_names({"name": "Jane Doe"})
+        names = documents.doc_names({"name": "Jane Doe"})
         self.assertEqual(names["cv"], "Jane_Doe_CV.pdf")
         self.assertEqual(names["letter"], "Jane_Doe_Cover_Letter.pdf")
 
 
 class Markup(unittest.TestCase):
     def test_known_classes_become_daisyui_components(self):
-        out = app.daisify('<div class="card">x</div><span class="badge">b</span><button class="primary sm">go</button>')
+        out = components.daisify('<div class="card">x</div><span class="badge">b</span><button class="primary sm">go</button>')
         self.assertIn('class="card bg-base-100 shadow-sm"', out)
         self.assertIn('class="badge badge-soft badge-primary"', out)
         self.assertIn('class="btn btn-primary btn-sm"', out)
 
     def test_bare_form_controls_get_base_classes(self):
-        out = app.daisify('<button>x</button><input name="q"><select name="s"></select><textarea></textarea>'
+        out = components.daisify('<button>x</button><input name="q"><select name="s"></select><textarea></textarea>'
                           '<input type="checkbox" name="c">')
         self.assertIn('<button class="btn btn-sm">', out)
         self.assertIn('<input class="input input-sm" name="q">', out)
@@ -64,7 +106,7 @@ class Markup(unittest.TestCase):
         self.assertIn('<input class="checkbox checkbox-sm" type="checkbox"', out)
 
     def test_unknown_classes_are_kept(self):
-        self.assertIn('class="job st-new"', app.daisify('<li class="job st-new">'))
+        self.assertIn('class="job st-new"', components.daisify('<li class="job st-new">'))
 
 
 class Scoring(unittest.TestCase):
@@ -74,24 +116,24 @@ class Scoring(unittest.TestCase):
               "description": "Own the roadmap with stakeholders; agile delivery and budget."}
 
     def test_unity_profile_scores_unity_jobs_high(self):
-        score, _ = app.score_job(template("unity-game"), self.unity_job)
+        score, _ = scoring.score_job(template("unity-game"), self.unity_job)
         self.assertGreaterEqual(score, template("unity-game")["notify_min_score"])
 
     def test_project_profile_scores_project_jobs_high(self):
         cfg = template("project-manager")
-        score, hits = app.score_job(cfg, self.pm_job)
+        score, hits = scoring.score_job(cfg, self.pm_job)
         self.assertGreaterEqual(score, cfg["min_score"], hits)
 
     def test_profiles_do_not_mix(self):
         # A unity profile hides a project-manager posting, and the reverse.
-        self.assertLess(app.score_job(template("unity-game"), self.pm_job)[0], template("unity-game")["min_score"])
-        self.assertLess(app.score_job(template("project-manager"), self.unity_job)[0],
+        self.assertLess(scoring.score_job(template("unity-game"), self.pm_job)[0], template("unity-game")["min_score"])
+        self.assertLess(scoring.score_job(template("project-manager"), self.unity_job)[0],
                         template("project-manager")["min_score"])
 
     def test_defaults_are_generic(self):
         # The shipped defaults must not carry game-specific keywords any more.
-        self.assertEqual(app.DEFAULT_CONFIG["scoring"]["interests"], [])
-        self.assertEqual(app.DEFAULT_CONFIG["search_terms"], [])
+        self.assertEqual(config.DEFAULT_CONFIG["scoring"]["interests"], [])
+        self.assertEqual(config.DEFAULT_CONFIG["search_terms"], [])
 
 
 class NewProfileTool(unittest.TestCase):
@@ -127,7 +169,6 @@ class NewProfileTool(unittest.TestCase):
 
 class CvDefaults(unittest.TestCase):
     def test_placeholder_profile_has_the_fields_the_renderer_uses(self):
-        import cvgen
         for key in ("name", "headline", "contact", "summary", "skills", "experience", "languages", "objective"):
             self.assertIn(key, cvgen.DEFAULT_PROFILE)
         self.assertEqual(cvgen.DEFAULT_PROFILE["name"], "Your Name")
@@ -139,28 +180,28 @@ if __name__ == "__main__":
 
 class PasswordProtection(unittest.TestCase):
     def test_auth_ok_without_password_is_always_true(self):
-        self.assertTrue(app.auth_ok(None, ""))
+        self.assertTrue(server.auth_ok(None, ""))
 
     def test_auth_ok_accepts_only_the_right_password(self):
         import base64
         good = "Basic " + base64.b64encode(b"anyone:s3cret").decode()
         bad = "Basic " + base64.b64encode(b"anyone:wrong").decode()
-        self.assertTrue(app.auth_ok(good, "s3cret"))
-        self.assertFalse(app.auth_ok(bad, "s3cret"))
-        self.assertFalse(app.auth_ok(None, "s3cret"))
-        self.assertFalse(app.auth_ok("Basic !!!not-base64", "s3cret"))
+        self.assertTrue(server.auth_ok(good, "s3cret"))
+        self.assertFalse(server.auth_ok(bad, "s3cret"))
+        self.assertFalse(server.auth_ok(None, "s3cret"))
+        self.assertFalse(server.auth_ok("Basic !!!not-base64", "s3cret"))
 
     def test_server_asks_for_login_and_lets_health_through(self):
+        import base64
         import threading
         import urllib.error
         import urllib.request
         from http.server import ThreadingHTTPServer
-        import base64
-        app.init_db()  # the front page reads the database; main() also runs the migrations
-        app.migrate_db()
-        old = app.AUTH_PASSWORD
-        app.AUTH_PASSWORD = "s3cret"
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        database.init()  # the front page reads the database; main() also runs the migrations
+        database.migrate()
+        old = server.AUTH_PASSWORD
+        server.AUTH_PASSWORD = "s3cret"
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         base = "http://127.0.0.1:%d" % srv.server_address[1]
         try:
@@ -173,7 +214,7 @@ class PasswordProtection(unittest.TestCase):
                 "Authorization": "Basic " + base64.b64encode(b"u:s3cret").decode()})
             self.assertEqual(urllib.request.urlopen(req).status, 200)
         finally:
-            app.AUTH_PASSWORD = old
+            server.AUTH_PASSWORD = old
             srv.shutdown()
             srv.server_close()
 
@@ -181,6 +222,7 @@ class PasswordProtection(unittest.TestCase):
 class CvImport(unittest.TestCase):
     def _pdf(self, lines):
         import io
+
         from reportlab.pdfgen import canvas
         buf = io.BytesIO()
         c = canvas.Canvas(buf)
@@ -196,29 +238,29 @@ class CvImport(unittest.TestCase):
         ctype = "multipart/form-data; boundary=XYZ"
         body = (b"--XYZ\r\nContent-Disposition: form-data; name=\"pdf\"; filename=\"cv.pdf\"\r\n"
                 b"Content-Type: application/pdf\r\n\r\n" + pdf + b"\r\n--XYZ--\r\n")
-        self.assertEqual(app.pdf_from_multipart(ctype, body), pdf)
+        self.assertEqual(documents.pdf_from_multipart(ctype, body), pdf)
 
     def test_multipart_without_pdf_field_is_empty(self):
         body = b"--XYZ\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--XYZ--\r\n"
-        self.assertEqual(app.pdf_from_multipart("multipart/form-data; boundary=XYZ", body), b"")
+        self.assertEqual(documents.pdf_from_multipart("multipart/form-data; boundary=XYZ", body), b"")
 
     def test_pdf_text_reads_the_text_layer(self):
-        text = app.pdf_text(self._pdf(["Jane Doe", "Senior Engineer at Acme"]))
+        text = documents.pdf_text(self._pdf(["Jane Doe", "Senior Engineer at Acme"]))
         self.assertIn("Jane Doe", text)
         self.assertIn("Acme", text)
 
     def test_scanned_pdf_without_text_gives_a_clear_error(self):
         import io
+
         from pypdf import PdfWriter
         buf = io.BytesIO()
         w = PdfWriter()
         w.add_blank_page(width=200, height=200)
         w.write(buf)
         with self.assertRaises(ValueError):
-            app.pdf_text(buf.getvalue())
+            documents.pdf_text(buf.getvalue())
 
     def test_profile_from_cv_text_uses_the_model_result(self):
-        import cvgen
         fake = {"name": "Jane Doe", "headline": "", "contact": {}, "summary": "", "skills": [],
                 "experience": [{"heading": "Acme", "role": "Engineer", "period": "2020", "intro": "",
                                 "bullets": [], "projects": [], "links": []}],
@@ -226,21 +268,20 @@ class CvImport(unittest.TestCase):
         old = cvgen.profile_from_text
         cvgen.profile_from_text = lambda key, text: fake
         try:
-            out = json.loads(app.profile_from_cv_text("Jane Doe, Engineer at Acme"))
+            out = json.loads(documents.profile_from_cv_text("Jane Doe, Engineer at Acme"))
         finally:
             cvgen.profile_from_text = old
         self.assertEqual(out["name"], "Jane Doe")
 
     def test_schema_requires_the_fields_the_profile_needs(self):
-        import cvgen
         self.assertTrue({"name", "experience", "contact"} <= set(cvgen.PROFILE_SCHEMA["required"]))
 
 
 class LinkedInEnrichment(unittest.TestCase):
     def _con(self):
-        app.init_db()
-        app.migrate_db()
-        con = app.db()
+        database.init()
+        database.migrate()
+        con = database.connect()
         return con
 
     def test_rate_limited_detail_is_retried_then_classified(self):
@@ -253,15 +294,15 @@ class LinkedInEnrichment(unittest.TestCase):
                 raise urllib.error.HTTPError("u", 429, "Too Many", None, None)
             return "This is a fully remote role."
 
-        old_detail, old_sleep = app.linkedin_detail, app.time.sleep
-        app.linkedin_detail = fake_detail
-        app.time.sleep = lambda s: None
+        old_detail, old_sleep = linkedin.linkedin_detail, time.sleep
+        linkedin.linkedin_detail = fake_detail
+        time.sleep = lambda s: None
         con = self._con()
         try:
             items = [{"ext_id": "1", "title": "Project Manager", "location": "Europe"}]
-            n = app.enrich_linkedin(con, items)
+            n = linkedin.enrich_linkedin(con, items)
         finally:
-            app.linkedin_detail, app.time.sleep = old_detail, old_sleep
+            linkedin.linkedin_detail, time.sleep = old_detail, old_sleep
             con.close()
         self.assertEqual(n, 1)
         self.assertEqual(items[0]["work_mode"], "remote")
@@ -270,22 +311,22 @@ class LinkedInEnrichment(unittest.TestCase):
 
 class BackgroundEnrichment(unittest.TestCase):
     def test_pending_linkedin_rows_get_description_and_mode(self):
-        app.init_db()
-        app.migrate_db()
-        con = app.db()
+        database.init()
+        database.migrate()
+        con = database.connect()
         con.execute("DELETE FROM jobs WHERE id='linkedin:bg-1'")
         con.execute("INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,"
                     "first_seen,last_seen,status,notified,work_mode) VALUES('linkedin:bg-1','linkedin','Project Manager',"
                     "'Acme','Europe','https://x/1',NULL,'',0,'','bg',?,?,'new',1,'unknown')", ("2026-01-01",) * 2)
         con.commit()
-        old_detail, old_sleep = app.linkedin_detail, app.time.sleep
-        app.linkedin_detail = lambda jid: "This is a fully remote role."
-        app.time.sleep = lambda s: None
-        cfg = app.load_config()
+        old_detail, old_sleep = linkedin.linkedin_detail, time.sleep
+        linkedin.linkedin_detail = lambda jid: "This is a fully remote role."
+        time.sleep = lambda s: None
+        cfg = config_store.load()
         try:
-            app.enrich_pending_linkedin(cfg)
+            enrich.enrich_pending_linkedin(cfg)
         finally:
-            app.linkedin_detail, app.time.sleep = old_detail, old_sleep
+            linkedin.linkedin_detail, time.sleep = old_detail, old_sleep
         row = con.execute("SELECT description, work_mode FROM jobs WHERE id='linkedin:bg-1'").fetchone()
         con.close()
         self.assertEqual(row["work_mode"], "remote")
@@ -294,22 +335,23 @@ class BackgroundEnrichment(unittest.TestCase):
 
 class ResetCache(unittest.TestCase):
     def test_reset_removes_jobs_and_source_status_but_keeps_settings(self):
-        app.init_db()
-        app.migrate_db()
-        cfg_before = app.load_config()
-        con = app.db()
+        database.init()
+        database.migrate()
+        cfg_before = config_store.load()
+        con = database.connect()
         con.execute("INSERT OR REPLACE INTO source_state(source,last_run,last_ok,found,new,error,seeded) VALUES('x','a','a',1,1,NULL,1)")
         con.commit()
         con.close()
         import io
+
         # the handler clears the tables; call the same SQL the route runs
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             con.execute("DELETE FROM source_state")
-        with app.db() as con:
+        with database.connect() as con:
             self.assertEqual(con.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
             self.assertEqual(con.execute("SELECT count(*) FROM source_state").fetchone()[0], 0)
-        self.assertEqual(app.load_config()["scoring"], cfg_before["scoring"])
+        self.assertEqual(config_store.load()["scoring"], cfg_before["scoring"])
 
 
 class OwnSources(unittest.TestCase):
@@ -373,10 +415,10 @@ class OwnSources(unittest.TestCase):
         cls.srv.shutdown()
 
     def setUp(self):
-        self._delay, app.CUSTOM_DELAY = app.CUSTOM_DELAY, 0
+        self._delay, custom.CUSTOM_DELAY = custom.CUSTOM_DELAY, 0
 
     def tearDown(self):
-        app.CUSTOM_DELAY = self._delay
+        custom.CUSTOM_DELAY = self._delay
 
     def vmp(self, **kw):
         src = {"id": "s1", "type": "vmp", "name": "VMP", "url": self.base + "/allas/talalatok?kulcsszo=x",
@@ -385,22 +427,22 @@ class OwnSources(unittest.TestCase):
         return src
 
     def test_vmp_without_login_has_no_employer_and_drops_feor_code(self):
-        items = app.run_custom_source(self.vmp(), is_new=lambda i: i == "1")
+        items = custom.run_custom_source(self.vmp(), is_new=lambda i: i == "1")
         self.assertEqual([i["title"] for i in items], ["Szoftverfejlesztő", "Szoftverfejlesztő"])
         self.assertEqual(items[0]["company"], "")
         self.assertIn("távmunka", items[0]["description"])   # detail page read for the new posting
         self.assertNotIn("távmunka", items[1]["description"])  # not new: no detail fetch
 
     def test_vmp_login_shows_employer(self):
-        items = app.run_custom_source(self.vmp(username="me", password="pw"))
+        items = custom.run_custom_source(self.vmp(username="me", password="pw"))
         self.assertEqual(items[0]["company"], "Acme Kft")
 
     def test_wrong_password_is_reported(self):
         with self.assertRaisesRegex(RuntimeError, "login failed"):
-            app.run_custom_source(self.vmp(username="me", password="bad"))
+            custom.run_custom_source(self.vmp(username="me", password="bad"))
 
     def test_any_page_takes_links_matching_the_pattern_once(self):
-        items = app.run_custom_source({"id": "p", "type": "page", "url": self.base + "/jobs", "pattern": "/job/"})
+        items = custom.run_custom_source({"id": "p", "type": "page", "url": self.base + "/jobs", "pattern": "/job/"})
         self.assertEqual([i["title"] for i in items], ["Unity Developer", "Game Programmer"])
 
     def test_settings_form_keeps_password_when_left_empty_and_deletes(self):
@@ -409,7 +451,7 @@ class OwnSources(unittest.TestCase):
         f = {"cs_count": "2", "cs_0_id": "a1", "cs_0_type": "vmp", "cs_0_url": "u1", "cs_0_username": "me",
              "cs_0_enabled": "on", "cs_1_id": "b2", "cs_1_url": "u2", "cs_1_delete": "on",
              "cs_new_type": "rss", "cs_new_url": "https://example.com/feed"}
-        out = app.parse_custom_sources(f, old)
+        out = custom.parse_custom_sources(f, old)
         self.assertEqual([s["id"] for s in out[:1]], ["a1"])
         self.assertEqual(out[0]["password"], "secret")
         self.assertEqual(len(out), 2)
@@ -440,7 +482,6 @@ class Outreach(unittest.TestCase):
         return mod
 
     def test_request_and_parsing(self):
-        import cvgen
         from unittest import mock
         cap = {}
         prof = {"name": "Gábor", "contact": {"email": "secret@example.com"}, "summary": "Unity dev"}
@@ -457,54 +498,52 @@ class Outreach(unittest.TestCase):
         self.assertIn("Hungarian", user)
 
     def test_refusal_is_reported(self):
-        import cvgen
         from unittest import mock
         with mock.patch.dict(sys.modules, {"anthropic": self.fake_sdk({}, stop="refusal")}):
             with self.assertRaises(cvgen.CVError):
                 cvgen.outreach_message("k", {"name": "x"}, {"name": "Anna"})
 
     def test_recruiter_lines(self):
-        r = app.parse_recruiters("Anna Kovács | TA @ Supercell | https://www.linkedin.com/in/anna/\nBob | bob@corp.com\n\n | x")
+        r = outreach.parse_recruiters("Anna Kovács | TA @ Supercell | https://www.linkedin.com/in/anna/\nBob | bob@corp.com\n\n | x")
         self.assertEqual(r[0], {"name": "Anna Kovács", "title": "TA @ Supercell", "contact": "https://www.linkedin.com/in/anna/"})
         self.assertEqual(r[1]["contact"], "bob@corp.com")
         self.assertEqual(len(r), 2)
 
     def test_page_flow(self):
-        import cvgen
         import threading
         from unittest import mock
-        app.init_db()
-        cfg = app.load_config()
+        database.init()
+        cfg = config_store.load()
         cfg["anthropic_api_key"] = "k"
-        app.save_config(cfg)
+        config_store.save(cfg)
         fake = lambda *a, **k: {"subject": "", "message": "Hello %s" % a[2]["name"], "_model": "m"}
         with mock.patch.object(cvgen, "outreach_message", fake):
-            self.assertIn("mutual connection", app.outreach_create({"recruiters": "Anna", "channel": "linkedin_intro"}))
-            msg = app.outreach_create({"recruiters": "Anna | TA @ X | https://www.linkedin.com/in/anna/\nBob",
+            self.assertIn("mutual connection", outreach.outreach_create({"recruiters": "Anna", "channel": "linkedin_intro"}))
+            msg = outreach.outreach_create({"recruiters": "Anna | TA @ X | https://www.linkedin.com/in/anna/\nBob",
                                        "channel": "linkedin_note"})
             self.assertEqual(msg, "Writing 2 message(s)…")
             for t in [t for t in threading.enumerate() if t.name != "MainThread" and t.daemon]:
                 t.join(5)
-        with app.db() as con:
+        with database.connect() as con:
             rows = con.execute("SELECT id, status, message FROM outreach ORDER BY id").fetchall()
         self.assertEqual([(r["status"], r["message"]) for r in rows[-2:]], [("draft", "Hello Anna"), ("draft", "Hello Bob")])
-        html = app.outreach_page({})
+        html = outreach_view.outreach_page({})
         self.assertIn("Hello Anna", html)
         self.assertIn("Open profile", html)
         oid = rows[-2]["id"]
-        self.assertEqual(app.outreach_action(oid, {"act": "save", "message": "edited"}), "Saved.")
-        self.assertIn("Marked as sent", app.outreach_action(oid, {"act": "sent", "message": "edited"}))
-        html = app.outreach_page({})
+        self.assertEqual(outreach.outreach_action(oid, {"act": "save", "message": "edited"}), "Saved.")
+        self.assertIn("Marked as sent", outreach.outreach_action(oid, {"act": "sent", "message": "edited"}))
+        html = outreach_view.outreach_page({})
         self.assertIn("1 sent", html)
         self.assertEqual(html.count("<dialog") - html.count('<dialog id="clear_dlg"'), 1)  # + the clear-cache one on every page
-        self.assertEqual(app.outreach_action(oid, {"act": "unsent"}), "Moved back to drafts.")
-        self.assertNotIn("<dialog", app.outreach_page({}).replace(app.CLEAR_DIALOG, ""))
-        app.outreach_action(oid, {"act": "sent"})
-        with app.db() as con:
+        self.assertEqual(outreach.outreach_action(oid, {"act": "unsent"}), "Moved back to drafts.")
+        self.assertNotIn("<dialog", outreach_view.outreach_page({}).replace(components.CLEAR_DIALOG, ""))
+        outreach.outreach_action(oid, {"act": "sent"})
+        with database.connect() as con:
             r = con.execute("SELECT status, message, sent_at FROM outreach WHERE id=?", (oid,)).fetchone()
         self.assertEqual((r["status"], r["message"]), ("sent", "edited"))
         self.assertTrue(r["sent_at"])
-        self.assertEqual(app.outreach_action(oid, {"act": "delete"}), "Deleted.")
+        self.assertEqual(outreach.outreach_action(oid, {"act": "delete"}), "Deleted.")
 
 
 class OutreachForm(unittest.TestCase):
@@ -513,12 +552,12 @@ class OutreachForm(unittest.TestCase):
             {"name": "Tom", "title": "Consultant @ Amiqus", "contact": "", "kind": "agency"},
             {"name": "  ", "title": "no name, skipped"},
             {"name": "Anna", "title": "TA | Supercell", "contact": "https://www.linkedin.com/in/anna/", "kind": "bogus"}])}
-        r = app.recruiters_from_form(f)
+        r = outreach.recruiters_from_form(f)
         self.assertEqual([(x["name"], x["kind"]) for x in r], [("Tom", "agency"), ("Anna", "")])
         self.assertEqual(r[1]["title"], "TA | Supercell")   # a "|" in a field is kept as is
 
     def test_bad_json_is_ignored(self):
-        self.assertEqual(app.recruiters_from_form({"recruiters_json": "{not json"}), [])
+        self.assertEqual(outreach.recruiters_from_form({"recruiters_json": "{not json"}), [])
 
 
 class LinkedInPreview(unittest.TestCase):
@@ -530,8 +569,8 @@ class LinkedInPreview(unittest.TestCase):
             if exc:
                 raise exc
             return page
-        with mock.patch.object(app, "fetch", fake):
-            return app.linkedin_preview(url)
+        with mock.patch.object(http, "get", fake):
+            return outreach.linkedin_preview(url)
 
     def test_public_profile_gives_name_and_headline(self):
         r = self.preview('<meta property="og:title" content="Anna Kov&#225;cs - Talent Acquisition at Supercell | LinkedIn">')
@@ -558,8 +597,8 @@ class OutreachSpecific(unittest.TestCase):
         pg = ('<meta property="og:title" content="Tom Baker - Games Recruiter | LinkedIn">'
               '<meta property="og:description" content="Games Recruiter · Hiring Unity devs for mobile studios in the '
               'Nordics. · Experience: Amiqus · Location: London · 500+ connections on LinkedIn. View Tom Baker’s profile on LinkedIn">')
-        with mock.patch.object(app, "fetch", lambda u, **k: pg):
-            r = app.linkedin_preview("https://www.linkedin.com/in/tom-baker/")
+        with mock.patch.object(http, "get", lambda u, **k: pg):
+            r = outreach.linkedin_preview("https://www.linkedin.com/in/tom-baker/")
         self.assertEqual(r["about"], "Games Recruiter · Hiring Unity devs for mobile studios in the Nordics. · "
                                      "Experience: Amiqus · Location: London")
 
@@ -567,28 +606,27 @@ class OutreachSpecific(unittest.TestCase):
         for u in ("https://www.linkedin.com/jobs/view/4494793948/",
                   "https://hu.linkedin.com/jobs/view/senior-unity-developer-at-kolibri-4494793948?trk=x",
                   "https://www.linkedin.com/jobs/collections/recommended/?currentJobId=4494793948"):
-            self.assertEqual(app.LINKEDIN_JOB_RE.search(u).group(1), "4494793948", u)
+            self.assertEqual(outreach.LINKEDIN_JOB_RE.search(u).group(1), "4494793948", u)
 
     def test_role_from_linkedin_job_and_plain_text(self):
         from unittest import mock
-        app.init_db()
+        database.init()
         page = ('<h2 class="top-card-layout__title topcard__title">Senior Unity Developer</h2>'
                 '<a class="topcard__org-name-link" href="#">\n Kolibri Games \n</a>'
                 '<span class="topcard__flavor topcard__flavor--bullet">Berlin</span>'
                 '<div class="show-more-less-html__markup">Build our idle games in Unity.</div>')
-        with mock.patch.object(app, "fetch", lambda u, **k: page):
-            t = app.resolve_role("https://www.linkedin.com/jobs/view/4494793948/")
+        with mock.patch.object(http, "get", lambda u, **k: page):
+            t = outreach.resolve_role("https://www.linkedin.com/jobs/view/4494793948/")
         self.assertIn("Title: Senior Unity Developer\nCompany: Kolibri Games\nLocation: Berlin", t)
         self.assertIn("idle games", t)
-        self.assertEqual(app.resolve_role("Senior Unity dev, mobile"), "Senior Unity dev, mobile")
+        self.assertEqual(outreach.resolve_role("Senior Unity dev, mobile"), "Senior Unity dev, mobile")
 
     def test_list_items_carry_profile_and_role(self):
-        r = app.recruiters_from_form({"recruiters_json": json.dumps(
+        r = outreach.recruiters_from_form({"recruiters_json": json.dumps(
             [{"name": "Tom", "about": "Hiring Unity devs", "role": "https://www.linkedin.com/jobs/view/1234567/"}])})
         self.assertEqual((r[0]["profile"], r[0]["role_ref"]), ("Hiring Unity devs", "https://www.linkedin.com/jobs/view/1234567/"))
 
     def test_prompt_uses_the_recruiters_own_role_over_the_general_posting(self):
-        import cvgen
         from unittest import mock
         cap = {}
         sdk = Outreach().fake_sdk(cap)
@@ -604,8 +642,8 @@ class OutreachSpecific(unittest.TestCase):
     def test_role_from_the_database_needs_no_request_and_429_is_retried(self):
         import urllib.error
         from unittest import mock
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,location,url,description,score,status) "
                         "VALUES('linkedin:7777777','linkedin','Unity Dev','Acme','Remote','u','Make games',9,'new')")
         calls = []
@@ -613,12 +651,12 @@ class OutreachSpecific(unittest.TestCase):
         def busy(u, **k):
             calls.append(u)
             raise urllib.error.HTTPError(u, 429, "Too Many", {}, None)
-        with mock.patch.object(app, "fetch", busy):
-            t = app.resolve_role("https://www.linkedin.com/jobs/view/7777777/")
+        with mock.patch.object(http, "get", busy):
+            t = outreach.resolve_role("https://www.linkedin.com/jobs/view/7777777/")
             self.assertIn("Company: Acme", t)
             self.assertEqual(calls, [])
-            t = app.resolve_role("https://www.linkedin.com/jobs/view/8888888/", waits=(0, 0))
-        self.assertIn(app.ROLE_UNREAD, t)
+            t = outreach.resolve_role("https://www.linkedin.com/jobs/view/8888888/", waits=(0, 0))
+        self.assertIn(outreach.ROLE_UNREAD, t)
         self.assertEqual(len(calls), 3)  # first try + 2 retries
 
 
@@ -627,25 +665,25 @@ class LinkedInHeadless(unittest.TestCase):
         from unittest import mock
         pg = ('<meta property="og:title" content="Rita Tóth - Budapest, Budapest, Hungary | Professional Profile | LinkedIn">'
               '<meta property="og:description" content="Experience: Amiqus · Location: Budapest, Budapest, Hungary · 500+ connections on LinkedIn.">')
-        with mock.patch.object(app, "fetch", lambda u, **k: pg):
-            r = app.linkedin_preview("https://www.linkedin.com/in/rita-toth/")
+        with mock.patch.object(http, "get", lambda u, **k: pg):
+            r = outreach.linkedin_preview("https://www.linkedin.com/in/rita-toth/")
         self.assertEqual((r["name"], r["title"]), ("Rita Tóth", "@ Amiqus"))
 
 
 class Logos(unittest.TestCase):
     def setUp(self):
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             con.execute("DELETE FROM company_logos")
 
     def test_one_logo_per_company_and_download(self):
-        from unittest import mock
         import io
-        with app.db() as con:
-            app.remember_logo(con, "Super Cell Oy", "https://cdn.example/a.png")
-            app.remember_logo(con, "supercell oy", "https://cdn.example/b.png")  # same company, kept first
-            app.remember_logo(con, "NoLogo Ltd", "")
-            app.remember_logo(con, "Bad", "http://insecure.example/x.png")
+        from unittest import mock
+        with database.connect() as con:
+            logos.remember_logo(con, "Super Cell Oy", "https://cdn.example/a.png")
+            logos.remember_logo(con, "supercell oy", "https://cdn.example/b.png")  # same company, kept first
+            logos.remember_logo(con, "NoLogo Ltd", "")
+            logos.remember_logo(con, "Bad", "http://insecure.example/x.png")
         png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
 
         class Resp(io.BytesIO):
@@ -656,19 +694,19 @@ class Logos(unittest.TestCase):
 
             def __exit__(self, *a):
                 return False
-        with mock.patch.object(app.urllib.request, "urlopen", lambda req, timeout=0: Resp(png)), \
-                mock.patch.object(app.time, "sleep", lambda s: None):
-            app.fetch_logos()
-        files = app.logo_files()
+        with mock.patch.object(urllib.request, "urlopen", lambda req, timeout=0: Resp(png)), \
+                mock.patch.object(time, "sleep", lambda s: None):
+            logos.fetch_logos()
+        files = logos.logo_files()
         self.assertEqual(list(files), ["supercelloy"])
-        self.assertTrue(open(os.path.join(app.LOGO_DIR, files["supercelloy"]), "rb").read().startswith(b"\x89PNG"))
-        self.assertIn('src="/logo/supercelloy"', app.logo_html("Super Cell Oy", files))
+        self.assertTrue(open(os.path.join(env.LOGO_DIR, files["supercelloy"]), "rb").read().startswith(b"\x89PNG"))
+        self.assertIn('src="/logo/supercelloy"', components.logo_html("Super Cell Oy", files))
 
     def test_svg_and_html_are_not_stored(self):
-        from unittest import mock
         import io
-        with app.db() as con:
-            app.remember_logo(con, "Evil", "https://cdn.example/x.svg")
+        from unittest import mock
+        with database.connect() as con:
+            logos.remember_logo(con, "Evil", "https://cdn.example/x.svg")
 
         class Resp(io.BytesIO):
             headers = mock.Mock(get_content_type=lambda: "image/svg+xml")
@@ -678,53 +716,53 @@ class Logos(unittest.TestCase):
 
             def __exit__(self, *a):
                 return False
-        with mock.patch.object(app.urllib.request, "urlopen", lambda req, timeout=0: Resp(b"<svg onload=alert(1)>")), \
-                mock.patch.object(app.time, "sleep", lambda s: None):
-            app.fetch_logos()
-        self.assertEqual(app.logo_files(), {})
+        with mock.patch.object(urllib.request, "urlopen", lambda req, timeout=0: Resp(b"<svg onload=alert(1)>")), \
+                mock.patch.object(time, "sleep", lambda s: None):
+            logos.fetch_logos()
+        self.assertEqual(logos.logo_files(), {})
 
     def test_initials_when_there_is_no_logo(self):
-        h = app.logo_html("Kolibri Games GmbH", {})
+        h = components.logo_html("Kolibri Games GmbH", {})
         self.assertIn(">KG</span>", h)
         self.assertIn("hsl(", h)
-        self.assertEqual(h, app.logo_html("Kolibri Games GmbH", {}))  # same colour every time
+        self.assertEqual(h, components.logo_html("Kolibri Games GmbH", {}))  # same colour every time
 
 
 class RefreshSelection(unittest.TestCase):
     def test_form_to_selection(self):
-        self.assertEqual(app.run_selection({}), (None, set()))                       # header button: all
-        self.assertEqual(app.run_selection({"all": "1", "run_flexa": "on"}), (None, set()))
-        self.assertEqual(app.run_selection({"one": "flexa"}), ({"flexa"}, set()))
-        self.assertEqual(app.run_selection({"one": "cs:ab12"}), (set(), {"ab12"}))
-        self.assertEqual(app.run_selection({"selected": "1", "run_flexa": "on", "run_linkedin": "on"}), ({"flexa", "linkedin"}, set()))
-        self.assertEqual(app.run_selection({"selected": "1", "run_custom": "on", "run_cs_ab12": "on"}), (set(), {"ab12"}))
-        self.assertEqual(app.run_selection({"selected": "1"}), (None, set()))        # nothing ticked: caller refuses
+        self.assertEqual(jobs_controller.run_selection({}), (None, set()))                       # header button: all
+        self.assertEqual(jobs_controller.run_selection({"all": "1", "run_flexa": "on"}), (None, set()))
+        self.assertEqual(jobs_controller.run_selection({"one": "flexa"}), ({"flexa"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"one": "cs:ab12"}), (set(), {"ab12"}))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1", "run_flexa": "on", "run_linkedin": "on"}), ({"flexa", "linkedin"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1", "run_custom": "on", "run_cs_ab12": "on"}), (set(), {"ab12"}))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1"}), (None, set()))        # nothing ticked: caller refuses
 
     def test_only_the_picked_sources_run(self):
         from unittest import mock
-        app.init_db()
+        database.init()
         ran = []
         fake = {k: (lambda cfg, k=k: ran.append((k, [s["id"] for s in cfg.get("custom_sources") or []])) or [])
-                for k in app.SOURCE_FUNCS}
-        cfg = app.load_config()
-        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+                for k in registry.BY_KEY}
+        cfg = config_store.load()
+        cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         cfg["custom_sources"] = [{"id": "a1", "url": "x"}, {"id": "b2", "url": "y"}]
-        app.save_config(cfg)
-        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None):
-            app.run_all(force=True, only={"flexa"})
+        config_store.save(cfg)
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
+            refresh.refresher.run(force=True, only={"flexa"})
             self.assertEqual(ran, [("flexa", ["a1", "b2"])])
             ran.clear()
-            app.run_all(force=True, only=set(), custom_ids={"b2"})
+            refresh.refresher.run(force=True, only=set(), custom_ids={"b2"})
             self.assertEqual(ran, [("custom", ["b2"])])
 
     def test_jobs_list_filters_by_several_sources(self):
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             for jid, src in (("flexa:1", "flexa"), ("linkedin:2", "linkedin"), ("remotive:3", "remotive")):
                 con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,work_mode) "
                             "VALUES(?,?,?,?,?,9,'new','2026-11-25T10:00:00+00:00','remote')", (jid, src, "T " + src, "C " + src, "u"))
-        page_ = app.jobs_page({"source": "flexa,remotive", "work": "all"})
+        page_ = jobs_view.jobs_page({"source": "flexa,remotive", "work": "all"})
         self.assertIn("T flexa", page_)
         self.assertIn("T remotive", page_)
         self.assertNotIn("T linkedin", page_)
@@ -769,15 +807,15 @@ class MailAlerts(unittest.TestCase):
         return M
 
     def cfg(self, claude=False):
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["email"].update(username="me@gmail.com", password="app-pw")
-        cfg["mail_source"] = dict(app.DEFAULT_CONFIG["mail_source"], senders=["jackandjill.ai"], use_claude=claude)
+        cfg["mail_source"] = dict(config.DEFAULT_CONFIG["mail_source"], senders=["jackandjill.ai"], use_claude=claude)
         cfg["anthropic_api_key"] = "k"
         return cfg
 
     def setUp(self):
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             con.execute("DELETE FROM mail_seen")
 
     def test_links_mode_read_only_and_once(self):
@@ -785,9 +823,9 @@ class MailAlerts(unittest.TestCase):
         calls = []
         with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)):
             cfg = self.cfg()
-            jobs = app.src_mail(cfg)
-            app.mark_mails_done(cfg.pop("_mail_done"))  # what run_all does once the postings are saved
-            again = app.src_mail(self.cfg())
+            jobs = mailsrc.MailAlertSource().fetch(cfg)
+            mailsrc.mark_mails_done(cfg.pop("_mail_done"))  # what run_all does once the postings are saved
+            again = mailsrc.MailAlertSource().fetch(self.cfg())
         self.assertIn(("select", '"INBOX"', True), calls)                      # read-only
         self.assertTrue(all(c[2] == "(BODY.PEEK[])" for c in calls if c[0] == "fetch"))  # not marked as read
         self.assertEqual(sorted(j["title"] for j in jobs), ["Senior Unity Developer", "Unity Engineer"])
@@ -795,17 +833,15 @@ class MailAlerts(unittest.TestCase):
         self.assertEqual(again, [])                                              # each e-mail once
 
     def test_claude_mode_only_keeps_links_from_the_mail(self):
-        import cvgen
         from unittest import mock
         calls = []
         fake = lambda key, subj, sender, text, links: [
             {"title": "Senior Unity Developer", "company": "Supercell", "location": "Helsinki", "url": "https://app.jackandjill.ai/jobs/123"}]
         with mock.patch("imaplib.IMAP4_SSL", self.fake_imap(calls)), mock.patch.object(cvgen, "jobs_from_email", fake):
-            jobs = app.src_mail(self.cfg(claude=True))
+            jobs = mailsrc.MailAlertSource().fetch(self.cfg(claude=True))
         self.assertEqual([(j["title"], j["company"]) for j in jobs], [("Senior Unity Developer", "Supercell")])
 
     def test_claude_filter_drops_made_up_links(self):
-        import cvgen
         from unittest import mock
         cap = {}
         sdk = Outreach().fake_sdk(cap, text='{"jobs": [{"title": "A", "company": "", "location": "", "url": "https://evil.example/x"},'
@@ -824,14 +860,14 @@ class AddByLink(unittest.TestCase):
 
     def test_structured_data_and_no_duplicates(self):
         from unittest import mock
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs WHERE source='manual'")
-        with mock.patch.object(app, "fetch", lambda u, **k: self.PAGE), mock.patch.object(app, "fetch_logos", lambda: None):
-            jid, msg = app.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
-            again, msg2 = app.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
-        with app.db() as con:
+        with mock.patch.object(http, "get", lambda u, **k: self.PAGE), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
+            jid, msg = postings.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
+            again, msg2 = postings.add_job_by_link("https://careers.kolibrigames.com/jobs/42")
+        with database.connect() as con:
             r = dict(con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
             logo = con.execute("SELECT url FROM company_logos WHERE ckey='kolibrigames'").fetchone()
         self.assertEqual((r["title"], r["company"], r["location"], r["source"]), ("Senior Unity Developer", "Kolibri Games", "Berlin, DE, Remote", "manual"))
@@ -841,31 +877,31 @@ class AddByLink(unittest.TestCase):
         self.assertEqual((again, msg2), (jid, "This posting is already in the list."))
 
     def test_bad_link(self):
-        self.assertEqual(app.add_job_by_link("not a link")[0], None)
+        self.assertEqual(postings.add_job_by_link("not a link")[0], None)
 
 
 class Duplicates(unittest.TestCase):
     def setUp(self):
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             con.execute("DELETE FROM source_state")
 
     def run_sources(self, results):
         from unittest import mock
-        fake = {k: (lambda cfg, k=k: results.get(k, [])) for k in app.SOURCE_FUNCS}
-        cfg = app.load_config()
-        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
-        app.save_config(cfg)
-        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None),                 mock.patch.object(app, "enrich_pending_linkedin", lambda cfg: None):
-            app.run_all(force=True, only=set(results))
+        fake = {k: (lambda cfg, k=k: results.get(k, [])) for k in registry.BY_KEY}
+        cfg = config_store.load()
+        cfg["sources"] = {k: True for k in models.SOURCES_INFO}
+        config_store.save(cfg)
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None),                 mock.patch.object(refresh, "enrich_pending_linkedin", lambda cfg: None):
+            refresh.refresher.run(force=True, only=set(results))
 
     def test_keys(self):
-        self.assertEqual(app.dup_key("Senior Unity Developer (m/w/d)", "Kolibri Games GmbH", "u"),
-                         app.dup_key("Senior Unity Developer", "Kolibri Games", "x"))
-        self.assertEqual(app.url_key("https://www.linkedin.com/comm/jobs/view/4494498619/?trackingId=x"),
-                         app.url_key("https://hu.linkedin.com/jobs/view/unity-dev-at-acme-4494498619"))
+        self.assertEqual(identity.dup_key("Senior Unity Developer (m/w/d)", "Kolibri Games GmbH", "u"),
+                         identity.dup_key("Senior Unity Developer", "Kolibri Games", "x"))
+        self.assertEqual(identity.url_key("https://www.linkedin.com/comm/jobs/view/4494498619/?trackingId=x"),
+                         identity.url_key("https://hu.linkedin.com/jobs/view/unity-dev-at-acme-4494498619"))
 
     def test_same_posting_from_two_sources_is_one_card(self):
         li = {"ext_id": "4494498619", "title": "Unity Engineer", "company": "Acme", "location": "Remote", "posted": "",
@@ -876,43 +912,43 @@ class Duplicates(unittest.TestCase):
                  "url": "https://flexa.careers/jobs/x", "description": "Full text"}                    # same title+company
         self.run_sources({"linkedin": [li]})
         self.run_sources({"mail": [mail], "flexa": [flexa]})
-        with app.db() as con:
+        with database.connect() as con:
             rows = con.execute("SELECT source, also_sources, description FROM jobs").fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "linkedin")
         self.assertEqual(sorted(rows[0]["also_sources"].split(",")), ["flexa", "mail"])
         self.assertEqual(rows[0]["description"], "Full text")   # filled in from the other source
-        self.assertIn("also on", app.jobs_page({"work": "all", "min": "-99"}))
+        self.assertIn("also on", jobs_view.jobs_page({"work": "all", "min": "-99"}))
 
     def test_existing_duplicates_are_hidden_keeping_the_one_worked_on(self):
-        with app.db() as con:
+        with database.connect() as con:
             for jid, src, status in (("flexa:1", "flexa", "new"), ("linkedin:2", "linkedin", "applied")):
                 con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,dupkey,urlkey) "
                             "VALUES(?,?,?,?,?,9,?,'2026-11-25',?,?)", (jid, src, "Unity Dev", "Acme", "u/" + jid, status,
-                                                                     app.dup_key("Unity Dev", "Acme", ""), "u/" + jid))
-            self.assertEqual(app.dedupe_existing(con), 1)
+                                                                     identity.dup_key("Unity Dev", "Acme", ""), "u/" + jid))
+            self.assertEqual(JobRepository(con).dedupe(), 1)
             kept = con.execute("SELECT id, also_sources FROM jobs WHERE dup_of IS NULL").fetchall()
         self.assertEqual([(r["id"], r["also_sources"]) for r in kept], [("linkedin:2", "flexa")])
 
     def test_mails_are_marked_done_only_after_saving(self):
         from unittest import mock
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM mail_seen")
 
         def fake_mail(cfg):
             cfg.setdefault("_mail_done", []).append(("<m9@x>", 1))
-            with app.db() as con:
+            with database.connect() as con:
                 self.assertIsNone(con.execute("SELECT 1 FROM mail_seen").fetchone())  # not yet
             return [{"ext_id": "z", "title": "Unity Dev", "company": "Z", "location": "", "posted": "",
                      "url": "https://z.example/jobs/1", "description": ""}]
-        fake = {k: (lambda cfg: []) for k in app.SOURCE_FUNCS}
+        fake = {k: (lambda cfg: []) for k in registry.BY_KEY}
         fake["mail"] = fake_mail
-        cfg = app.load_config()
-        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
-        app.save_config(cfg)
-        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None):
-            app.run_all(force=True, only={"mail"})
-        with app.db() as con:
+        cfg = config_store.load()
+        cfg["sources"] = {k: True for k in models.SOURCES_INFO}
+        config_store.save(cfg)
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None):
+            refresh.refresher.run(force=True, only={"mail"})
+        with database.connect() as con:
             self.assertEqual(con.execute("SELECT msgid FROM mail_seen").fetchall()[0][0], "<m9@x>")
             self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs WHERE source='mail'").fetchone()[0], 1)
 
@@ -920,19 +956,19 @@ class Duplicates(unittest.TestCase):
 class EnrichAnySource(unittest.TestCase):
     def test_linkedin_posting_from_an_alert_email_gets_its_description(self):
         from unittest import mock
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             con.execute("INSERT INTO jobs(id,source,title,company,location,url,score,status,first_seen,urlkey) VALUES"
                         "('mail:x','mail','Mobile Engineer','ElevenLabs','Hungary (Remote)','https://www.linkedin.com/jobs/view/4486152955/',"
                         "2,'new','2026-11-25','li:4486152955')")
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["scoring"]["desc"] = ["unity"]
-        with mock.patch.object(app, "linkedin_detail", lambda jid: "We build our app in Unity. Fully remote."), \
-                mock.patch.object(app.time, "sleep", lambda s: None):
-            app.enrich_pending_linkedin(cfg)
-        with app.db() as con:
+        with mock.patch.object(outreach, "linkedin_detail", lambda jid: "We build our app in Unity. Fully remote."), mock.patch.object(linkedin, "linkedin_detail", lambda jid: "We build our app in Unity. Fully remote."), \
+                mock.patch.object(time, "sleep", lambda s: None):
+            enrich.enrich_pending_linkedin(cfg)
+        with database.connect() as con:
             r = con.execute("SELECT description, work_mode, score FROM jobs WHERE id='mail:x'").fetchone()
         self.assertIn("Unity", r["description"])
         self.assertEqual(r["work_mode"], "remote")
@@ -956,7 +992,7 @@ class WorkModes(unittest.TestCase):
             ("Mobile Engineer", "Hungary (Remote)", "", "remote"),
         ]
         for t, loc, d, want in cases:
-            got, ev = app.classify_mode_ex(t, loc, d)
+            got, ev = workmode.classify_mode_ex(t, loc, d)
             self.assertEqual(got, want, d or t)
             self.assertEqual(bool(ev), want != "unknown")
 
@@ -964,29 +1000,28 @@ class WorkModes(unittest.TestCase):
         from unittest import mock
         fourday = '<div><span><span>Onsite · Coventry, UK</span></span></div> other <span><span>Hybrid · London, UK</span></span>'
         flexa = r'x":"i6l2r4"}]]},\"className\":\"mt-0.5\",\"size\":16}],\"Hybrid\"]}],[\"$\",\"div\"'
-        with mock.patch.object(app, "fetch", lambda u, **k: fourday):
-            self.assertEqual(app.mode_from_page("4dayweek", "u")[0], "onsite")   # the posting's own label, not the list below
-        with mock.patch.object(app, "fetch", lambda u, **k: flexa):
-            self.assertEqual(app.mode_from_page("flexa", "u")[0], "hybrid")
-        with mock.patch.object(app, "fetch", lambda u, **k: "<p>nothing</p>"):
-            self.assertEqual(app.mode_from_page("flexa", "u"), (None, ""))
+        with mock.patch.object(http, "get", lambda u, **k: fourday):
+            self.assertEqual(enrich.mode_from_page("4dayweek", "u")[0], "onsite")   # the posting's own label, not the list below
+        with mock.patch.object(http, "get", lambda u, **k: flexa):
+            self.assertEqual(enrich.mode_from_page("flexa", "u")[0], "hybrid")
+        with mock.patch.object(http, "get", lambda u, **k: "<p>nothing</p>"):
+            self.assertEqual(enrich.mode_from_page("flexa", "u"), (None, ""))
 
     def test_background_settling_order_and_manual_is_kept(self):
-        import cvgen
         from unittest import mock
-        app.init_db()
-        app.migrate_db()
+        database.init()
+        database.migrate()
         rows = [("flexa:1", "flexa", "Designer", "", "Nothing here"),
                 ("linkedin:2", "linkedin", "Engineer", "Paris", "Le poste est en présentiel à Paris."),
                 ("linkedin:3", "linkedin", "Programmer", "Paris", "Join our studio team. " * 20),
                 ("linkedin:4", "linkedin", "Artist", "Paris", "Join our studio team. " * 20)]
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             for jid, src, title, loc, d in rows:
                 con.execute("INSERT INTO jobs(id,source,title,location,url,description,score,status,first_seen,work_mode) "
                             "VALUES(?,?,?,?,?,?,5,'new','2026-11-25','unknown')", (jid, src, title, loc, "https://x/" + jid, d))
             con.execute("UPDATE jobs SET mode_src='manual' WHERE id='linkedin:4'")
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["anthropic_api_key"] = "k"
         flexa_page = r'\"size\":16}],\"Remote-first\"]'
         claude_calls = []
@@ -994,10 +1029,10 @@ class WorkModes(unittest.TestCase):
         def fake_claude(key, title, loc, d):
             claude_calls.append(title)
             return "onsite", "Join our studio team."
-        with mock.patch.object(app, "fetch", lambda u, **k: flexa_page), mock.patch.object(app.time, "sleep", lambda s: None), \
+        with mock.patch.object(http, "get", lambda u, **k: flexa_page), mock.patch.object(time, "sleep", lambda s: None), \
                 mock.patch.object(cvgen, "work_mode_from_text", fake_claude):
             enrich_now(cfg)
-        with app.db() as con:
+        with database.connect() as con:
             got = {r["id"]: (r["work_mode"], r["mode_src"]) for r in con.execute("SELECT id, work_mode, mode_src FROM jobs")}
         self.assertEqual(got["flexa:1"], ("remote", "page"))        # the board's own label
         self.assertEqual(got["linkedin:2"], ("onsite", "text"))     # rules, no API call
@@ -1006,15 +1041,15 @@ class WorkModes(unittest.TestCase):
         self.assertEqual(claude_calls, ["Programmer"])
 
     def test_exact_mode_from_a_duplicate_settles_an_unknown_one(self):
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,work_mode,dupkey,urlkey) "
                         "VALUES('linkedin:9','linkedin','Unity Dev','Acme','https://www.linkedin.com/jobs/view/9999999/',5,'new','2026-11-25',"
-                        "'unknown',?, 'li:9999999')", (app.dup_key("Unity Dev", "Acme", ""),))
-            row = app.find_duplicate(con, "Unity Dev", "", "https://www.linkedin.com/comm/jobs/view/9999999/?x=1")
-            app.merge_into(con, row, "mail", {"work_mode": "hybrid"})
+                        "'unknown',?, 'li:9999999')", (identity.dup_key("Unity Dev", "Acme", ""),))
+            row = JobRepository(con).find_duplicate("Unity Dev", "", "https://www.linkedin.com/comm/jobs/view/9999999/?x=1")
+            JobRepository(con).merge_into(row, "mail", {"work_mode": "hybrid"})
             r = con.execute("SELECT work_mode, mode_src FROM jobs WHERE id='linkedin:9'").fetchone()
         self.assertEqual((r["work_mode"], r["mode_src"]), ("hybrid", "source"))
 
@@ -1031,30 +1066,29 @@ class UnknownReasons(unittest.TestCase):
             (dict(base, source="rss", urlkey="u", description="some text"), "not checked yet"),
         ]
         for r, short in cases:
-            self.assertEqual(app.unknown_reason(r)[0], short)
-            self.assertIn(app.e(short), app.mode_picker(r))
-        long_ = app.unknown_reason(cases[1][0])[1]
+            self.assertEqual(workmode.unknown_reason(r)[0], short)
+            self.assertIn(textutil.e(short), components.mode_picker(r))
+        long_ = workmode.unknown_reason(cases[1][0])[1]
         self.assertIn("rules and Claude", long_)
-        self.assertNotIn("· ", app.mode_picker(dict(base, source="linkedin", urlkey="li:1", description="", mode_src="manual",
+        self.assertNotIn("· ", components.mode_picker(dict(base, source="linkedin", urlkey="li:1", description="", mode_src="manual",
                                                      work_mode="remote")).split("</summary>")[0].replace("▾", ""))
 
     def test_linkedin_waiting_for_text_is_not_marked_checked_and_reasons_are_stored(self):
-        import cvgen
         from unittest import mock
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
             for jid, src, uk, d in (("linkedin:1", "linkedin", "li:1", ""), ("linkedin:2", "linkedin", "li:2", "Great team. " * 30),
                                     ("flexa:3", "flexa", "u3", "")):
                 con.execute("INSERT INTO jobs(id,source,title,url,urlkey,description,score,status,first_seen,work_mode) "
                             "VALUES(?,?,'T','https://x/'||?,?,?,5,'new','2026-11-25','unknown')", (jid, src, jid, uk, d))
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["anthropic_api_key"] = "k"
-        with mock.patch.object(app, "fetch", lambda u, **k: "<p>no badge</p>"), mock.patch.object(app.time, "sleep", lambda s: None), \
+        with mock.patch.object(http, "get", lambda u, **k: "<p>no badge</p>"), mock.patch.object(time, "sleep", lambda s: None), \
                 mock.patch.object(cvgen, "work_mode_from_text", lambda *a: ("unknown", "")):
             enrich_now(cfg)
-        with app.db() as con:
+        with database.connect() as con:
             got = {r["id"]: (r["mode_checked"] is not None, r["mode_note"]) for r in con.execute("SELECT id, mode_checked, mode_note FROM jobs")}
         self.assertEqual(got["linkedin:1"], (False, None))              # waits for its text
         self.assertEqual(got["linkedin:2"], (True, "?li_hidden|claude"))
@@ -1063,13 +1097,13 @@ class UnknownReasons(unittest.TestCase):
 
 class ResetForgetsMails(unittest.TestCase):
     def test_reset_also_forgets_read_alert_emails(self):
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("INSERT OR REPLACE INTO mail_seen(msgid, processed_at, found) VALUES('<a@b>', '2026-11-25', 3)")
             con.execute("INSERT OR REPLACE INTO jobs(id,source,title,url,score,status,first_seen) VALUES('mail:z','mail','T','u',5,'new','x')")
-        app.reset_job_cache()
-        with app.db() as con:
+        refresh.reset_job_cache()
+        with database.connect() as con:
             self.assertEqual(con.execute("SELECT COUNT(*) FROM mail_seen").fetchone()[0], 0)
             self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
@@ -1078,45 +1112,45 @@ class UnifiedSearch(unittest.TestCase):
     def test_old_lists_become_one_search(self):
         cfg = {"linkedin_searches": ["unity developer | European Union | remote", "unity | Hungary | any", "mobile engineer"],
                "remotive_queries": ["unity", "game developer"]}
-        self.assertTrue(app.migrate_search(cfg))
+        self.assertTrue(config.migrate_search(cfg))
         self.assertEqual(cfg["search_terms"], ["unity developer | European Union", "unity | Hungary", "mobile engineer",
                                                "game developer"])
         self.assertNotIn("linkedin_searches", cfg)
         self.assertNotIn("remotive_queries", cfg)
-        self.assertFalse(app.migrate_search(cfg))  # only once
+        self.assertFalse(config.migrate_search(cfg))  # only once
 
     def test_every_source_uses_the_terms(self):
         cfg = {"search_terms": ["unity | Hungary", "game developer", "Unity"], "search_locations": ["European Union", "Worldwide"]}
-        self.assertEqual(app.search_keywords(cfg), ["unity", "game developer"])           # Remotive, Flexa
-        self.assertEqual(app.linkedin_plan(cfg), [("unity", "Hungary"), ("game developer", "European Union"),
+        self.assertEqual(search.search_keywords(cfg), ["unity", "game developer"])           # Remotive, Flexa
+        self.assertEqual(search.linkedin_plan(cfg), [("unity", "Hungary"), ("game developer", "European Union"),
                                                   ("game developer", "Worldwide"), ("Unity", "European Union"),
                                                   ("Unity", "Worldwide")])
 
     def test_match_needs_every_word_of_a_term(self):
         kws = ["game developer", "c#"]
-        self.assertTrue(app.matches_search(kws, {"title": "Senior Game Developer"}))
-        self.assertTrue(app.matches_search(kws, {"title": "Backend engineer", "description": "We use C# and .NET"}))
-        self.assertFalse(app.matches_search(kws, {"title": "Game Designer", "description": "Design levels for our studio"}))
-        self.assertFalse(app.matches_search(kws, {"title": "Gameplay programmer"}))
+        self.assertTrue(search.matches_search(kws, {"title": "Senior Game Developer"}))
+        self.assertTrue(search.matches_search(kws, {"title": "Backend engineer", "description": "We use C# and .NET"}))
+        self.assertFalse(search.matches_search(kws, {"title": "Game Designer", "description": "Design levels for our studio"}))
+        self.assertFalse(search.matches_search(kws, {"title": "Gameplay programmer"}))
 
     def test_listing_sources_keep_only_matches(self):
         from unittest import mock
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             con.execute("DELETE FROM jobs")
-        cfg = app.load_config()
-        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        cfg = config_store.load()
+        cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         cfg["search_terms"] = ["unity"]
         cfg["search_filter"] = {"meetfrank": True, "studios": False}
-        app.save_config(cfg)
+        config_store.save(cfg)
         items = [{"ext_id": "1", "title": "Unity Developer", "company": "A", "location": "", "url": "https://a/1", "posted": ""},
                  {"ext_id": "2", "title": "Accountant", "company": "B", "location": "", "url": "https://b/2", "posted": ""}]
         fake = {"meetfrank": lambda c: [dict(i) for i in items],
                 "studios": lambda c: [dict(i, ext_id="s" + i["ext_id"], company="S" + i["company"], url=i["url"] + "s") for i in items]}
-        with mock.patch.dict(app.SOURCE_FUNCS, fake), mock.patch.object(app, "fetch_logos", lambda: None), \
-                mock.patch.object(app, "notify_jobs", lambda c, j: []):
-            app.run_all(force=True, only={"meetfrank", "studios"})
-        with app.db() as con:
+        with fake_sources(fake), mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None), \
+                mock.patch.object(notifier, "new_jobs", lambda c, j: []):
+            refresh.refresher.run(force=True, only={"meetfrank", "studios"})
+        with database.connect() as con:
             ids = {r[0] for r in con.execute("SELECT id FROM jobs")}
         self.assertEqual(ids, {"meetfrank:1", "studios:s1", "studios:s2"})
 
@@ -1125,27 +1159,27 @@ class ChipScoring(unittest.TestCase):
     def test_order_is_the_score(self):
         cfg = {"scoring": {"interests": ["unity / unity3d", "game", "senior"], "desc": ["c#"], "less": ["artist"],
                            "never": ["producer"], "loc_good": ["hungary"], "loc_bad": ["india"]}}
-        self.assertEqual(app.score_job(cfg, {"title": "Senior Unity3D Developer"})[0], 6 + 4)
-        self.assertEqual(app.score_job(cfg, {"title": "Game Producer"})[0], 5 - 8)
-        self.assertEqual(app.score_job(cfg, {"title": "Unity Artist", "location": "Budapest, Hungary"})[0], 6 - 3 + 3)
-        self.assertEqual(app.score_job(cfg, {"title": "Game Dev", "location": "Pune, India"})[0], 5 - 5)
+        self.assertEqual(scoring.score_job(cfg, {"title": "Senior Unity3D Developer"})[0], 6 + 4)
+        self.assertEqual(scoring.score_job(cfg, {"title": "Game Producer"})[0], 5 - 8)
+        self.assertEqual(scoring.score_job(cfg, {"title": "Unity Artist", "location": "Budapest, Hungary"})[0], 6 - 3 + 3)
+        self.assertEqual(scoring.score_job(cfg, {"title": "Game Dev", "location": "Pune, India"})[0], 5 - 5)
         # a description chip counts once, and not again when the title already has the word
-        self.assertEqual(app.score_job(cfg, {"title": "Unity Dev", "description": "C# and Unity"})[0], 6 + 3)
+        self.assertEqual(scoring.score_job(cfg, {"title": "Unity Dev", "description": "C# and Unity"})[0], 6 + 3)
 
     def test_old_lists_become_ordered_chips(self):
         saved = {"title_keywords": {"c#": 3, "unity": 6, "game": 3}, "body_keywords": {"unity": 3},
                  "negative_keywords": {"junior": -6, "designer": -3}, "location_keywords": {"hungary": 3, "india": -5}}
         cfg = dict(saved)
-        self.assertTrue(app.migrate_scoring(cfg, saved))
+        self.assertTrue(config.migrate_scoring(cfg, saved))
         self.assertEqual(cfg["scoring"], {"interests": ["unity", "c#", "game"], "desc": ["unity"], "never": ["junior"],
                                           "less": ["designer"], "loc_good": ["hungary"], "loc_bad": ["india"]})
         self.assertNotIn("title_keywords", cfg)
 
     def test_chips_from_the_form(self):
-        self.assertEqual(app.parse_chips(" Unity \n\nunity\nC#,\n  game   designer "), ["Unity", "C#", "game designer"])
+        self.assertEqual(scoring.parse_chips(" Unity \n\nunity\nC#,\n  game   designer "), ["Unity", "C#", "game designer"])
 
     def test_settings_page_has_the_chip_editor(self):
-        h = app.settings_page()
+        h = settings_view.settings_page()
         self.assertIn('class="textarea ui-mono chips-src"', h)
         self.assertIn('id="score_try"', h)
         self.assertIn('id="presets"', h)
@@ -1154,33 +1188,33 @@ class ChipScoring(unittest.TestCase):
 class Presets(unittest.TestCase):
     def test_save_switch_and_templates(self):
         from unittest import mock
-        app.init_db()
-        patcher = mock.patch.object(app, "search_again", lambda: 0)  # no real fetching in the tests
+        database.init()
+        patcher = mock.patch.object(settings, "search_again", lambda: 0)  # no real fetching in the tests
         patcher.start()
         self.addCleanup(patcher.stop)
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["search_terms"] = ["unity developer"]
         cfg["scoring"]["interests"] = ["unity"]
         cfg["presets"], cfg["active_preset"] = {}, ""
-        app.save_config(cfg)
-        self.assertIn("Saved", app.preset_action({"preset_do": "save", "preset_name": "Unity"}))
-        self.assertIn("game-designer", app.template_presets())
-        self.assertIn("Switched", app.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"}))
-        cfg = app.load_config()
+        config_store.save(cfg)
+        self.assertIn("Saved", settings.preset_action({"preset_do": "save", "preset_name": "Unity"}))
+        self.assertIn("game-designer", presets.template_presets())
+        self.assertIn("Switched", settings.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"}))
+        cfg = config_store.load()
         self.assertIn("game designer", cfg["scoring"]["interests"])
         self.assertEqual(cfg["active_preset"], "tpl:game-designer")   # the template stays selected
         self.assertEqual(cfg["presets"]["Unity"]["search_terms"], ["unity developer"])  # the saved one is untouched
-        app.preset_action({"preset_do": "load", "preset_pick": "Unity"})
-        cfg = app.load_config()
+        settings.preset_action({"preset_do": "load", "preset_pick": "Unity"})
+        cfg = config_store.load()
         self.assertEqual((cfg["search_terms"], cfg["scoring"]["interests"], cfg["active_preset"]), (["unity developer"], ["unity"], "Unity"))
-        self.assertIn("deleted", app.preset_action({"preset_do": "delete", "preset_pick": "Unity"}))
-        self.assertEqual(app.load_config()["active_preset"], "")
+        self.assertIn("deleted", settings.preset_action({"preset_do": "delete", "preset_pick": "Unity"}))
+        self.assertEqual(config_store.load()["active_preset"], "")
 
 
 class NewSearch(unittest.TestCase):
     def test_clear_keeps_what_you_worked_with(self):
-        app.init_db()
-        with app.db() as con:
+        database.init()
+        with database.connect() as con:
             for t in ("jobs", "cvs", "outreach"):
                 con.execute("DELETE FROM %s" % t)
             rows = [("linkedin:1", "linkedin", "new"), ("linkedin:2", "linkedin", "saved"), ("flexa:3", "flexa", "seen"),
@@ -1191,32 +1225,32 @@ class NewSearch(unittest.TestCase):
             con.execute("INSERT INTO cvs(job_id,status) VALUES('studios:7','done')")
             con.execute("INSERT INTO outreach(job_id,name) VALUES('studios:8','A')")
             con.execute("UPDATE jobs SET dup_of='linkedin:1' WHERE id='mail:5'")
-        self.assertEqual(app.clear_for_new_search(), 2)
-        with app.db() as con:
+        self.assertEqual(refresh.clear_for_new_search(), 2)
+        with database.connect() as con:
             left = {r[0] for r in con.execute("SELECT id FROM jobs")}
             self.assertIsNone(con.execute("SELECT dup_of FROM jobs WHERE id='mail:5'").fetchone()[0])  # shown again
         self.assertEqual(left, {"linkedin:2", "flexa:4", "mail:5", "manual:6", "studios:7", "studios:8"})
 
     def test_only_a_search_change_searches_again(self):
         from unittest import mock
-        app.init_db()
-        cfg = app.load_config()
-        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))  # the other tests share this config
+        database.init()
+        cfg = config_store.load()
+        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))  # the other tests share this config
         cfg["presets"], cfg["active_preset"] = {}, ""
-        app.save_config(cfg)
+        config_store.save(cfg)
         form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "search_locations": "European Union",
                 "sc_interests": "unity", "min_score": "4", "src_linkedin": "on"}
         calls = []
-        with mock.patch.object(app, "search_again", lambda: calls.append(1) or 0):
-            app.save_settings(form)                               # first save may change the search
+        with mock.patch.object(settings, "search_again", lambda: calls.append(1) or 0):
+            settings.save_settings(form)                               # first save may change the search
             calls.clear()
-            self.assertFalse(app.save_settings(dict(form, sc_interests="unity\ngame")))  # scoring only
+            self.assertFalse(settings.save_settings(dict(form, sc_interests="unity\ngame")))  # scoring only
             self.assertEqual(calls, [])
-            self.assertTrue(app.save_settings(dict(form, search_terms="game designer")))
+            self.assertTrue(settings.save_settings(dict(form, search_terms="game designer")))
             self.assertEqual(calls, [1])
 
     def test_settings_page_has_the_leave_dialog(self):
-        h = app.settings_page()
+        h = settings_view.settings_page()
         self.assertIn('id="leave_dlg"', h)
         self.assertIn('id="settings_next"', h)
 
@@ -1224,55 +1258,55 @@ class NewSearch(unittest.TestCase):
 class PresetPickedInTheForm(unittest.TestCase):
     def setUp(self):
         from unittest import mock
-        app.init_db()
-        cfg = app.load_config()
-        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))
-        p = mock.patch.object(app, "search_again", lambda: 0)
+        database.init()
+        cfg = config_store.load()
+        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))
+        p = mock.patch.object(settings, "search_again", lambda: 0)
         p.start()
         self.addCleanup(p.stop)
         self.unity = {"search_terms": ["unity"], "scoring": {"interests": ["unity"]}}
         cfg["presets"], cfg["active_preset"] = {"Unity": self.unity}, "Unity"
-        app.apply_preset(cfg, self.unity)
-        app.save_config(cfg)
+        presets.apply_preset(cfg, self.unity)
+        config_store.save(cfg)
         self.form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "sc_interests": "unity",
                      "min_score": "4", "active_preset_set": "Unity", "preset_name": ""}
 
     def test_unchanged_keeps_the_preset(self):
-        res = app.save_settings(self.form)
-        cfg = app.load_config()
+        res = settings.save_settings(self.form)
+        cfg = config_store.load()
         self.assertEqual((cfg["active_preset"], list(cfg["presets"]), res.preset_note), ("Unity", ["Unity"], ""))
 
     def test_changed_becomes_a_new_preset(self):
-        res = app.save_settings(dict(self.form, sc_interests="unity\ngame"))
-        cfg = app.load_config()
+        res = settings.save_settings(dict(self.form, sc_interests="unity\ngame"))
+        cfg = config_store.load()
         self.assertEqual(cfg["active_preset"], "New preset")
         self.assertEqual(cfg["presets"]["Unity"], self.unity)                 # the picked one stays as it was
         self.assertEqual(cfg["presets"]["New preset"]["scoring"]["interests"], ["unity", "game"])
         self.assertIn("New preset", res.preset_note)
-        app.save_settings(dict(self.form, active_preset_set="New preset", sc_interests="unity\nc#"))
-        self.assertEqual(app.load_config()["active_preset"], "New preset 2")
-        app.save_settings(dict(self.form, active_preset_set="Unity", sc_interests="c#", preset_name="Unity"))  # named: updated
-        cfg = app.load_config()
+        settings.save_settings(dict(self.form, active_preset_set="New preset", sc_interests="unity\nc#"))
+        self.assertEqual(config_store.load()["active_preset"], "New preset 2")
+        settings.save_settings(dict(self.form, active_preset_set="Unity", sc_interests="c#", preset_name="Unity"))  # named: updated
+        cfg = config_store.load()
         self.assertEqual((cfg["active_preset"], cfg["presets"]["Unity"]["scoring"]["interests"]), ("Unity", ["c#"]))
 
     def test_a_picked_template_stays_selected(self):
-        tpl = app.template_presets()["game-designer"]
+        tpl = presets.template_presets()["game-designer"]
         form = dict(self.form, active_preset_set="tpl:game-designer", search_terms="\n".join(tpl["search_terms"]),
                     search_locations="\n".join(tpl["search_locations"]), min_score=str(tpl["min_score"]),
                     **{"sc_" + k: "\n".join(v) for k, v in tpl["scoring"].items()},
                     **{"sf_" + k: "on" for k, v in tpl["search_filter"].items() if v})
-        app.save_settings(form)
-        cfg = app.load_config()
+        settings.save_settings(form)
+        cfg = config_store.load()
         self.assertEqual(cfg["active_preset"], "tpl:game-designer")
-        self.assertIn('value="tpl:game-designer" selected', app.settings_page())
+        self.assertIn('value="tpl:game-designer" selected', settings_view.settings_page())
 
     def test_rename(self):
-        self.assertIn("renamed", app.preset_action({"preset_do": "rename", "preset_name": "Unity dev"}))
-        cfg = app.load_config()
+        self.assertIn("renamed", settings.preset_action({"preset_do": "rename", "preset_name": "Unity dev"}))
+        cfg = config_store.load()
         self.assertEqual((cfg["active_preset"], list(cfg["presets"])), ("Unity dev", ["Unity dev"]))
 
     def test_page_carries_the_presets_for_the_form(self):
-        h = app.settings_page()
+        h = settings_view.settings_page()
         self.assertIn('id="preset_data"', h)
         self.assertIn('"tpl:game-designer"', h)
         self.assertNotIn('value="load"', h)   # no server-side switch button any more
@@ -1280,157 +1314,157 @@ class PresetPickedInTheForm(unittest.TestCase):
 
 class CvPostingsStay(unittest.TestCase):
     def test_reset_brings_back_the_postings_with_a_cv(self):
-        app.init_db()
+        database.init()
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "info.json"), "w", encoding="utf-8") as fh:
             json.dump({"job_id": "linkedin:777", "title": "Senior Unity Developer", "company": "Acme", "location": "Remote",
                        "url": "https://www.linkedin.com/jobs/view/777/", "work_mode": "remote", "posted": "2026-11-20"}, fh)
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM cvs")
             con.execute("INSERT INTO cvs(job_id,status,description,created,doc_dir) VALUES('linkedin:777','done','We use Unity.','2026-11-21T10:00:00+00:00',?)", (d,))
             con.execute("INSERT INTO cvs(job_id,status) VALUES('linkedin:888','error')")   # no documents: nothing to bring back
-        app.reset_job_cache()
-        with app.db() as con:
+        refresh.reset_job_cache()
+        with database.connect() as con:
             rows = [dict(r) for r in con.execute("SELECT id, status, title, company, work_mode, urlkey FROM jobs")]
         self.assertEqual(rows, [{"id": "linkedin:777", "status": "applied", "title": "Senior Unity Developer", "company": "Acme",
-                                 "work_mode": "remote", "urlkey": app.url_key("https://www.linkedin.com/jobs/view/777/")}])
+                                 "work_mode": "remote", "urlkey": identity.url_key("https://www.linkedin.com/jobs/view/777/")}])
         # fetched again later (e.g. from an alert e-mail): merged into the one with the CV, not a second card
-        with app.db() as con:
-            same = app.find_duplicate(con, "Senior Unity Developer", "Acme", "https://www.linkedin.com/jobs/view/777/?trk=x")
+        with database.connect() as con:
+            same = JobRepository(con).find_duplicate("Senior Unity Developer", "Acme", "https://www.linkedin.com/jobs/view/777/?trk=x")
         self.assertEqual(same["id"], "linkedin:777")
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM cvs")
             con.execute("DELETE FROM jobs")
 
 
 class ClearCacheButton(unittest.TestCase):
     def test_button_in_settings_not_in_the_header(self):
-        h = app.page("X", "<p>x</p>")
+        h = components.page("X", "<p>x</p>")
         self.assertNotIn("Clear cache</button>", h.split("</header>")[0])
         self.assertIn('<dialog id="clear_dlg"', h)
-        self.assertIn("showModal()", app.settings_page().split("</header>", 1)[1])
+        self.assertIn("showModal()", settings_view.settings_page().split("</header>", 1)[1])
         self.assertIn('action="/reset-jobs"', h)
-        self.assertNotIn("confirm(", app.settings_page())   # no browser confirm any more
+        self.assertNotIn("confirm(", settings_view.settings_page())   # no browser confirm any more
 
     def test_back_with_message(self):
-        self.assertEqual(app.with_msg("/?work=all&msg=old", "Done"), "/?work=all&msg=Done")
-        self.assertEqual(app.with_msg("//evil.example/x", "Hi"), "/?msg=Hi")
+        self.assertEqual(components.with_msg("/?work=all&msg=old", "Done"), "/?work=all&msg=Done")
+        self.assertEqual(components.with_msg("//evil.example/x", "Hi"), "/?msg=Hi")
 
 
 class DecisionsSurviveReset(unittest.TestCase):
     def test_hidden_stays_hidden_after_a_reset(self):
         from unittest import mock
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             for t in ("jobs", "job_marks", "cvs"):
                 con.execute("DELETE FROM %s" % t)
-        cfg = app.load_config()
-        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))
-        cfg["sources"] = {k: True for k in app.SOURCES_INFO}
+        cfg = config_store.load()
+        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))
+        cfg["sources"] = {k: True for k in models.SOURCES_INFO}
         cfg["search_filter"] = {}
-        app.save_config(cfg)
+        config_store.save(cfg)
         items = [{"ext_id": "1", "title": "Unity Developer", "company": "Acme", "location": "", "url": "https://acme.example/jobs/1", "posted": ""},
                  {"ext_id": "2", "title": "Game Programmer", "company": "Beta", "location": "", "url": "https://beta.example/jobs/2", "posted": ""}]
-        run = lambda srcs: app.run_all(force=True, only=srcs)
-        with mock.patch.dict(app.SOURCE_FUNCS, {"meetfrank": lambda c: [dict(i) for i in items],
+        run = lambda srcs: refresh.refresher.run(force=True, only=srcs)
+        with fake_sources({"meetfrank": lambda c: [dict(i) for i in items],
                                                 "flexa": lambda c: [dict(i, ext_id="f" + i["ext_id"]) for i in items[:1]]}), \
-                mock.patch.object(app, "fetch_logos", lambda: None), mock.patch.object(app, "notify_jobs", lambda c, j: []):
+                mock.patch.object(postings, "fetch_logos", lambda: None), mock.patch.object(refresh, "fetch_logos", lambda: None), mock.patch.object(notifier, "new_jobs", lambda c, j: []):
             run({"meetfrank"})
-            with app.db() as con:
-                app.set_job_status(con, "meetfrank:1", "hidden")
-                app.set_job_status(con, "meetfrank:2", "saved")
-            app.reset_job_cache()
+            with database.connect() as con:
+                JobRepository(con).set_status("meetfrank:1", "hidden")
+                JobRepository(con).set_status("meetfrank:2", "saved")
+            refresh.reset_job_cache()
             run({"meetfrank"})      # mark all new as seen survives a reset too
-            with app.db() as con:
+            with database.connect() as con:
                 for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
-                    app.set_job_status(con, r["id"], "seen")
-            app.reset_job_cache()
+                    JobRepository(con).set_status(r["id"], "seen")
+            refresh.reset_job_cache()
             run({"flexa"})          # the same posting from another source
             run({"meetfrank"})
-        with app.db() as con:
+        with database.connect() as con:
             st = {r["id"]: r["status"] for r in con.execute("SELECT id, status FROM jobs WHERE dup_of IS NULL")}
         self.assertEqual(st, {"flexa:f1": "hidden", "meetfrank:2": "saved"})
-        with app.db() as con:                    # unhiding forgets it
-            app.set_job_status(con, "flexa:f1", "new")
-            self.assertIsNone(app.remembered_status(con, "meetfrank:1", app.url_key(items[0]["url"]), ""))
+        with database.connect() as con:                    # unhiding forgets it
+            JobRepository(con).set_status("flexa:f1", "new")
+            self.assertIsNone(JobRepository(con).remembered_status("meetfrank:1", identity.url_key(items[0]["url"]), ""))
             for t in ("jobs", "job_marks"):
                 con.execute("DELETE FROM %s" % t)
 
 
 class SeenIsRemembered(unittest.TestCase):
     def test_seen_survives_and_new_again_forgets(self):
-        app.init_db()
-        app.migrate_db()
+        database.init()
+        database.migrate()
         url = "https://gamma.example/jobs/9"
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM job_marks")
             con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
                         "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'new','x',?,?)",
-                        (url, app.url_key(url), app.dup_key("Tools Programmer", "Gamma", url)))
-            app.set_job_status(con, "rss:9", "seen")
+                        (url, identity.url_key(url), identity.dup_key("Tools Programmer", "Gamma", url)))
+            JobRepository(con).set_status("rss:9", "seen")
             con.execute("DELETE FROM jobs WHERE id='rss:9'")                  # a cache reset
-            self.assertEqual(app.remembered_status(con, "flexa:x", app.url_key(url), ""), "seen")
+            self.assertEqual(JobRepository(con).remembered_status("flexa:x", identity.url_key(url), ""), "seen")
             con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey) "
                         "VALUES('rss:9','rss','Tools Programmer','Gamma',?,5,'seen','x',?,?)",
-                        (url, app.url_key(url), app.dup_key("Tools Programmer", "Gamma", url)))
-            app.set_job_status(con, "rss:9", "new")                           # "Mark new again"
-            self.assertIsNone(app.remembered_status(con, "rss:9", app.url_key(url), ""))
+                        (url, identity.url_key(url), identity.dup_key("Tools Programmer", "Gamma", url)))
+            JobRepository(con).set_status("rss:9", "new")                           # "Mark new again"
+            self.assertIsNone(JobRepository(con).remembered_status("rss:9", identity.url_key(url), ""))
             con.execute("DELETE FROM jobs WHERE id='rss:9'")
 
 
 class ManualModeAndDetailPage(unittest.TestCase):
     def setUp(self):
-        app.init_db()
-        app.migrate_db()
+        database.init()
+        database.migrate()
         self.url = "https://delta.example/jobs/5"
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM job_modes")
             con.execute("DELETE FROM jobs WHERE id='rss:5'")
             con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey,work_mode,description) "
                         "VALUES('rss:5','rss','Unity Dev','Delta',?,7,'new','2026-11-26T10:00:00+00:00',?,?,'unknown','We use Unity.')",
-                        (self.url, app.url_key(self.url), app.dup_key("Unity Dev", "Delta", self.url)))
+                        (self.url, identity.url_key(self.url), identity.dup_key("Unity Dev", "Delta", self.url)))
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM jobs WHERE id='rss:5'")
             con.execute("DELETE FROM job_modes")
 
     def test_hand_set_mode_is_remembered(self):
-        with app.db() as con:
-            app.set_manual_mode(con, "rss:5", "hybrid")
+        with database.connect() as con:
+            JobRepository(con).set_manual_mode("rss:5", "hybrid")
             con.execute("DELETE FROM jobs WHERE id='rss:5'")                      # cache reset
-            self.assertEqual(app.remembered_mode(con, "mail:other", app.url_key(self.url), ""), "hybrid")
+            self.assertEqual(JobRepository(con).remembered_mode("mail:other", identity.url_key(self.url), ""), "hybrid")
 
     def test_unknown_cards_offer_quick_buttons(self):
-        with app.db() as con:
+        with database.connect() as con:
             r = dict(con.execute("SELECT * FROM jobs WHERE id='rss:5'").fetchone())
-        self.assertIn('class="wm-quick"', app.mode_quick(r))
-        self.assertEqual(app.mode_quick(dict(r, work_mode="remote")), "")
+        self.assertIn('class="wm-quick"', components.mode_quick(r))
+        self.assertEqual(components.mode_quick(dict(r, work_mode="remote")), "")
 
     def test_detail_page_marks_seen_and_shows_the_text(self):
-        h = app.job_page("rss:5", "/?work=all")
+        h = jobs_view.job_page("rss:5", "/?work=all")
         self.assertIn('<h1 id="jd-title">Unity Dev</h1>', h)
         self.assertIn("We use Unity.", h)
         self.assertIn('href="/?work=all"', h)
         self.assertIn("/job/rss%3A5/preview", h)
-        with app.db() as con:
+        with database.connect() as con:
             self.assertEqual(con.execute("SELECT status FROM jobs WHERE id='rss:5'").fetchone()[0], "seen")
 
     def test_dialog_content_and_jobs_page_modal(self):
-        title, h = app.job_detail_html("rss:5", modal=True)
+        title, h = jobs_view.job_detail_html("rss:5", modal=True)
         self.assertEqual(title, "Unity Dev")
         self.assertNotIn("Back to the list", h)
         self.assertIn('name="next"', h)
-        jobs = app.jobs_page({"work": "all", "min": "-99", "status": "all"})
+        jobs = jobs_view.jobs_page({"work": "all", "min": "-99", "status": "all"})
         self.assertIn('<dialog id="job_dlg"', jobs)
         self.assertIn('data-href="/job/rss%3A5"', jobs)
 
     def test_posting_html_is_cleaned(self):
         raw = '<div><h2>About</h2><p onclick="x()">Hi <a href="javascript:alert(1)">there</a></p><script>bad()</script><ul><li>C#</li></ul></div>'
-        self.assertEqual(app.clean_posting_html(raw), "<h3>About</h3><p>Hi there</p><ul><li>C#</li></ul>")
-        self.assertEqual(app.clean_posting_html("Line one\nline two\n\nPara 2 & more"),
+        self.assertEqual(postings.clean_posting_html(raw), "<h3>About</h3><p>Hi there</p><ul><li>C#</li></ul>")
+        self.assertEqual(postings.clean_posting_html("Line one\nline two\n\nPara 2 & more"),
                          "<p>Line one<br>line two</p><p>Para 2 &amp; more</p>")
 
 
@@ -1447,14 +1481,14 @@ class OptionalBoards(unittest.TestCase):
                     return body
             raise AssertionError("unexpected URL " + url)
         cfg = {"search_terms": ["node.js developer"]}
-        with mock.patch.object(app, "fetch", fake), mock.patch.object(app.time, "sleep", lambda s: None):
-            return app.SOURCE_FUNCS[name](cfg), calls
+        with mock.patch.object(http, "get", fake), mock.patch.object(time, "sleep", lambda s: None):
+            return registry.BY_KEY[name].fetch(cfg), calls
 
     def test_off_by_default_and_listed(self):
         for k in ("remoteok", "weworkremotely", "himalayas", "jobicy", "workingnomads", "arbeitnow",
                   "remotegamejobs", "workwithindies"):
-            self.assertIn(k, app.FETCHED_SOURCES)
-            self.assertFalse(app.DEFAULT_CONFIG["sources"].get(k))
+            self.assertIn(k, models.FETCHED_SOURCES)
+            self.assertFalse(config.DEFAULT_CONFIG["sources"].get(k))
 
     def test_remoteok_skips_the_notice(self):
         body = json.dumps([{"legal": "terms"}, {"id": "7", "position": "Node.js Developer", "company": "Acme",
@@ -1502,30 +1536,37 @@ class OptionalBoards(unittest.TestCase):
 
     def test_general_boards_need_the_term_in_the_title_too(self):
         data = {"title": "Lakebase Sales Specialist", "description": "Sell Unity Catalog and more."}
-        self.assertTrue(app.matches_search(["unity"], data))
-        self.assertFalse(app.matches_search(["unity"], data, in_title=True))
-        self.assertTrue(app.matches_search(["backend developer node.js"],
+        self.assertTrue(search.matches_search(["unity"], data))
+        self.assertFalse(search.matches_search(["unity"], data, in_title=True))
+        self.assertTrue(search.matches_search(["backend developer node.js"],
                                            {"title": "Senior Backend Engineer", "description": "Node.js developer team"}, in_title=True))
-        self.assertTrue({"remoteok", "weworkremotely", "workingnomads", "arbeitnow"} <= app.ALWAYS_FILTERED)
-        self.assertTrue(app.TITLE_FILTERED <= app.ALWAYS_FILTERED)
+        from jobwatch.sources.base import Filtering
+        cfg = {"search_terms": ["unity"], "search_filter": {}}
+        for key in ("remoteok", "weworkremotely", "workingnomads", "arbeitnow"):
+            source = registry.BY_KEY[key]
+            self.assertIs(source.filtering, Filtering.TITLE)
+            self.assertEqual(source.search_filter(cfg), ["unity"])   # always narrowed, whatever Settings says
+            self.assertFalse(source.keeps(["unity"], data))
+        self.assertTrue(registry.BY_KEY["remotegamejobs"].keeps(["unity"], data))   # a game board: the description counts
+        self.assertEqual(registry.BY_KEY["meetfrank"].search_filter(cfg), [])       # optional: off in Settings
 
 
 class HeaderRefreshMenu(unittest.TestCase):
     def test_menu_lists_switched_on_sources_and_refresh_all_ignores_ticks(self):
         cfg = {"sources": {"linkedin": True, "flexa": False, "remoteok": True}}
-        with mock.patch.object(app, "load_config", lambda: cfg):
-            h = app.refresh_menu()
+        with mock.patch.object(config_store, "load", lambda: cfg):
+            h = components.refresh_menu()
         self.assertIn('name="run_linkedin"', h)
         self.assertIn('name="run_remoteok"', h)
         self.assertNotIn('name="run_flexa"', h)
         self.assertIn('name="selected"', h)
         self.assertNotIn("Choose", h)
         # "Refresh all" sends the ticks but no "selected": every source
-        self.assertEqual(app.run_selection({"run_linkedin": "on"}), (None, set()))
-        self.assertEqual(app.run_selection({"run_linkedin": "on", "selected": "1"}), ({"linkedin"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"run_linkedin": "on"}), (None, set()))
+        self.assertEqual(jobs_controller.run_selection({"run_linkedin": "on", "selected": "1"}), ({"linkedin"}, set()))
 
     def test_header_has_no_test_push(self):
-        html_ = app.page("x", "<p>x</p>")
+        html_ = components.page("x", "<p>x</p>")
         self.assertNotIn("Test push", html_)
         self.assertIn('class="rf-wrap"', html_)
 
@@ -1561,112 +1602,112 @@ def mail_with(subject, sender, text, ics=None, msgid="<m1>"):
 
 class Interviews(unittest.TestCase):
     def setUp(self):
-        app.init_db()
-        app.migrate_db()
-        with app.db() as con:
+        database.init()
+        database.migrate()
+        with database.connect() as con:
             con.execute("DELETE FROM interviews")
             con.execute("DELETE FROM interview_mail_seen")
 
     def add(self, when, **kw):
-        with app.db() as con:
-            return app.add_interview(con, kw.pop("company", "Acme"), kw.pop("role", "Unity Developer"), when, **kw)
+        with database.connect() as con:
+            return InterviewRepository(con).add(kw.pop("company", "Acme"), kw.pop("role", "Unity Developer"), when, **kw)
 
     def cfg(self, **iv):
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["ntfy"] = dict(cfg["ntfy"], enabled=True, topic="t")
         cfg["interviews"] = dict({"morning": "08:00", "before_min": 60}, **iv)
         return cfg
 
     def test_ics_is_read_with_its_time_zone_and_text(self):
-        ev = app.parse_ics(ICS_INVITE)[0]
+        ev = ical.parse_ics(ICS_INVITE)[0]
         self.assertEqual(ev["uid"], "abc123@google.com")
-        self.assertEqual(ev["start"].utcoffset(), app.timedelta(hours=1))   # Budapest in December
+        self.assertEqual(ev["start"].utcoffset(), timedelta(hours=1))   # Budapest in December
         self.assertEqual((ev["end"] - ev["start"]).seconds, 45 * 60)
         self.assertEqual(ev["summary"], "Interview: Unity Developer, Acme")
         self.assertEqual(ev["description"], "Technical interview\nwith the game team")
         self.assertEqual(ev["organizer"], "Anna Recruiter")
         self.assertFalse(ev["cancelled"])
-        self.assertEqual(app.meeting_link(ev["location"]), "https://meet.google.com/abc-defg-hij")
-        self.assertTrue(app.parse_ics(ICS_INVITE.replace("METHOD:REQUEST", "METHOD:CANCEL"))[0]["cancelled"])
-        utc = app.parse_ics(ICS_INVITE.replace("DTSTART;TZID=Europe/Budapest:20301203T140000", "DTSTART:20301203T130000Z"))[0]
+        self.assertEqual(ical.meeting_link(ev["location"]), "https://meet.google.com/abc-defg-hij")
+        self.assertTrue(ical.parse_ics(ICS_INVITE.replace("METHOD:REQUEST", "METHOD:CANCEL"))[0]["cancelled"])
+        utc = ical.parse_ics(ICS_INVITE.replace("DTSTART;TZID=Europe/Budapest:20301203T140000", "DTSTART:20301203T130000Z"))[0]
         self.assertEqual(utc["start"], ev["start"])
 
     def test_reminders_on_the_day_and_before(self):
-        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        start = datetime(2030, 12, 3, 14, 0).astimezone()
         iid = self.add(start, minutes=45, place="https://meet.google.com/x")
-        sent, cfg, td = [], self.cfg(), app.timedelta
-        with mock.patch.object(app, "load_config", lambda: cfg), \
-                mock.patch.object(app, "send_ntfy", lambda c, t, m, click=None, priority=3: sent.append((t, click, priority))):
-            self.assertEqual(app.interview_reminders(start - td(days=1)), [])        # the day before: nothing
-            self.assertEqual(app.interview_reminders(start.replace(hour=7)), [])     # before the morning time
-            self.assertEqual(app.interview_reminders(start.replace(hour=8, minute=1)), [(iid, "day")])
-            self.assertEqual(app.interview_reminders(start.replace(hour=9)), [])     # only once
-            self.assertEqual(app.interview_reminders(start - td(minutes=55)), [(iid, "soon")])
-            self.assertEqual(app.interview_reminders(start - td(minutes=50)), [])
+        sent, cfg, td = [], self.cfg(), timedelta
+        with mock.patch.object(config_store, "load", lambda: cfg), \
+                mock.patch.object(notifier, "push", lambda c, t, m, click=None, priority=3: sent.append((t, click, priority))):
+            self.assertEqual(ivcore.reminders.send_due(start - td(days=1)), [])        # the day before: nothing
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=7)), [])     # before the morning time
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=8, minute=1)), [(iid, "day")])
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=9)), [])     # only once
+            self.assertEqual(ivcore.reminders.send_due(start - td(minutes=55)), [(iid, "soon")])
+            self.assertEqual(ivcore.reminders.send_due(start - td(minutes=50)), [])
         self.assertIn("today at 14:00", sent[0][0])
         self.assertIn("Interview in 55 min", sent[1][0])
         self.assertEqual(sent[1][1], "https://meet.google.com/x")   # tapping it opens the meeting
-        with app.db() as con:   # a new time starts the reminders again
-            app.update_interview(con, iid, starts=(start + td(days=1)).isoformat(timespec="minutes"))
+        with database.connect() as con:   # a new time starts the reminders again
+            InterviewRepository(con).update(iid, starts=(start + td(days=1)).isoformat(timespec="minutes"))
             r = con.execute("SELECT reminded_day, reminded_soon FROM interviews WHERE id=?", (iid,)).fetchone()
         self.assertEqual((r["reminded_day"], r["reminded_soon"]), (None, None))
 
     def test_added_late_on_the_day_reminds_at_once(self):
-        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        start = datetime(2030, 12, 3, 14, 0).astimezone()
         iid = self.add(start)
         cfg = self.cfg()
-        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "send_ntfy", lambda *a, **k: None):
-            self.assertEqual(app.interview_reminders(start - app.timedelta(minutes=20)), [(iid, "soon")])
+        with mock.patch.object(config_store, "load", lambda: cfg), mock.patch.object(notifier, "push", lambda *a, **k: None):
+            self.assertEqual(ivcore.reminders.send_due(start - timedelta(minutes=20)), [(iid, "soon")])
 
     def test_form_adds_links_the_posting_and_marks_it_applied(self):
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM jobs WHERE id='iv:1'")
             con.execute("INSERT INTO jobs(id,source,title,company,url,status,score) VALUES('iv:1','rss','Unity Dev','Zeta Games',"
                         "'https://x.test/1','seen',5)")
-        with mock.patch.object(app, "start_research", lambda iid, force=False: False):
-            to, msg = app.interview_post("/interviews", {"iv_company": "Zeta Games", "iv_role": "Unity Dev",
+        with mock.patch.object(ivcore.researcher, "start", lambda iid, force=False: False):
+            to, msg = post("/interviews", {"iv_company": "Zeta Games", "iv_role": "Unity Dev",
                                                          "iv_date": "2030-12-03", "iv_time": "10:30", "iv_minutes": "50",
                                                          "job_id": "iv:1"})
         iid = int(to.rsplit("/", 1)[1])
-        with app.db() as con:
+        with database.connect() as con:
             r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
             st = con.execute("SELECT status FROM jobs WHERE id='iv:1'").fetchone()["status"]
         self.assertEqual((r["job_id"], r["minutes"], r["starts"][:16]), ("iv:1", 50, "2030-12-03T10:30"))
         self.assertEqual(st, "applied")
-        self.assertIn("Zeta Games", app.interviews_page({}))
-        self.assertIn("Zeta Games", app.interview_page(iid))
-        self.assertIn('value="Zeta Games"', app.interviews_page({"job": "iv:1"}))   # opened from the posting: filled in
-        app.interview_post("/interviews/%d" % iid, {"act": "cancelled"})
-        with app.db() as con:
+        self.assertIn("Zeta Games", interviews_view.interviews_page({}))
+        self.assertIn("Zeta Games", interviews_view.interview_page(iid))
+        self.assertIn('value="Zeta Games"', interviews_view.interviews_page({"job": "iv:1"}))   # opened from the posting: filled in
+        post("/interviews/%d" % iid, {"act": "cancelled"})
+        with database.connect() as con:
             self.assertEqual(con.execute("SELECT status FROM interviews WHERE id=?", (iid,)).fetchone()["status"], "cancelled")
             con.execute("DELETE FROM jobs WHERE id='iv:1'")
-        self.assertEqual(app.interview_post("/interviews", {"iv_company": "", "iv_date": ""})[0], "/interviews#add")
-        app.interview_post("/interviews/%d" % iid, {"act": "delete"})
-        with app.db() as con:
+        self.assertEqual(post("/interviews", {"iv_company": "", "iv_date": ""})[0], "/interviews#add")
+        post("/interviews/%d" % iid, {"act": "delete"})
+        with database.connect() as con:
             self.assertIsNone(con.execute("SELECT 1 FROM interviews WHERE id=?", (iid,)).fetchone())
 
     def test_calendar_files(self):
-        start = app.datetime(2030, 12, 3, 14, 0).astimezone()
+        start = datetime(2030, 12, 3, 14, 0).astimezone()
         iid = self.add(start, minutes=45, place="Office, Main St. 1", people="Bob, CTO")
-        with app.db() as con:
+        with database.connect() as con:
             rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE id=?", (iid,))]
-        ics = app.interviews_ics(rows, app.load_config())
+        ics = ical.interviews_ics(rows, config_store.load())
         self.assertIn("SUMMARY:Interview: Acme – Unity Developer", ics)
         self.assertIn("LOCATION:Office\\, Main St. 1", ics)
-        back = app.parse_ics(ics)[0]   # what we write reads back the same
+        back = ical.parse_ics(ics)[0]   # what we write reads back the same
         self.assertEqual(back["start"], start)
         self.assertEqual((back["end"] - back["start"]).seconds, 45 * 60)
-        self.assertIn("dates=", app.google_calendar_link(rows[0]))
+        self.assertIn("dates=", ical.google_calendar_link(rows[0]))
 
     def test_invitation_without_claude_is_saved_and_a_cancel_cancels_it(self):
         msg = mail_with("Invitation: Interview", "anna@acme.com", "See the invite.", ICS_INVITE)
         cfg = self.cfg(from_mail=True, research=False)
         cfg["anthropic_api_key"] = ""
         mails = [("<m1>", "anna@acme.com", "Invitation: Interview", "", msg)]
-        with mock.patch.object(app, "load_config", lambda: cfg), mock.patch.object(app, "read_interview_mails", lambda c: (mails, [])), \
-                mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), mock.patch.object(app, "notify_interview", lambda *a: None):
-            self.assertIn("1 new interview", app.scan_interview_mails())
-            with app.db() as con:
+        with mock.patch.object(config_store, "load", lambda: cfg), mock.patch.object(mailboxes, "read_interview_mails", lambda c: (mails, [])), \
+                mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), mock.patch.object(mailboxes, "notify_interview", lambda *a: None):
+            self.assertIn("1 new interview", mailboxes.scan_interview_mails())
+            with database.connect() as con:
                 r = con.execute("SELECT * FROM interviews").fetchone()
             self.assertEqual((r["source"], r["uid"], r["minutes"], r["place"]),
                              ("mail", "abc123@google.com", 45, "https://meet.google.com/abc-defg-hij"))
@@ -1674,8 +1715,8 @@ class Interviews(unittest.TestCase):
             cancel = mail_with("Canceled: Interview", "anna@acme.com", "Cancelled.",
                                ICS_INVITE.replace("METHOD:REQUEST", "METHOD:CANCEL"), "<m2>")
             mails[:] = [("<m2>", "anna@acme.com", "Canceled: Interview", "", cancel)]
-            self.assertIn("1 changed", app.scan_interview_mails())
-            with app.db() as con:
+            self.assertIn("1 changed", mailboxes.scan_interview_mails())
+            with database.connect() as con:
                 self.assertEqual(con.execute("SELECT status FROM interviews").fetchone()["status"], "cancelled")
                 self.assertEqual(con.execute("SELECT COUNT(*) c FROM interview_mail_seen").fetchone()["c"], 2)
 
@@ -1685,7 +1726,7 @@ class Interviews(unittest.TestCase):
         cfg = self.cfg()
         cfg["anthropic_api_key"] = ""
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
-            self.assertIsNone(app.interview_from_mail(cfg, "a@b.test", "Invitation: Team lunch", "", msg, []))
+            self.assertIsNone(mailboxes.interview_from_mail(cfg, "a@b.test", "Invitation: Team lunch", "", msg, []))
 
     def test_claude_reads_an_email_without_invitation(self):
         msg = mail_with("Next steps", "hr@zeta.test", "Let's meet tomorrow at 3pm on Zoom: https://zoom.us/j/123")
@@ -1693,54 +1734,51 @@ class Interviews(unittest.TestCase):
         cfg["anthropic_api_key"] = "k"
         got = {"is_interview": True, "cancelled": False, "company": "Zeta", "role": "Dev", "start": "2030-12-04T15:00",
                "minutes": 0, "place": "https://zoom.us/j/123", "people": "", "summary": "Call with HR"}
-        import cvgen
         with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: got):
-            found = app.interview_from_mail(cfg, "hr@zeta.test", "Next steps", "", msg, [])
+            found = mailboxes.interview_from_mail(cfg, "hr@zeta.test", "Next steps", "", msg, [])
         self.assertEqual((found["company"], found["start"].hour, found["minutes"], found["place"]),
                          ("Zeta", 15, 60, "https://zoom.us/j/123"))
         got["is_interview"] = False
         with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: got):
-            self.assertIsNone(app.interview_from_mail(cfg, "x", "Newsletter", "", msg, []))
+            self.assertIsNone(mailboxes.interview_from_mail(cfg, "x", "Newsletter", "", msg, []))
 
     def test_research_text_is_rendered_safely(self):
-        h = app.md_html("## At a glance\n- **Big** studio <script>x</script>\n- [Site](https://acme.test)\n\nPlain")
+        h = components.md_html("## At a glance\n- **Big** studio <script>x</script>\n- [Site](https://acme.test)\n\nPlain")
         self.assertIn("<h3>At a glance</h3>", h)
         self.assertIn("<li><b>Big</b> studio &lt;script&gt;", h)
         self.assertIn('<a href="https://acme.test"', h)
         self.assertNotIn("<script>", h)
 
     def test_posting_detail_has_an_interview_button_and_the_feed_is_public(self):
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("INSERT OR REPLACE INTO jobs(id,source,title,company,url,status,score) "
                         "VALUES('iv:2','rss','A','B','https://x.test/2','seen',1)")
-        _, h = app.job_detail_html("iv:2")
-        with app.db() as con:
+        _, h = jobs_view.job_detail_html("iv:2")
+        with database.connect() as con:
             con.execute("DELETE FROM jobs WHERE id='iv:2'")
         self.assertIn('href="/interviews?job=iv%3A2#add"', h)
-        self.assertGreaterEqual(len(app.calendar_token()), 20)
-        self.assertIn('/interviews', app.page("x", "y"))
+        self.assertGreaterEqual(len(ivcore.calendar_token()), 20)
+        self.assertIn('/interviews', components.page("x", "y"))
 
 
 class InterviewMailFilter(unittest.TestCase):
     def test_noise_does_not_reach_claude(self):
-        import cvgen
-        cfg = app.load_config()
+        cfg = config_store.load()
         cfg["anthropic_api_key"] = "k"
         calls = []
         with mock.patch.object(cvgen, "interview_from_email", lambda *a, **k: calls.append(a) or {"is_interview": False}):
             for subj, text in (("Anna accepted your invitation, explore their network", "Say hi on Thursday at 10:00"),
                                ("Last Call! Save up to 50%", "Ends Friday"),
                                ("A focused next step for your search", "Here are 5 jobs for you.")):
-                self.assertIsNone(app.interview_from_mail(cfg, "x@y.test", subj, "", mail_with(subj, "x@y.test", text), []))
+                self.assertIsNone(mailboxes.interview_from_mail(cfg, "x@y.test", subj, "", mail_with(subj, "x@y.test", text), []))
             self.assertEqual(calls, [])
-            app.interview_from_mail(cfg, "hr@z.test", "Next steps", "", mail_with("Next steps", "hr@z.test",
+            mailboxes.interview_from_mail(cfg, "hr@z.test", "Next steps", "", mail_with("Next steps", "hr@z.test",
                                                                                   "Could we talk tomorrow at 15:00?"), [])
             self.assertEqual(len(calls), 1)
 
 
 class ResearchSources(unittest.TestCase):
     def test_citations_first_then_pages_read_then_search_results(self):
-        import cvgen
         from types import SimpleNamespace as N
         search = N(type="web_search_tool_result", content=[N(title="S1", url="https://s1.test"), N(title="S2", url="https://s2.test")])
         fetch = N(type="web_fetch_tool_result", content=N(url="https://f.test", content=N(title="F")))
@@ -1752,7 +1790,6 @@ class ResearchSources(unittest.TestCase):
         self.assertEqual(cvgen.research_sources([search, fetch, cited]), [("C", "https://c.test")])
 
     def test_a_paused_turn_is_continued_and_all_its_text_kept(self):
-        import cvgen
         from types import SimpleNamespace as N
         part1 = N(stop_reason="pause_turn", content=[N(type="text", text="## At a glance\n", citations=None)])
         part2 = N(stop_reason="end_turn", content=[N(type="text", text="- Big studio", citations=None)])
@@ -1767,46 +1804,46 @@ class ResearchSources(unittest.TestCase):
 
 class InterviewMailboxes(unittest.TestCase):
     def setUp(self):
-        app.init_db()
-        app.migrate_db()
-        self.cfg = app.load_config()
+        database.init()
+        database.migrate()
+        self.cfg = config_store.load()
         self.cfg["email"] = dict(self.cfg["email"], username="me@gmail.com", password="pw")
         self.cfg["interviews"] = {"mailboxes": []}
-        patcher = mock.patch.object(app, "load_config", lambda: self.cfg)
+        patcher = mock.patch.object(config_store, "load", lambda: self.cfg)
         patcher.start()
         self.addCleanup(patcher.stop)
-        saver = mock.patch.object(app, "save_config", lambda c: None)
+        saver = mock.patch.object(config_store, "save", lambda c: None)
         saver.start()
         self.addCleanup(saver.stop)
 
     def test_server_from_the_address(self):
-        self.assertEqual(app.imap_host_for("varadi.gabor@icloud.com"), "imap.mail.me.com")
-        self.assertEqual(app.imap_host_for("x@hotmail.com"), "outlook.office365.com")
-        self.assertEqual(app.imap_host_for("x@acme.hu"), "imap.acme.hu")
+        self.assertEqual(mailboxes.imap_host_for("varadi.gabor@icloud.com"), "imap.mail.me.com")
+        self.assertEqual(mailboxes.imap_host_for("x@hotmail.com"), "outlook.office365.com")
+        self.assertEqual(mailboxes.imap_host_for("x@acme.hu"), "imap.acme.hu")
 
     def test_add_after_a_working_login_only(self):
         class FakeImap:
             def logout(self):
                 pass
-        with mock.patch.object(app, "imap_open", lambda mb: FakeImap()), mock.patch.object(app, "scan_interview_mails", lambda: None):
-            msg = app.mailbox_post({"act": "add", "mb_user": "varadi.gabor@icloud.com", "mb_password": "abcd efgh ijkl mnop"})
+        with mock.patch.object(mailboxes, "imap_open", lambda mb: FakeImap()), mock.patch.object(ivloop, "scan_interview_mails", lambda: None), mock.patch.object(mailboxes, "scan_interview_mails", lambda: None):
+            msg = mailboxes.mailbox_book.add("varadi.gabor@icloud.com", "abcd efgh ijkl mnop")
         self.assertIn("added", msg)
         mb = self.cfg["interviews"]["mailboxes"][0]
         self.assertEqual((mb["host"], mb["password"], mb["folder"]), ("imap.mail.me.com", "abcdefghijklmnop", "INBOX"))
-        boxes = app.interview_mailboxes(self.cfg)
+        boxes = mailboxes.interview_mailboxes(self.cfg)
         self.assertEqual([b["user"] for b in boxes], ["me@gmail.com", "varadi.gabor@icloud.com"])
-        html_ = app.mailboxes_html(self.cfg)
+        html_ = interviews_view.mailboxes_html(self.cfg)
         self.assertIn("varadi.gabor@icloud.com", html_)
         self.assertNotIn("abcdefghijklmnop", html_)   # the password is never shown
 
         def refuse(mb):
             raise Exception("b'[AUTHENTICATIONFAILED] Authentication failed.'")
-        with mock.patch.object(app, "imap_open", refuse):
-            msg = app.mailbox_post({"act": "add", "mb_user": "other@icloud.com", "mb_password": "x"})
+        with mock.patch.object(mailboxes, "imap_open", refuse):
+            msg = mailboxes.mailbox_book.add("other@icloud.com", "x")
         self.assertIn("Nothing was saved", msg)
         self.assertIn("app password", msg)
         self.assertEqual(len(self.cfg["interviews"]["mailboxes"]), 1)
-        app.mailbox_post({"act": "remove", "mb_id": mb["id"]})
+        mailboxes.mailbox_book.remove(mb["id"])
         self.assertEqual(self.cfg["interviews"]["mailboxes"], [])
 
     def test_one_broken_mailbox_does_not_stop_the_others(self):
@@ -1816,29 +1853,29 @@ class InterviewMailboxes(unittest.TestCase):
             if mb["id"] == "main":
                 raise Exception("timeout")
             return [("<x>", "hr@z.test", "Interview", "", None)]
-        with mock.patch.object(app, "read_mailbox_interviews", read):
-            mails, errs = app.read_interview_mails(self.cfg)
+        with mock.patch.object(mailboxes, "read_mailbox_interviews", read):
+            mails, errs = mailboxes.read_interview_mails(self.cfg)
         self.assertEqual(len(mails), 1)
         self.assertEqual(errs, ["me@gmail.com: timeout"])
-        self.assertEqual(app.mailbox_state("main")["error"], "timeout")
+        self.assertEqual(mailboxes.mailbox_state("main")["error"], "timeout")
 
 
 
 class ResearchIsOptional(unittest.TestCase):
     def test_adding_an_interview_does_not_start_research_by_default(self):
-        app.init_db()
-        cfg = app.load_config()
+        database.init()
+        cfg = config_store.load()
         cfg["anthropic_api_key"] = "k"
         cfg.pop("interviews", None)
         started = []
-        with mock.patch.object(app, "load_config", lambda: cfg),                 mock.patch.object(app, "start_research", lambda iid, force=False: started.append(iid) or True):
-            to, msg = app.interview_post("/interviews", {"iv_company": "Acme", "iv_date": "2030-12-03", "iv_time": "10:00"})
+        with mock.patch.object(config_store, "load", lambda: cfg),                 mock.patch.object(ivcore.researcher, "start", lambda iid, force=False: started.append(iid) or True):
+            to, msg = post("/interviews", {"iv_company": "Acme", "iv_date": "2030-12-03", "iv_time": "10:00"})
             self.assertEqual(started, [])
             self.assertNotIn("researching", msg)
             iid = int(to.rsplit("/", 1)[1])
-            app.interview_post("/interviews/%d" % iid, {"act": "research"})   # the button still works
+            post("/interviews/%d" % iid, {"act": "research"})   # the button still works
             self.assertEqual(started, [iid])
-        with app.db() as con:
+        with database.connect() as con:
             con.execute("DELETE FROM interviews WHERE id=?", (iid,))
 
 
@@ -1846,26 +1883,54 @@ class ResearchIsOptional(unittest.TestCase):
 class IcsFileName(unittest.TestCase):
     def test_company_and_time_in_the_name(self):
         r = {"company": "Ünal Games, Kft.", "starts": "2026-12-01T10:40+01:00"}
-        self.assertEqual(app.ics_filename(r), "Interview_Unal_Games_Kft_2026-12-01_10-40.ics")
-        self.assertEqual(app.ics_filename({"company": "", "starts": ""}), "Interview.ics")
+        self.assertEqual(ical.ics_filename(r), "Interview_Unal_Games_Kft_2026-12-01_10-40.ics")
+        self.assertEqual(ical.ics_filename({"company": "", "starts": ""}), "Interview.ics")
 
 
 
 class InterviewDialog(unittest.TestCase):
     def test_rows_open_a_dialog_with_the_interview(self):
-        app.init_db()
-        with app.db() as con:
-            iid = app.add_interview(con, "Dialog Co", "Dev", app.datetime(2030, 12, 3, 14, 0).astimezone())
+        database.init()
+        with database.connect() as con:
+            iid = InterviewRepository(con).add("Dialog Co", "Dev", datetime(2030, 12, 3, 14, 0).astimezone())
             con.execute("UPDATE interviews SET research_status='running' WHERE id=?", (iid,))
-        page_ = app.interviews_page({})
+        page_ = interviews_view.interviews_page({})
         self.assertIn('<dialog id="iv_dlg"', page_)
         self.assertIn('data-href="/interviews/%d"' % iid, page_)
         self.assertIn('<div id="iv_lists">', page_)
-        part = app.interview_page(iid, modal=True)
+        part = interviews_view.interview_page(iid, modal=True)
         self.assertNotIn("<html", part)
         self.assertNotIn('href="/interviews" style', part)     # no back link in the dialog
         self.assertIn('data-running="1"', part)                # it reloads itself while researching
         self.assertIn('id="iv-title"', part)
-        self.assertIn("not here any more", app.interview_page(999999, modal=True))
-        with app.db() as con:
+        self.assertIn("not here any more", interviews_view.interview_page(999999, modal=True))
+        with database.connect() as con:
             con.execute("DELETE FROM interviews WHERE id=?", (iid,))
+
+
+class Routing(unittest.TestCase):
+    def test_every_page_has_a_route_and_only_a_few_are_public(self):
+        for method, path in (("GET", "/"), ("GET", "/job/rss%3A1"), ("GET", "/job/rss%3A1/preview"), ("GET", "/sources"),
+                             ("GET", "/interviews/3"), ("GET", "/interviews/3.ics"), ("POST", "/interviews/3"),
+                             ("GET", "/cv/x/resume.pdf"), ("POST", "/cv/x/send"), ("GET", "/settings"), ("POST", "/preset"),
+                             ("GET", "/outreach/lookup"), ("POST", "/outreach/7"), ("GET", "/static/css/app.css")):
+            route, _ = server.ROUTER.match(method, path)
+            self.assertIsNotNone(route, (method, path))
+        public = {(r.method, r.pattern.pattern) for r in server.ROUTER.routes if r.public}
+        self.assertIn(("GET", "/health"), public)
+        self.assertTrue(server.ROUTER.is_public("GET", "/calendar/%s.ics" % ("a" * 24)))
+        for method, path in (("GET", "/"), ("GET", "/settings"), ("POST", "/run"), ("GET", "/docs/file"), ("GET", "/logo/abc")):
+            self.assertFalse(server.ROUTER.is_public(method, path), path)
+
+    def test_unknown_path_is_404_and_a_failing_action_is_500(self):
+        req = Request("GET", "/no/such/page", {}, lambda n: b"")
+        self.assertEqual(server.dispatch(req).status, 404)
+        from jobwatch.web.router import Router
+        router = Router()
+
+        def broken(req):
+            raise RuntimeError("boom")
+        router.get(r"/x", broken)
+        resp = server.dispatch(Request("GET", "/x", {}, lambda n: b""), router)
+        self.assertEqual(resp.status, 500)
+        self.assertIn(b"boom", resp.body)
