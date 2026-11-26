@@ -16,6 +16,9 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
 - **Sources:** LinkedIn search pages, MeetFrank, 4dayweek.io, Flexa, Remotive, company job boards
   (Ashby, Greenhouse, Lever, BambooHR, SmartRecruiters), and your own RSS feeds. Each source can be
   switched off in the Settings page.
+- **Optional boards** (off until you switch them on in Settings): Remote OK, We Work Remotely, Himalayas,
+  Jobicy, Working Nomads, Arbeitnow (EU, mostly Germany), and for games Remote Game Jobs and Work With Indies.
+  The boards that list every trade keep only the postings that match a search term (a word of it in the title).
 - **Scoring:** every posting gets points from title keywords, description keywords, location and
   negative keywords (for example "junior" or "sales"). Postings below *Min. score in list* are hidden,
   and postings at or above *Min. score for notifications* trigger a notification.

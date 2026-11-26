@@ -41,6 +41,15 @@ SOURCES_INFO = {
     "4dayweek": ("4dayweek.io", "https://4dayweek.io/"),
     "flexa": ("Flexa", "https://flexa.careers/"),
     "remotive": ("Remotive (extra)", "https://remotive.com/"),
+    # optional boards (off until switched on in Settings)
+    "remoteok": ("Remote OK", "https://remoteok.com/"),
+    "weworkremotely": ("We Work Remotely", "https://weworkremotely.com/"),
+    "himalayas": ("Himalayas", "https://himalayas.app/jobs"),
+    "jobicy": ("Jobicy", "https://jobicy.com/"),
+    "workingnomads": ("Working Nomads", "https://www.workingnomads.com/jobs"),
+    "arbeitnow": ("Arbeitnow (EU, mostly Germany)", "https://www.arbeitnow.com/"),
+    "remotegamejobs": ("Remote Game Jobs", "https://remotegamejobs.com/"),
+    "workwithindies": ("Work With Indies", "https://www.workwithindies.com/"),
     "studios": ("Company job boards", ""),
     "rss": ("Own RSS feeds", ""),
     "custom": ("Own sources", ""),
@@ -48,6 +57,13 @@ SOURCES_INFO = {
     "manual": ("Added by hand", ""),
 }
 FETCHED_SOURCES = [k for k in SOURCES_INFO if k != "manual"]
+OPTIONAL_BOARDS = ["remoteok", "weworkremotely", "himalayas", "jobicy", "workingnomads", "arbeitnow", "remotegamejobs",
+                   "workwithindies"]
+# boards that list everything and are always narrowed to the search terms (they would flood the list otherwise)
+ALWAYS_FILTERED = {"remoteok", "weworkremotely", "workingnomads", "arbeitnow", "remotegamejobs", "workwithindies",
+                   "jobicy"}   # Jobicy's own search also matches inside words ("unity" in "community")
+# general boards (all trades): a search term must also show in the title (see matches_search)
+TITLE_FILTERED = {"remoteok", "weworkremotely", "workingnomads", "arbeitnow"}
 SEARCH_FILTERABLE = ["meetfrank", "4dayweek", "studios", "rss", "custom"]  # they list everything; the others search  # "manual" is never fetched, only added from the Jobs page
 UNSUPPORTED = [
     ("HiringCafe", "https://hiringcafe.com/", "Cloudflare blocks automated fetching (403)"),
@@ -354,10 +370,14 @@ def linkedin_plan(cfg):
     return out
 
 
-def matches_search(keywords, it):
-    """True if the title or description contains every word of at least one search term."""
-    text = " ".join((it.get("title") or "", it.get("description") or "")).lower()
-    return any(all(term_re(w).search(text) for w in kw.lower().split()) for kw in keywords)
+def matches_search(keywords, it, in_title=False):
+    """True if the title or description contains every word of at least one search term.
+    in_title: one of those words must also be in the title (for the general boards, where a description alone matches
+    too much, e.g. "Unity Catalog" in a data posting)."""
+    title = (it.get("title") or "").lower()
+    text = " ".join((title, it.get("description") or "")).lower()
+    return any(all(term_re(w).search(text) for w in kw.lower().split())
+               and (not in_title or any(term_re(w).search(title) for w in kw.lower().split())) for kw in keywords)
 
 
 def save_config(cfg):
@@ -1015,6 +1035,150 @@ def src_remotive(cfg):
     return out
 
 
+def epoch_iso(v):
+    try:
+        return datetime.fromtimestamp(int(float(v)), timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def rfc822_iso(v):
+    try:
+        return parsedate_to_datetime(v).isoformat()
+    except Exception:
+        return ""
+
+
+def src_remoteok(cfg):
+    """Remote OK: one JSON list of the latest remote postings (their terms: link back to the posting on Remote OK)."""
+    out = []
+    for j in json.loads(fetch("https://remoteok.com/api")):
+        if not isinstance(j, dict) or not j.get("id") or not j.get("position"):
+            continue   # the first entry is the legal notice
+        out.append({"ext_id": str(j["id"]), "title": j.get("position", ""), "company": j.get("company", ""),
+                    "location": j.get("location") or "", "url": j.get("url") or j.get("apply_url", ""),
+                    "posted": j.get("date", ""), "description": strip_tags(j.get("description", ""))[:8000],
+                    "work_mode": "remote", "logo": j.get("company_logo") or j.get("logo") or ""})
+    return out
+
+
+def src_weworkremotely(cfg):
+    """We Work Remotely: the RSS feed of all categories (title: "Company: Title")."""
+    out = []
+    root = ET.fromstring(fetch("https://weworkremotely.com/remote-jobs.rss"))
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        company, _, t = title.partition(": ")
+        if not t:
+            company, t = "", title
+        link = (it.findtext("link") or "").strip()
+        out.append({"ext_id": it.findtext("guid") or link, "title": t.strip(), "company": company.strip(),
+                    "location": (it.findtext("region") or "").strip(), "url": link,
+                    "posted": rfc822_iso(it.findtext("pubDate") or ""),
+                    "description": strip_tags(it.findtext("description") or "")[:8000], "work_mode": "remote"})
+    return out
+
+
+def src_himalayas(cfg):
+    """Himalayas: remote postings, searched by each search term."""
+    out, seen = [], set()
+    for q in search_keywords(cfg):
+        d = json.loads(fetch("https://himalayas.app/jobs/api/search?" + urllib.parse.urlencode({"q": q})))
+        for j in d.get("jobs", []):
+            gid = j.get("guid") or j.get("applicationLink") or ""
+            if not gid or gid in seen:
+                continue
+            seen.add(gid)
+            locs = j.get("locationRestrictions") or []
+            out.append({"ext_id": gid.rstrip("/").rsplit("/companies/", 1)[-1], "title": j.get("title", ""),
+                        "company": j.get("companyName", ""),
+                        "location": ", ".join(locs[:6]) + (" …" if len(locs) > 6 else "") if locs else "Worldwide",
+                        "url": gid, "posted": epoch_iso(j.get("pubDate")),
+                        "description": strip_tags(j.get("description", ""))[:8000], "work_mode": "remote",
+                        "logo": j.get("companyLogo") or ""})
+        time.sleep(1)
+    return out
+
+
+def src_jobicy(cfg):
+    """Jobicy: remote postings, searched by each search term."""
+    out, seen = [], set()
+    for q in search_keywords(cfg):
+        d = json.loads(fetch("https://jobicy.com/api/v2/remote-jobs?" + urllib.parse.urlencode({"count": 50, "tag": q})))
+        for j in d.get("jobs", []):
+            jid = str(j.get("id") or "")
+            if not jid or jid in seen:
+                continue
+            seen.add(jid)
+            out.append({"ext_id": jid, "title": html.unescape(j.get("jobTitle", "")), "company": j.get("companyName", ""),
+                        "location": j.get("jobGeo") or "", "url": j.get("url", ""), "posted": j.get("pubDate", ""),
+                        "description": strip_tags(j.get("jobDescription") or j.get("jobExcerpt") or "")[:8000],
+                        "work_mode": "remote", "logo": j.get("companyLogo") or ""})
+        time.sleep(1)
+    return out
+
+
+def src_workingnomads(cfg):
+    """Working Nomads: one JSON list of the latest remote postings."""
+    out = []
+    for j in json.loads(fetch("https://www.workingnomads.com/api/exposed_jobs/")):
+        url = j.get("url") or ""
+        m = re.search(r"/(\d+)/?$", url)
+        out.append({"ext_id": m.group(1) if m else url, "title": j.get("title", ""), "company": j.get("company_name", ""),
+                    "location": j.get("location") or "", "url": url, "posted": j.get("pub_date", ""),
+                    "description": strip_tags(j.get("description", ""))[:8000], "work_mode": "remote"})
+    return out
+
+
+def src_arbeitnow(cfg):
+    """Arbeitnow: European (mostly German) postings, newest first; the first three pages (~900)."""
+    out = []
+    for page in (1, 2, 3):
+        d = json.loads(fetch("https://www.arbeitnow.com/api/job-board-api?page=%d" % page))
+        for j in d.get("data", []):
+            out.append({"ext_id": j.get("slug") or j.get("url", ""), "title": j.get("title", ""),
+                        "company": j.get("company_name", ""), "location": j.get("location") or "",
+                        "url": j.get("url", ""), "posted": epoch_iso(j.get("created_at")),
+                        "description": strip_tags(j.get("description", ""))[:8000],
+                        "work_mode": "remote" if j.get("remote") is True else None})
+        if not (d.get("links") or {}).get("next"):
+            break
+        time.sleep(2)
+    return out
+
+
+def src_remotegamejobs(cfg):
+    """Remote Game Jobs: remote game-industry postings (RSS; title: "Company is hiring Title (Remote Job)")."""
+    out = []
+    root = ET.fromstring(fetch("https://remotegamejobs.com/feed.rss"))
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        m = re.match(r"(.+?) is hiring (?:an? )?(.+?)(?: \(Remote Job\))?$", title)
+        company, t = (m.group(1), m.group(2)) if m else ("", title)
+        link = (it.findtext("link") or "").strip()
+        out.append({"ext_id": it.findtext("guid") or link, "title": t, "company": company, "location": "Remote",
+                    "url": link, "posted": rfc822_iso(it.findtext("pubDate") or ""),
+                    "description": strip_tags(it.findtext("description") or "")[:8000], "work_mode": "remote"})
+    return out
+
+
+def src_workwithindies(cfg):
+    """Work With Indies: indie game studio postings (RSS; title: "Company is hiring a Title to work from Place")."""
+    out = []
+    root = ET.fromstring(fetch("https://workwithindies.com/careers/rss.xml"))
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        m = re.match(r"(.+?) is hiring (?:an? )?(.+?)(?: to work (?:from|in) (.+))?$", title)
+        company, t, where = (m.group(1), m.group(2), m.group(3) or "") if m else ("", title, "")
+        link = (it.findtext("link") or "").strip()
+        out.append({"ext_id": it.findtext("guid") or link, "title": t, "company": company,
+                    "location": where if where.lower() != "anywhere" else "Remote (anywhere)", "url": link,
+                    "posted": rfc822_iso(it.findtext("pubDate") or ""),
+                    "description": strip_tags(it.findtext("description") or "")[:8000],
+                    "work_mode": "remote" if where.lower() in ("anywhere", "remote") else None})
+    return out
+
+
 def src_studios(cfg):
     out, errs = [], []
     for line in cfg.get("studios") or []:
@@ -1657,9 +1821,14 @@ def enrich_linkedin(con, items, limit=60):
 
 SOURCE_FUNCS = {"linkedin": src_linkedin, "meetfrank": src_meetfrank, "4dayweek": src_4dayweek,
                 "flexa": src_flexa, "remotive": src_remotive, "studios": src_studios,
-                "rss": src_rss, "custom": src_custom, "mail": lambda cfg: src_mail(cfg)}
+                "rss": src_rss, "custom": src_custom, "mail": lambda cfg: src_mail(cfg),
+                "remoteok": src_remoteok, "weworkremotely": src_weworkremotely, "himalayas": src_himalayas,
+                "jobicy": src_jobicy, "workingnomads": src_workingnomads, "arbeitnow": src_arbeitnow,
+                "remotegamejobs": src_remotegamejobs, "workwithindies": src_workwithindies}
 MIN_INTERVAL = {"remotive": 360,  # perc; a Remotive API max ~4 hivast ker naponta
-                "custom": 120}    # own sources (e.g. munka.hu): gentle, so the site does not block us
+                "custom": 120,    # own sources (e.g. munka.hu): gentle, so the site does not block us
+                # the optional public boards: gentle, they are free APIs that ask not to be hammered
+                "remoteok": 120, "himalayas": 120, "jobicy": 120, "workingnomads": 120, "arbeitnow": 120}
 
 
 # ---------------------------------------------------------------- notify
@@ -2070,7 +2239,7 @@ def run_all(force=False, only=None, custom_ids=None):
                 items, err = [], "%s: %s" % (type(ex).__name__, ex)
             ts = now_iso()
             new = skipped = 0
-            kws = search_keywords(cfg) if (cfg.get("search_filter") or {}).get(name) else []
+            kws = search_keywords(cfg) if (name in ALWAYS_FILTERED or (cfg.get("search_filter") or {}).get(name)) else []
             with db() as con:
                 for it in items:
                     if not it.get("title") or not it.get("url", "").startswith("http"):
@@ -2097,7 +2266,7 @@ def run_all(force=False, only=None, custom_ids=None):
                         if wm != "unknown" and (msrc == "source" or not keep) and (ex_row["mode_src"] or "") != "manual":
                             con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=? WHERE id=?", (wm, msrc, mnote, jid))
                         continue
-                    if kws and not matches_search(kws, it):
+                    if kws and not matches_search(kws, it, in_title=name in TITLE_FILTERED):
                         skipped += 1  # this source lists everything: keep only what matches a search term
                         continue
                     same = find_duplicate(con, it["title"], it["company"], it["url"])
@@ -3310,8 +3479,10 @@ def settings_page(flash=""):
     n, m = cfg["ntfy"], cfg["email"]
     chk = lambda b: " checked" if b else ""
     sub = "%s/%s" % (n["server"].rstrip("/"), n["topic"])
-    src_boxes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
-        k, chk(cfg["sources"].get(k)), e(v[0])) for k, v in SOURCES_INFO.items() if k in FETCHED_SOURCES)
+    box = lambda k: '<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
+        k, chk(cfg["sources"].get(k)), e(SOURCES_INFO[k][0]))
+    src_boxes = "".join(box(k) for k in FETCHED_SOURCES if k not in OPTIONAL_BOARDS)
+    board_boxes = "".join(box(k) for k in OPTIONAL_BOARDS)
     modes = "".join('<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="nwm_%s"%s> %s</label>' % (
         k, chk(k in cfg.get("notify_work_modes", ["remote", "unknown"])), wm_html(k)) for k in WORK_MODES)
     filt = "".join('<option value="%s"%s>%s</option>' % (k, " selected" if k == cfg.get("default_work_filter", "remote_unknown") else "", l)
@@ -3356,6 +3527,9 @@ def settings_page(flash=""):
 
     search = ui_sec("search", "Job search", "Which sites are searched, and how often.",
         '<div class="ui-grid"><div class="wide"><label>Sources</label><div class="ui-checks">%s</div></div>' % src_boxes
+        + ('<div class="wide"><label>Optional boards</label><div class="ui-checks">%s</div><span class="help">Free public job boards, '
+           'switch on the ones you want. Those that list every trade keep only the postings matching a search term '
+           '(a word of it in the title). Remote Game Jobs and Work With Indies are for game roles.</span></div>' % board_boxes)
         + ui_field("interval", "Refresh every (minutes)", cfg["interval_minutes"], "number", "At least 15.", ' min="15"')
         + '<div><label>Work mode (remote / hybrid / on-site)</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
           'class="toggle toggle-sm toggle-primary" name="mode_claude"%s> Claude reads the postings the rules cannot settle</label>'

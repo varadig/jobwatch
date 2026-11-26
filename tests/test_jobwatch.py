@@ -7,6 +7,7 @@ import contextlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -1421,3 +1422,79 @@ class ManualModeAndDetailPage(unittest.TestCase):
         self.assertEqual(app.clean_posting_html(raw), "<h3>About</h3><p>Hi there</p><ul><li>C#</li></ul>")
         self.assertEqual(app.clean_posting_html("Line one\nline two\n\nPara 2 & more"),
                          "<p>Line one<br>line two</p><p>Para 2 &amp; more</p>")
+
+
+class OptionalBoards(unittest.TestCase):
+    """The optional public job boards: each parser turns its feed into postings."""
+
+    def run_src(self, name, payloads):
+        calls = []
+
+        def fake(url, *a, **k):
+            calls.append(url)
+            for key, body in payloads.items():
+                if key in url:
+                    return body
+            raise AssertionError("unexpected URL " + url)
+        cfg = {"search_terms": ["node.js developer"]}
+        with mock.patch.object(app, "fetch", fake), mock.patch.object(app.time, "sleep", lambda s: None):
+            return app.SOURCE_FUNCS[name](cfg), calls
+
+    def test_off_by_default_and_listed(self):
+        for k in ("remoteok", "weworkremotely", "himalayas", "jobicy", "workingnomads", "arbeitnow",
+                  "remotegamejobs", "workwithindies"):
+            self.assertIn(k, app.FETCHED_SOURCES)
+            self.assertFalse(app.DEFAULT_CONFIG["sources"].get(k))
+
+    def test_remoteok_skips_the_notice(self):
+        body = json.dumps([{"legal": "terms"}, {"id": "7", "position": "Node.js Developer", "company": "Acme",
+                                                 "location": "Europe", "url": "https://remoteok.com/remote-jobs/7",
+                                                 "date": "2026-11-25T10:00:00+00:00", "description": "<p>Hi</p>"}])
+        items, _ = self.run_src("remoteok", {"remoteok.com/api": body})
+        self.assertEqual([(i["ext_id"], i["title"], i["company"], i["work_mode"], i["description"]) for i in items],
+                         [("7", "Node.js Developer", "Acme", "remote", "Hi")])
+
+    def test_rss_boards_split_company_and_title(self):
+        def rss(title, extra=""):
+            return ('<rss><channel><item><title>%s</title><link>https://x.test/j/1</link><guid>g1</guid>'
+                    '<pubDate>Wed, 25 Nov 2026 13:35:30 +0000</pubDate><description>Text</description>%s</item>'
+                    '</channel></rss>' % (title, extra))
+        items, _ = self.run_src("weworkremotely", {"weworkremotely.com": rss("Acme: Backend Engineer", "<region>Europe</region>")})
+        self.assertEqual((items[0]["company"], items[0]["title"], items[0]["location"]), ("Acme", "Backend Engineer", "Europe"))
+        items, _ = self.run_src("remotegamejobs", {"remotegamejobs.com": rss("Sperasoft is hiring Unreal Developer (Remote Job)")})
+        self.assertEqual((items[0]["company"], items[0]["title"]), ("Sperasoft", "Unreal Developer"))
+        self.assertTrue(items[0]["posted"].startswith("2026-11-25"))
+        items, _ = self.run_src("workwithindies", {"workwithindies.com": rss("Uni Dreams is hiring a Senior Programmer to work from Anywhere")})
+        self.assertEqual((items[0]["company"], items[0]["title"], items[0]["work_mode"]), ("Uni Dreams", "Senior Programmer", "remote"))
+        items, _ = self.run_src("workwithindies", {"workwithindies.com": rss("Mad Mabel is hiring a 3D Artist to work from CET ± 4 hours")})
+        self.assertEqual((items[0]["location"], items[0]["work_mode"]), ("CET ± 4 hours", None))
+
+    def test_search_boards_query_each_term(self):
+        hima = json.dumps({"jobs": [{"title": "Node.js Developer", "companyName": "Acme", "guid": "https://himalayas.app/companies/acme/jobs/node",
+                                     "locationRestrictions": ["Hungary"], "pubDate": 1795617609, "description": "<b>x</b>"}]})
+        items, calls = self.run_src("himalayas", {"himalayas.app": hima})
+        self.assertIn("q=node.js+developer", calls[0])
+        self.assertEqual((items[0]["ext_id"], items[0]["location"], items[0]["posted"][:4]), ("acme/jobs/node", "Hungary", "2026"))
+        jobicy = json.dumps({"jobs": [{"id": 5, "jobTitle": "Node &amp; TS Dev", "companyName": "B", "url": "https://jobicy.com/jobs/5",
+                                       "jobGeo": "EMEA", "pubDate": "2026-11-26T10:09:47+00:00", "jobDescription": "<p>d</p>"}]})
+        items, calls = self.run_src("jobicy", {"jobicy.com": jobicy})
+        self.assertIn("tag=node.js+developer", calls[0])
+        self.assertEqual((items[0]["title"], items[0]["location"]), ("Node & TS Dev", "EMEA"))
+
+    def test_arbeitnow_pages_until_the_last(self):
+        page = lambda more: json.dumps({"data": [{"slug": "s", "title": "Dev", "company_name": "C", "location": "Berlin",
+                                                  "url": "https://www.arbeitnow.com/x", "created_at": 1795708863,
+                                                  "remote": True, "description": "d"}],
+                                        "links": {"next": "p2" if more else None}})
+        items, calls = self.run_src("arbeitnow", {"page=1": page(True), "page=2": page(False)})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(items[0]["work_mode"], "remote")
+
+    def test_general_boards_need_the_term_in_the_title_too(self):
+        data = {"title": "Lakebase Sales Specialist", "description": "Sell Unity Catalog and more."}
+        self.assertTrue(app.matches_search(["unity"], data))
+        self.assertFalse(app.matches_search(["unity"], data, in_title=True))
+        self.assertTrue(app.matches_search(["backend developer node.js"],
+                                           {"title": "Senior Backend Engineer", "description": "Node.js developer team"}, in_title=True))
+        self.assertTrue({"remoteok", "weworkremotely", "workingnomads", "arbeitnow"} <= app.ALWAYS_FILTERED)
+        self.assertTrue(app.TITLE_FILTERED <= app.ALWAYS_FILTERED)
