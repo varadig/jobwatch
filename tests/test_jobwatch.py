@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
+import urllib.parse
 import urllib.request
 from unittest import mock
 
@@ -28,6 +29,7 @@ from jobwatch.domain import scoring
 from jobwatch.domain import workmode
 from jobwatch import env
 from jobwatch import models
+from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch import search
 from jobwatch.services import documents
@@ -50,6 +52,8 @@ from jobwatch.sources import registry
 from jobwatch.util import text as textutil
 from jobwatch.web import components
 from jobwatch.web import server
+from jobwatch.web.controllers import jobs as jobs_controller
+from jobwatch.web.http import Request
 from jobwatch.web.views import interviews as interviews_view
 from jobwatch.web.views import jobs as jobs_view
 from jobwatch.web.views import outreach as outreach_view
@@ -68,6 +72,16 @@ def fake_sources(results):
         for source in registry.SOURCES:
             stack.enter_context(mock.patch.object(source, "fetch", results.get(source.key, lambda cfg: [])))
         yield
+
+
+
+def post(path, form):
+    """Sends a form through the router as the browser would: (where it redirects, without the message; the message)."""
+    req = Request("POST", path, {}, lambda n: b"")
+    req._form = dict(form)
+    resp = server.dispatch(req)
+    loc = urllib.parse.urlparse(dict(resp.headers)["Location"])
+    return loc.path + ("#" + loc.fragment if loc.fragment else ""), urllib.parse.parse_qs(loc.query).get("msg", [""])[0]
 
 
 def template(name):
@@ -735,13 +749,13 @@ class Logos(unittest.TestCase):
 
 class RefreshSelection(unittest.TestCase):
     def test_form_to_selection(self):
-        self.assertEqual(refresh.run_selection({}), (None, set()))                       # header button: all
-        self.assertEqual(refresh.run_selection({"all": "1", "run_flexa": "on"}), (None, set()))
-        self.assertEqual(refresh.run_selection({"one": "flexa"}), ({"flexa"}, set()))
-        self.assertEqual(refresh.run_selection({"one": "cs:ab12"}), (set(), {"ab12"}))
-        self.assertEqual(refresh.run_selection({"selected": "1", "run_flexa": "on", "run_linkedin": "on"}), ({"flexa", "linkedin"}, set()))
-        self.assertEqual(refresh.run_selection({"selected": "1", "run_custom": "on", "run_cs_ab12": "on"}), (set(), {"ab12"}))
-        self.assertEqual(refresh.run_selection({"selected": "1"}), (None, set()))        # nothing ticked: caller refuses
+        self.assertEqual(jobs_controller.run_selection({}), (None, set()))                       # header button: all
+        self.assertEqual(jobs_controller.run_selection({"all": "1", "run_flexa": "on"}), (None, set()))
+        self.assertEqual(jobs_controller.run_selection({"one": "flexa"}), ({"flexa"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"one": "cs:ab12"}), (set(), {"ab12"}))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1", "run_flexa": "on", "run_linkedin": "on"}), ({"flexa", "linkedin"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1", "run_custom": "on", "run_cs_ab12": "on"}), (set(), {"ab12"}))
+        self.assertEqual(jobs_controller.run_selection({"selected": "1"}), (None, set()))        # nothing ticked: caller refuses
 
     def test_only_the_picked_sources_run(self):
         from unittest import mock
@@ -1567,8 +1581,8 @@ class HeaderRefreshMenu(unittest.TestCase):
         self.assertIn('name="selected"', h)
         self.assertNotIn("Choose", h)
         # "Refresh all" sends the ticks but no "selected": every source
-        self.assertEqual(refresh.run_selection({"run_linkedin": "on"}), (None, set()))
-        self.assertEqual(refresh.run_selection({"run_linkedin": "on", "selected": "1"}), ({"linkedin"}, set()))
+        self.assertEqual(jobs_controller.run_selection({"run_linkedin": "on"}), (None, set()))
+        self.assertEqual(jobs_controller.run_selection({"run_linkedin": "on", "selected": "1"}), ({"linkedin"}, set()))
 
     def test_header_has_no_test_push(self):
         html_ = components.page("x", "<p>x</p>")
@@ -1615,7 +1629,7 @@ class Interviews(unittest.TestCase):
 
     def add(self, when, **kw):
         with database.connect() as con:
-            return ivcore.add_interview(con, kw.pop("company", "Acme"), kw.pop("role", "Unity Developer"), when, **kw)
+            return InterviewRepository(con).add(kw.pop("company", "Acme"), kw.pop("role", "Unity Developer"), when, **kw)
 
     def cfg(self, **iv):
         cfg = config_store.load()
@@ -1643,17 +1657,17 @@ class Interviews(unittest.TestCase):
         sent, cfg, td = [], self.cfg(), timedelta
         with mock.patch.object(config_store, "load", lambda: cfg), \
                 mock.patch.object(notifier, "push", lambda c, t, m, click=None, priority=3: sent.append((t, click, priority))):
-            self.assertEqual(ivcore.interview_reminders(start - td(days=1)), [])        # the day before: nothing
-            self.assertEqual(ivcore.interview_reminders(start.replace(hour=7)), [])     # before the morning time
-            self.assertEqual(ivcore.interview_reminders(start.replace(hour=8, minute=1)), [(iid, "day")])
-            self.assertEqual(ivcore.interview_reminders(start.replace(hour=9)), [])     # only once
-            self.assertEqual(ivcore.interview_reminders(start - td(minutes=55)), [(iid, "soon")])
-            self.assertEqual(ivcore.interview_reminders(start - td(minutes=50)), [])
+            self.assertEqual(ivcore.reminders.send_due(start - td(days=1)), [])        # the day before: nothing
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=7)), [])     # before the morning time
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=8, minute=1)), [(iid, "day")])
+            self.assertEqual(ivcore.reminders.send_due(start.replace(hour=9)), [])     # only once
+            self.assertEqual(ivcore.reminders.send_due(start - td(minutes=55)), [(iid, "soon")])
+            self.assertEqual(ivcore.reminders.send_due(start - td(minutes=50)), [])
         self.assertIn("today at 14:00", sent[0][0])
         self.assertIn("Interview in 55 min", sent[1][0])
         self.assertEqual(sent[1][1], "https://meet.google.com/x")   # tapping it opens the meeting
         with database.connect() as con:   # a new time starts the reminders again
-            ivcore.update_interview(con, iid, starts=(start + td(days=1)).isoformat(timespec="minutes"))
+            InterviewRepository(con).update(iid, starts=(start + td(days=1)).isoformat(timespec="minutes"))
             r = con.execute("SELECT reminded_day, reminded_soon FROM interviews WHERE id=?", (iid,)).fetchone()
         self.assertEqual((r["reminded_day"], r["reminded_soon"]), (None, None))
 
@@ -1662,15 +1676,15 @@ class Interviews(unittest.TestCase):
         iid = self.add(start)
         cfg = self.cfg()
         with mock.patch.object(config_store, "load", lambda: cfg), mock.patch.object(notifier, "push", lambda *a, **k: None):
-            self.assertEqual(ivcore.interview_reminders(start - timedelta(minutes=20)), [(iid, "soon")])
+            self.assertEqual(ivcore.reminders.send_due(start - timedelta(minutes=20)), [(iid, "soon")])
 
     def test_form_adds_links_the_posting_and_marks_it_applied(self):
         with database.connect() as con:
             con.execute("DELETE FROM jobs WHERE id='iv:1'")
             con.execute("INSERT INTO jobs(id,source,title,company,url,status,score) VALUES('iv:1','rss','Unity Dev','Zeta Games',"
                         "'https://x.test/1','seen',5)")
-        with mock.patch.object(mailboxes, "start_research", lambda iid, force=False: False), mock.patch.object(interviews_view, "start_research", lambda iid, force=False: False):
-            to, msg = interviews_view.interview_post("/interviews", {"iv_company": "Zeta Games", "iv_role": "Unity Dev",
+        with mock.patch.object(ivcore.researcher, "start", lambda iid, force=False: False):
+            to, msg = post("/interviews", {"iv_company": "Zeta Games", "iv_role": "Unity Dev",
                                                          "iv_date": "2030-12-03", "iv_time": "10:30", "iv_minutes": "50",
                                                          "job_id": "iv:1"})
         iid = int(to.rsplit("/", 1)[1])
@@ -1682,12 +1696,12 @@ class Interviews(unittest.TestCase):
         self.assertIn("Zeta Games", interviews_view.interviews_page({}))
         self.assertIn("Zeta Games", interviews_view.interview_page(iid))
         self.assertIn('value="Zeta Games"', interviews_view.interviews_page({"job": "iv:1"}))   # opened from the posting: filled in
-        interviews_view.interview_post("/interviews/%d" % iid, {"act": "cancelled"})
+        post("/interviews/%d" % iid, {"act": "cancelled"})
         with database.connect() as con:
             self.assertEqual(con.execute("SELECT status FROM interviews WHERE id=?", (iid,)).fetchone()["status"], "cancelled")
             con.execute("DELETE FROM jobs WHERE id='iv:1'")
-        self.assertEqual(interviews_view.interview_post("/interviews", {"iv_company": "", "iv_date": ""})[0], "/interviews#add")
-        interviews_view.interview_post("/interviews/%d" % iid, {"act": "delete"})
+        self.assertEqual(post("/interviews", {"iv_company": "", "iv_date": ""})[0], "/interviews#add")
+        post("/interviews/%d" % iid, {"act": "delete"})
         with database.connect() as con:
             self.assertIsNone(con.execute("SELECT 1 FROM interviews WHERE id=?", (iid,)).fetchone())
 
@@ -1830,8 +1844,8 @@ class InterviewMailboxes(unittest.TestCase):
         class FakeImap:
             def logout(self):
                 pass
-        with mock.patch.object(mailboxes, "imap_open", lambda mb: FakeImap()), mock.patch.object(ivloop, "scan_interview_mails", lambda: None), mock.patch.object(mailboxes, "scan_interview_mails", lambda: None), mock.patch.object(interviews_view, "scan_interview_mails", lambda: None):
-            msg = mailboxes.mailbox_post({"act": "add", "mb_user": "varadi.gabor@icloud.com", "mb_password": "abcd efgh ijkl mnop"})
+        with mock.patch.object(mailboxes, "imap_open", lambda mb: FakeImap()), mock.patch.object(ivloop, "scan_interview_mails", lambda: None), mock.patch.object(mailboxes, "scan_interview_mails", lambda: None):
+            msg = mailboxes.mailbox_book.add("varadi.gabor@icloud.com", "abcd efgh ijkl mnop")
         self.assertIn("added", msg)
         mb = self.cfg["interviews"]["mailboxes"][0]
         self.assertEqual((mb["host"], mb["password"], mb["folder"]), ("imap.mail.me.com", "abcdefghijklmnop", "INBOX"))
@@ -1844,11 +1858,11 @@ class InterviewMailboxes(unittest.TestCase):
         def refuse(mb):
             raise Exception("b'[AUTHENTICATIONFAILED] Authentication failed.'")
         with mock.patch.object(mailboxes, "imap_open", refuse):
-            msg = mailboxes.mailbox_post({"act": "add", "mb_user": "other@icloud.com", "mb_password": "x"})
+            msg = mailboxes.mailbox_book.add("other@icloud.com", "x")
         self.assertIn("Nothing was saved", msg)
         self.assertIn("app password", msg)
         self.assertEqual(len(self.cfg["interviews"]["mailboxes"]), 1)
-        mailboxes.mailbox_post({"act": "remove", "mb_id": mb["id"]})
+        mailboxes.mailbox_book.remove(mb["id"])
         self.assertEqual(self.cfg["interviews"]["mailboxes"], [])
 
     def test_one_broken_mailbox_does_not_stop_the_others(self):
@@ -1873,12 +1887,12 @@ class ResearchIsOptional(unittest.TestCase):
         cfg["anthropic_api_key"] = "k"
         cfg.pop("interviews", None)
         started = []
-        with mock.patch.object(config_store, "load", lambda: cfg),                 mock.patch.object(mailboxes, "start_research", lambda iid, force=False: started.append(iid) or True), mock.patch.object(interviews_view, "start_research", lambda iid, force=False: started.append(iid) or True):
-            to, msg = interviews_view.interview_post("/interviews", {"iv_company": "Acme", "iv_date": "2030-12-03", "iv_time": "10:00"})
+        with mock.patch.object(config_store, "load", lambda: cfg),                 mock.patch.object(ivcore.researcher, "start", lambda iid, force=False: started.append(iid) or True):
+            to, msg = post("/interviews", {"iv_company": "Acme", "iv_date": "2030-12-03", "iv_time": "10:00"})
             self.assertEqual(started, [])
             self.assertNotIn("researching", msg)
             iid = int(to.rsplit("/", 1)[1])
-            interviews_view.interview_post("/interviews/%d" % iid, {"act": "research"})   # the button still works
+            post("/interviews/%d" % iid, {"act": "research"})   # the button still works
             self.assertEqual(started, [iid])
         with database.connect() as con:
             con.execute("DELETE FROM interviews WHERE id=?", (iid,))
@@ -1897,7 +1911,7 @@ class InterviewDialog(unittest.TestCase):
     def test_rows_open_a_dialog_with_the_interview(self):
         database.init()
         with database.connect() as con:
-            iid = ivcore.add_interview(con, "Dialog Co", "Dev", datetime(2030, 12, 3, 14, 0).astimezone())
+            iid = InterviewRepository(con).add("Dialog Co", "Dev", datetime(2030, 12, 3, 14, 0).astimezone())
             con.execute("UPDATE interviews SET research_status='running' WHERE id=?", (iid,))
         page_ = interviews_view.interviews_page({})
         self.assertIn('<dialog id="iv_dlg"', page_)
@@ -1911,3 +1925,31 @@ class InterviewDialog(unittest.TestCase):
         self.assertIn("not here any more", interviews_view.interview_page(999999, modal=True))
         with database.connect() as con:
             con.execute("DELETE FROM interviews WHERE id=?", (iid,))
+
+
+class Routing(unittest.TestCase):
+    def test_every_page_has_a_route_and_only_a_few_are_public(self):
+        for method, path in (("GET", "/"), ("GET", "/job/rss%3A1"), ("GET", "/job/rss%3A1/preview"), ("GET", "/sources"),
+                             ("GET", "/interviews/3"), ("GET", "/interviews/3.ics"), ("POST", "/interviews/3"),
+                             ("GET", "/cv/x/resume.pdf"), ("POST", "/cv/x/send"), ("GET", "/settings"), ("POST", "/preset"),
+                             ("GET", "/outreach/lookup"), ("POST", "/outreach/7"), ("GET", "/static/css/app.css")):
+            route, _ = server.ROUTER.match(method, path)
+            self.assertIsNotNone(route, (method, path))
+        public = {(r.method, r.pattern.pattern) for r in server.ROUTER.routes if r.public}
+        self.assertIn(("GET", "/health"), public)
+        self.assertTrue(server.ROUTER.is_public("GET", "/calendar/%s.ics" % ("a" * 24)))
+        for method, path in (("GET", "/"), ("GET", "/settings"), ("POST", "/run"), ("GET", "/docs/file"), ("GET", "/logo/abc")):
+            self.assertFalse(server.ROUTER.is_public(method, path), path)
+
+    def test_unknown_path_is_404_and_a_failing_action_is_500(self):
+        req = Request("GET", "/no/such/page", {}, lambda n: b"")
+        self.assertEqual(server.dispatch(req).status, 404)
+        from jobwatch.web.router import Router
+        router = Router()
+
+        def broken(req):
+            raise RuntimeError("boom")
+        router.get(r"/x", broken)
+        resp = server.dispatch(Request("GET", "/x", {}, lambda n: b""), router)
+        self.assertEqual(resp.status, 500)
+        self.assertIn(b"boom", resp.body)

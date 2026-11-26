@@ -1,7 +1,6 @@
 """The Interviews page and an interview's view."""
 import json
 import os
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,12 +8,12 @@ from datetime import datetime
 from datetime import timedelta
 
 from jobwatch.models import INTERVIEW_STATUS
-from jobwatch.services.interviews.core import add_interview, calendar_token, fmt_iv_when, interview_cfg, iv_start, rel_when, start_research, update_interview
+from jobwatch.services.interviews.core import calendar_token, fmt_iv_when, interview_cfg, iv_start, rel_when
 from jobwatch.services.interviews.ics import google_calendar_link
-from jobwatch.services.interviews.mailboxes import APP_PASSWORD_HELP, interview_mailboxes, mailbox_post, mailbox_state, scan_interview_mails
+from jobwatch.services.interviews.mailboxes import APP_PASSWORD_HELP, interview_mailboxes, mailbox_state
 from jobwatch.services.logos import logo_files
 from jobwatch.util.text import e
-from jobwatch.util.timeutil import fmt_dt, parse_local
+from jobwatch.util.timeutil import fmt_dt
 from jobwatch.web.components import ic, logo_html, md_html, page, ui_field, ui_sec
 from jobwatch.config import config_store
 from jobwatch.db import database
@@ -334,76 +333,3 @@ document.addEventListener("auxclick", function (ev) {
   if (t && !t.link && ev.button === 1) { ev.preventDefault(); window.open(t.row.dataset.href, "_blank"); }
 });
 })();</script>"""
-
-
-def interview_form_values(f):
-    start = parse_local(f.get("iv_date", ""), f.get("iv_time", ""))
-    try:
-        minutes = max(5, min(600, int(f.get("iv_minutes") or 60)))
-    except ValueError:
-        minutes = 60
-    return start, minutes
-
-
-def interview_post(path, f):
-    """POST /interviews…: returns where to go (with a message)."""
-    if path == "/interviews/settings":
-        with config_store.lock:
-            cfg = config_store.load()
-            iv = cfg.setdefault("interviews", {})
-            if re.fullmatch(r"\d{1,2}:\d{2}", f.get("iv_morning", "")):
-                iv["morning"] = f["iv_morning"]
-            try:
-                iv["before_min"] = max(0, min(1440, int(f.get("iv_before") or 0)))
-            except ValueError:
-                pass
-            iv["from_mail"] = "iv_from_mail" in f
-            iv["research"] = "iv_research" in f
-            config_store.save(cfg)
-        return "/interviews", "Saved."
-    if path == "/interviews/mailbox":
-        return "/interviews#mailboxes", mailbox_post(f)
-    if path == "/interviews/scan":
-        return "/interviews", scan_interview_mails()
-    if path == "/interviews":
-        start, minutes = interview_form_values(f)
-        if not start or not f.get("iv_company", "").strip():
-            return "/interviews#add", "Give the company, the date and the time."
-        with database.connect() as con:
-            job_id = f.get("job_id") or None
-            if job_id and not con.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone():
-                job_id = None
-            iid = add_interview(con, f["iv_company"].strip(), f.get("iv_role", "").strip(), start, minutes,
-                                f.get("iv_place", "").strip(), f.get("iv_people", "").strip(), f.get("iv_notes", "").strip(),
-                                job_id=job_id)
-        with config_store.lock:
-            cfg = config_store.load()
-        researching = interview_cfg(cfg)["research"] and start_research(iid)
-        return "/interviews/%d" % iid, "Interview added; you get a reminder on the day and before it." + (
-            " Claude is researching the company." if researching else "")
-    m = re.fullmatch(r"/interviews/(\d+)", path)
-    if not m:
-        return "/interviews", "Nothing to do."
-    iid, act = int(m.group(1)), f.get("act", "")
-    with database.connect() as con:
-        if not con.execute("SELECT 1 FROM interviews WHERE id=?", (iid,)).fetchone():
-            return "/interviews", "This interview is not here any more."
-        if act == "save":
-            start, minutes = interview_form_values(f)
-            if not start or not f.get("iv_company", "").strip():
-                return "/interviews/%d" % iid, "Give the company, the date and the time."
-            update_interview(con, iid, company=f["iv_company"].strip()[:120], role=f.get("iv_role", "").strip()[:200],
-                             starts=start.isoformat(timespec="minutes"), minutes=minutes,
-                             place=f.get("iv_place", "").strip()[:500], people=f.get("iv_people", "").strip()[:500],
-                             notes=f.get("iv_notes", "").strip()[:4000])
-            return "/interviews/%d" % iid, "Saved."
-        if act in INTERVIEW_STATUS:
-            update_interview(con, iid, status=act)
-            return "/interviews/%d" % iid, "Marked %s." % INTERVIEW_STATUS[act].lower()
-        if act == "delete":
-            con.execute("DELETE FROM interviews WHERE id=?", (iid,))
-            return "/interviews", "Interview deleted."
-    if act == "research":
-        return "/interviews/%d" % iid, ("Claude is researching the company…" if start_research(iid, force=True)
-                                        else "Set a Claude API key first (Settings → Claude API).")
-    return "/interviews/%d" % iid, "Nothing to do."

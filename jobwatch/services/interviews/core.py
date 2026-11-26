@@ -1,4 +1,4 @@
-"""Interviews: settings, storing, research and reminders."""
+"""Interviews: their settings, the company research and the reminders."""
 import json
 import os
 import secrets
@@ -9,7 +9,7 @@ from datetime import timedelta
 from jobwatch import cvgen
 
 from jobwatch.env import log
-from jobwatch.repositories.jobs import JobRepository
+from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.services.documents import load_profile
 
 from jobwatch.util.timeutil import now_iso, to_local
@@ -51,134 +51,122 @@ def calendar_token(cfg_lock=True):
         return iv["cal_token"]
 
 
-def find_job_for(con, company):
-    """The posting of a company (the one you worked with first), for linking an interview to it."""
-    if not company:
-        return None
-    r = con.execute("SELECT id FROM jobs WHERE lower(company)=lower(?) ORDER BY CASE status WHEN 'applied' THEN 0 "
-                    "WHEN 'saved' THEN 1 ELSE 2 END, first_seen DESC LIMIT 1", (company.strip(),)).fetchone()
-    return r["id"] if r else None
+class Researcher:
+    """Researches the company of an interview with Claude and web search, in the background (it takes a minute or
+    two); the result is stored with the interview. Needs a Claude API key."""
 
-
-def add_interview(con, company, role, start, minutes=60, place="", people="", notes="", job_id=None, source="manual",
-                  uid="", msgid=""):
-    """Saves an interview and returns its id. A posting it belongs to is marked applied."""
-    job_id = job_id or find_job_for(con, company)
-    cur = con.execute("INSERT INTO interviews(job_id, company, role, starts, minutes, place, people, notes, source, uid, msgid, "
-                      "status, created, updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)",
-                      (job_id, (company or "")[:120], (role or "")[:200], start.isoformat(timespec="minutes"),
-                       int(minutes or 60), (place or "")[:500], (people or "")[:500], (notes or "")[:4000], source,
-                       uid or "", msgid or "", now_iso(), now_iso()))
-    if job_id:
-        st = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if st and st["status"] in ("new", "seen", "saved"):
-            JobRepository(con).set_status(job_id, "applied")
-    return cur.lastrowid
-
-
-def update_interview(con, iid, **kw):
-    """Changes an interview. A new time starts the reminders again."""
-    r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
-    if not r:
-        return False
-    if "starts" in kw and kw["starts"] != r["starts"]:
-        kw.update(reminded_day=None, reminded_soon=None)
-    kw["updated"] = now_iso()
-    con.execute("UPDATE interviews SET %s WHERE id=?" % ", ".join("%s=?" % k for k in kw), list(kw.values()) + [iid])
-    return True
-
-
-def start_research(iid, force=False):
-    """Researches the company of an interview in the background (Claude with web search), if a key is set."""
-    with config_store.lock:
-        cfg = config_store.load()
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        return False
-    with database.connect() as con:
-        r = con.execute("SELECT research_status FROM interviews WHERE id=?", (iid,)).fetchone()
-        if not r or (r["research_status"] == "running" and not force):
+    def start(self, iid, force=False):
+        """Starts the research; False if there is no key, no such interview, or it is already running."""
+        with config_store.lock:
+            cfg = config_store.load()
+        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
             return False
-        con.execute("UPDATE interviews SET research_status='running', research_error=NULL WHERE id=?", (iid,))
-    threading.Thread(target=research_interview, args=(iid, key), daemon=True).start()
-    return True
-
-
-def research_interview(iid, key):
-    try:
         with database.connect() as con:
-            r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
-            job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
-        if not r:
-            return
+            r = con.execute("SELECT research_status FROM interviews WHERE id=?", (iid,)).fetchone()
+            if not r or (r["research_status"] == "running" and not force):
+                return False
+            con.execute("UPDATE interviews SET research_status='running', research_error=NULL WHERE id=?", (iid,))
+        threading.Thread(target=self.run, args=(iid, key), daemon=True).start()
+        return True
+
+    def run(self, iid, key):
+        try:
+            with database.connect() as con:
+                r = InterviewRepository(con).get(iid)
+                job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
+            if not r:
+                return
+            text, sources = cvgen.company_research(key, r["company"], r["role"], self._posting(job), r["people"],
+                                                   r["place"], self._candidate())
+            with database.connect() as con:
+                InterviewRepository(con).update(iid, research=text, research_sources=json.dumps(sources),
+                                                research_status="done", research_at=now_iso(), research_error=None)
+            log.info("Interview %d: company research done (%d sources)", iid, len(sources))
+        except Exception as ex:
+            log.exception("Interview research failed")
+            with database.connect() as con:
+                InterviewRepository(con).update(iid, research_status="error", research_error=str(ex)[:500])
+
+    @staticmethod
+    def _posting(job):
+        if not job:
+            return ""
+        return "Title: %s\nLocation: %s\nURL: %s\n\n%s" % (job["title"], job["location"] or "-", job["url"],
+                                                          job["description"] or "")
+
+    @staticmethod
+    def _candidate():
+        """A line about you, so the likely questions fit you."""
         try:
             prof = load_profile()
-            candidate = "%s. %s" % (prof.get("headline", ""), prof.get("summary", ""))
+            return "%s. %s" % (prof.get("headline", ""), prof.get("summary", ""))
         except Exception:
-            candidate = ""
-        posting = ""
-        if job:
-            posting = "Title: %s\nLocation: %s\nURL: %s\n\n%s" % (job["title"], job["location"] or "-", job["url"],
-                                                                 job["description"] or "")
-        text, sources = cvgen.company_research(key, r["company"], r["role"], posting, r["people"], r["place"], candidate)
-        with database.connect() as con:
-            con.execute("UPDATE interviews SET research=?, research_sources=?, research_status='done', research_at=?, "
-                        "research_error=NULL WHERE id=?", (text, json.dumps(sources), now_iso(), iid))
-        log.info("Interview %d: company research done (%d sources)", iid, len(sources))
-    except Exception as ex:
-        log.exception("Interview research failed")
-        with database.connect() as con:
-            con.execute("UPDATE interviews SET research_status='error', research_error=? WHERE id=?", (str(ex)[:500], iid))
+            return ""
 
 
-def interview_reminders(now=None):
-    """Sends the due reminders: on the day (from the morning time on) and shortly before. Returns what was sent."""
-    with config_store.lock:
-        cfg = config_store.load()
-    ivc = interview_cfg(cfg)
-    now = now or datetime.now().astimezone()
-    before = timedelta(minutes=int(ivc["before_min"] or 0))
-    try:
-        hh, mm = (int(x) for x in str(ivc["morning"] or "08:00").split(":")[:2])
-    except ValueError:
-        hh, mm = 8, 0
-    base = (cfg.get("public_url") or "").rstrip("/")
-    sent = []
-    with database.connect() as con:
-        rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE status='planned' AND reminded_soon IS NULL")]
-    for r in rows:
-        st = iv_start(r)
-        if not st or now >= st:
-            continue
-        what = "%s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else "")
-        link = r["place"] if (r["place"] or "").startswith("http") else ("%s/interviews/%d" % (base, r["id"]) if base else None)
-        kind = None
-        if before and now >= st - before:
-            kind = "soon"
-            mins = max(1, int((st - now).total_seconds() // 60))
-            title = "Interview in %d min: %s" % (mins, r["company"] or "?")
-            msg = "%s at %s%s%s" % (what, st.strftime("%H:%M"), ("\n" + r["place"]) if r["place"] else "",
-                                    ("\nWith: " + r["people"]) if r["people"] else "")
-            prio = 5
-        elif not r["reminded_day"] and st.date() == now.date() and now >= st.replace(hour=hh, minute=mm):
-            kind = "day"
-            title = "Interview today at %s: %s" % (st.strftime("%H:%M"), r["company"] or "?")
-            msg = "%s, %d min%s%s" % (what, r["minutes"] or 60, ("\n" + r["place"]) if r["place"] else "",
-                                      ("\nWith: " + r["people"]) if r["people"] else "")
-            prio = 4
-        if not kind:
-            continue
-        if cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic"):
-            try:
-                notifier.push(cfg, title, msg, click=link, priority=prio)
-            except Exception:
-                log.exception("Interview reminder failed")
+class Reminders:
+    """The ntfy reminders of the planned interviews: on the day (from the morning time on) and shortly before."""
+
+    def send_due(self, now=None):
+        """Sends the reminders that are due now. Returns [(interview id, "day" | "soon")]."""
+        with config_store.lock:
+            cfg = config_store.load()
+        ivc = interview_cfg(cfg)
+        now = now or datetime.now().astimezone()
+        before = timedelta(minutes=int(ivc["before_min"] or 0))
+        try:
+            hh, mm = (int(x) for x in str(ivc["morning"] or "08:00").split(":")[:2])
+        except ValueError:
+            hh, mm = 8, 0
+        with database.connect() as con:
+            rows = [dict(r) for r in con.execute("SELECT * FROM interviews WHERE status='planned' AND reminded_soon IS NULL")]
+        sent = []
+        for r in rows:
+            st = iv_start(r)
+            if not st or now >= st:
+                continue
+            if before and now >= st - before:
+                kind = "soon"
+            elif not r["reminded_day"] and st.date() == now.date() and now >= st.replace(hour=hh, minute=mm):
+                kind = "day"
+            else:
+                continue
+            if not self._push(cfg, r, st, now, kind):
                 continue   # tried again on the next tick
-        with database.connect() as con:
-            con.execute("UPDATE interviews SET reminded_day=COALESCE(reminded_day, ?)%s WHERE id=?" % (
-                ", reminded_soon=?" if kind == "soon" else ""), ([now_iso(), now_iso()] if kind == "soon" else [now_iso()]) + [r["id"]])
-        sent.append((r["id"], kind))
-    return sent
+            with database.connect() as con:
+                fields = {"reminded_day": r["reminded_day"] or now_iso()}
+                if kind == "soon":
+                    fields["reminded_soon"] = now_iso()
+                InterviewRepository(con).update(r["id"], **fields)
+            sent.append((r["id"], kind))
+        return sent
+
+    @staticmethod
+    def _push(cfg, r, st, now, kind):
+        """Sends one reminder; tapping it opens the meeting (or the interview). False if sending failed."""
+        if not (cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic")):
+            return True   # nowhere to send: counts as done
+        base = (cfg.get("public_url") or "").rstrip("/")
+        what = "%s%s" % (r["company"] or "?", (" – " + r["role"]) if r["role"] else "")
+        extra = ("\n" + r["place"] if r["place"] else "") + ("\nWith: " + r["people"] if r["people"] else "")
+        link = r["place"] if (r["place"] or "").startswith("http") else ("%s/interviews/%d" % (base, r["id"]) if base else None)
+        if kind == "soon":
+            title = "Interview in %d min: %s" % (max(1, int((st - now).total_seconds() // 60)), r["company"] or "?")
+            msg, prio = "%s at %s%s" % (what, st.strftime("%H:%M"), extra), 5
+        else:
+            title = "Interview today at %s: %s" % (st.strftime("%H:%M"), r["company"] or "?")
+            msg, prio = "%s, %d min%s" % (what, r["minutes"] or 60, extra), 4
+        try:
+            notifier.push(cfg, title, msg, click=link, priority=prio)
+            return True
+        except Exception:
+            log.exception("Interview reminder failed")
+            return False
+
+
+researcher = Researcher()
+reminders = Reminders()
 
 
 def notify_interview(cfg, title, message, iid):

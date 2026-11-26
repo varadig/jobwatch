@@ -3,7 +3,7 @@ import threading
 import time
 
 from jobwatch.env import log
-from jobwatch.services.interviews.core import IV_SCAN_EVERY, interview_reminders
+from jobwatch.services.interviews.core import IV_SCAN_EVERY, reminders
 from jobwatch.services.interviews.mailboxes import scan_interview_mails
 from jobwatch.db import database
 
@@ -13,7 +13,7 @@ def interview_loop():
     time.sleep(8)
     while True:
         try:
-            interview_reminders()
+            reminders.send_due()
             with database.connect() as con:
                 last = con.execute("SELECT v FROM meta WHERE k='iv_scan_at'").fetchone()
             if not last or time.time() - float(last["v"]) > IV_SCAN_EVERY:

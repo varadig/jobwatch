@@ -176,7 +176,7 @@ def jobs_page(q):
 <form class="filters" method="get">%s
 <label class="ui-inline" style="margin:0;font-weight:400">Min. score <input class="input input-sm" type="number" name="min" value="%d" style="width:80px"></label>
 <input class="input input-sm" type="search" name="q" value="%s" placeholder="Search: title, company, location" aria-label="Search" style="width:260px">
-<button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/">Reset filters</a></form></details></div></div></div></section>
+<button class="btn btn-sm btn-primary">Filter</button><a class="btn btn-sm btn-ghost" href="/?reset=1">Reset filters</a></form></details></div></div></div></section>
 """ % (
         ic("tune"), " · ".join(picked_labels), ic("expand_more"), st_chips, wm_chips, src_chips, sort_chips, age_chips, more_open, hidden_inputs, mn, e(text))
     head = """<div class="listhead"><span><b>%d</b> posting%s · age refers to <b>%s</b> · notifications from %d pts</span>

@@ -232,3 +232,93 @@ def smb_path(d):
     if SMB_BASE and SMB_PREFIX and d and d.startswith(SMB_PREFIX):
         return SMB_BASE + d[len(SMB_PREFIX):]
     return d
+
+
+class Applications:
+    """What you do with a posting's documents: generate them, switch the photo, save a hand edit (the PDFs are
+    rebuilt), send them by e-mail. Each returns the message to show, or raises LookupError for an unknown posting."""
+
+    @staticmethod
+    def _job(con, jid):
+        job = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        if not job:
+            raise LookupError(jid)
+        return dict(job)
+
+    @staticmethod
+    def _data(con, jid):
+        return json.loads(con.execute("SELECT data FROM cvs WHERE job_id=?", (jid,)).fetchone()["data"])
+
+    def generate(self, jid, description):
+        """Starts writing the documents in the background (Claude)."""
+        import threading
+        description = (description or "")[:20000]
+        with database.connect() as con:
+            self._job(con, jid)
+            con.execute("INSERT INTO cvs(job_id,status,description) VALUES(?, 'running', ?) "
+                        "ON CONFLICT(job_id) DO UPDATE SET status='running', error=NULL, description=excluded.description",
+                        (jid, description))
+        threading.Thread(target=cv_generate, args=(jid, description), daemon=True).start()
+        return None
+
+    def set_photo(self, jid, on):
+        with database.connect() as con:
+            self._job(con, jid)
+            data = self._data(con, jid)
+            data["_photo"] = bool(on)
+            render_cv_files(jid, data)
+            con.execute("UPDATE cvs SET data=? WHERE job_id=?", (json.dumps(data, ensure_ascii=False), jid))
+        return None
+
+    def save_edit(self, jid, data_json):
+        """Saves the documents' text edited by hand and rebuilds the PDFs."""
+        try:
+            data = json.loads(data_json or "")
+            for k in ("headline", "summary", "experience", "skills", "cover_letter"):
+                assert k in data, "missing: %s" % k
+            with database.connect() as con:
+                self._job(con, jid)
+                old = self._data(con, jid)
+            data["_model"] = old.get("_model", "").replace(" (edited by hand)", "") + " (edited by hand)"
+            data["_photo"] = old.get("_photo", True)
+            render_cv_files(jid, data)
+            with database.connect() as con:
+                con.execute("UPDATE cvs SET data=? WHERE job_id=?", (json.dumps(data, ensure_ascii=False), jid))
+            return "Saved, PDF rebuilt."
+        except LookupError:
+            raise
+        except Exception as ex:
+            return "Not saved: %s" % ex
+
+    def send(self, jid, to, subject, body, attach="cv", with_letter=False):
+        """Sends the documents by e-mail and marks the posting applied."""
+        from jobwatch.services.notify import notifier
+        to = (to or "").strip()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to):
+            return "Invalid recipient."
+        with database.connect() as con:
+            job = self._job(con, jid)
+        paths = cv_paths(jid)
+        kinds = {"cv": ["cv"], "resume": ["resume"], "both": ["cv", "resume"]}.get(attach, ["cv"])
+        if with_letter:
+            kinds.append("letter")
+        files = [(cv_filename(job, k), open(paths[k], "rb").read()) for k in kinds]
+        with config_store.lock:
+            cfg = config_store.load()
+        try:
+            notifier.email(cfg, (subject or "").strip() or "Application: " + job["title"], body or "", to=to,
+                           attachments=files)
+        except Exception as ex:
+            return "Sending error: %s" % ex
+        with database.connect() as con:
+            con.execute("UPDATE cvs SET sent_to=?, sent_at=? WHERE job_id=?", (to, now_iso(), jid))
+            JobRepository(con).set_status(jid, "applied")
+            cvrow = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
+        try:
+            write_job_info(os.path.dirname(paths["cv"]), job, json.loads(cvrow["data"]), cvrow)
+        except Exception:
+            log.exception("info.json update")
+        return "Sent: %s" % to
+
+
+applications = Applications()

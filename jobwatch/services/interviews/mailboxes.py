@@ -11,7 +11,8 @@ from datetime import datetime
 from jobwatch import cvgen
 
 from jobwatch.env import log
-from jobwatch.services.interviews.core import add_interview, fmt_iv_when, interview_cfg, notify_interview, start_research, update_interview
+from jobwatch.repositories.interviews import InterviewRepository
+from jobwatch.services.interviews.core import fmt_iv_when, interview_cfg, notify_interview, researcher
 from jobwatch.services.interviews.ics import meeting_link, parse_ics
 from jobwatch.services.state import IV_LOCK
 from jobwatch.sources.mail import mail_body, mail_login
@@ -173,17 +174,18 @@ def mailbox_state(mid):
         return {}
 
 
-def mailbox_post(f):
-    """Interviews page → Mailboxes: add (after a test login), test or remove one. Returns the message."""
-    act = f.get("act", "")
-    if act == "add":
-        user = f.get("mb_user", "").strip()
-        pw = re.sub(r"\s+", "", f.get("mb_password", ""))   # app passwords are shown in groups with spaces
-        if not user or "@" not in user or not pw:
+class MailboxBook:
+    """The extra mailboxes searched for interviews (Interviews page → Mailboxes): kept in the settings, a new one is
+    added only after a test login works."""
+
+    def add(self, user, password, host="", folder=""):
+        """Adds (or replaces) a mailbox; returns the message to show."""
+        user = (user or "").strip()
+        password = re.sub(r"\s+", "", password or "")   # app passwords are shown in groups with spaces
+        if not user or "@" not in user or not password:
             return "Give the e-mail address and its (app) password."
-        mb = {"id": secrets.token_hex(4), "label": user, "user": user, "password": pw,
-              "host": f.get("mb_host", "").strip() or imap_host_for(user), "port": 993,
-              "folder": f.get("mb_folder", "").strip() or "INBOX"}
+        mb = {"id": secrets.token_hex(4), "label": user, "user": user, "password": password,
+              "host": (host or "").strip() or imap_host_for(user), "port": 993, "folder": (folder or "").strip() or "INBOX"}
         try:
             imap_open(mb).logout()
         except Exception as ex:
@@ -196,17 +198,22 @@ def mailbox_post(f):
         set_mailbox_state(mb["id"], "")
         threading.Thread(target=scan_interview_mails, daemon=True).start()
         return "%s added; its e-mails of the last days are being checked now." % user
-    mid = f.get("mb_id", "")
-    with config_store.lock:
-        cfg = config_store.load()
-        iv = cfg.setdefault("interviews", {})
-        boxes = iv.get("mailboxes") or []
-        mb = next((m for m in boxes if m.get("id") == mid), None)
-        if act == "remove" and mb:
+
+    def remove(self, mid):
+        with config_store.lock:
+            cfg = config_store.load()
+            iv = cfg.setdefault("interviews", {})
+            boxes = iv.get("mailboxes") or []
+            mb = next((m for m in boxes if m.get("id") == mid), None)
+            if not mb:
+                return "No such mailbox."
             iv["mailboxes"] = [m for m in boxes if m.get("id") != mid]
             config_store.save(cfg)
-            return "%s removed." % mb["user"]
-    if act == "test":
+        return "%s removed." % mb["user"]
+
+    def test(self, mid):
+        with config_store.lock:
+            cfg = config_store.load()
         mb = next((m for m in interview_mailboxes(cfg) if m["id"] == mid), None)
         if not mb:
             return "No such mailbox."
@@ -217,7 +224,9 @@ def mailbox_post(f):
         except Exception as ex:
             set_mailbox_state(mid, imap_error(ex))
             return "%s: %s" % (mb["label"], imap_error(ex))
-    return "Nothing to do."
+
+
+mailbox_book = MailboxBook()
 
 
 def mail_calendar(msg):
@@ -317,20 +326,20 @@ def scan_interview_mails():
                                            "ORDER BY starts LIMIT 1", (found["company"],)).fetchone()
                     if found["cancelled"]:
                         if same and same["status"] == "planned":
-                            update_interview(con, same["id"], status="cancelled")
+                            InterviewRepository(con).update(same["id"], status="cancelled")
                             changed += 1
                             notify_interview(cfg, "Interview cancelled: %s" % (same["company"] or "?"),
                                              "%s – the e-mail “%s” cancels it." % (fmt_iv_when(same), subject[:80]), same["id"])
                     elif same:
                         new = found["start"].isoformat(timespec="minutes")
                         if new != same["starts"]:
-                            update_interview(con, same["id"], starts=new, minutes=found["minutes"],
+                            InterviewRepository(con).update(same["id"], starts=new, minutes=found["minutes"],
                                              place=found["place"] or same["place"], status="planned")
                             changed += 1
                             notify_interview(cfg, "Interview moved: %s" % (same["company"] or "?"),
                                              "New time: %s" % fmt_iv_when({"starts": new}), same["id"])
                     else:
-                        iid = add_interview(con, found["company"], found["role"], found["start"], found["minutes"],
+                        iid = InterviewRepository(con).add(found["company"], found["role"], found["start"], found["minutes"],
                                             found["place"], found["people"], found["notes"], source="mail",
                                             uid=found["uid"], msgid=msgid)
                         added.append(iid)
@@ -343,7 +352,7 @@ def scan_interview_mails():
                              "%s%s\nFrom your e-mail; check it in jobwatch." % (
                                  fmt_iv_when(r), (" – " + r["role"]) if r["role"] else ""), iid)
             if interview_cfg(cfg)["research"]:
-                start_research(iid)
+                researcher.start(iid)
         if errs:
             log.warning("Interview e-mail errors: %s", "; ".join(errs))
         msg = "%d e-mail(s) checked: %d new interview(s)%s." % (len(mails), len(added),

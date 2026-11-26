@@ -450,6 +450,22 @@ def page(title, body, flash="", refresh=0):
     running = '<span class="badge badge-soft badge-warning">' + ic("hourglass_top") + ' refresh running…</span>' if STATE["running"] else ""
     return ("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">%s
 <script>document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+(function () {  // the Jobs page's filters are remembered in this browser: the Jobs tab opens them again
+  var K = "jw_jobs_query", saved = null;
+  try {
+    if (location.pathname === "/") {
+      var p = new URLSearchParams(location.search);
+      p.delete("msg");
+      if (p.get("reset") === "1") { localStorage.removeItem(K); history.replaceState(null, "", "/"); }
+      else if (p.toString()) localStorage.setItem(K, "?" + p.toString());
+      else if (!location.search && (saved = localStorage.getItem(K))) { location.replace("/" + saved); return; }
+    }
+    saved = localStorage.getItem(K);
+  } catch (x) { return; }
+  if (saved) document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll('header nav a[href="/"]').forEach(function (a) { a.href = "/" + saved; });
+  });
+})();
 (function () {  // mouse wheel: a notch carries further and glides to a stop (momentum with friction)
   if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   var v = 0, raf = 0, BOOST = 0.3, FRICTION = 0.88;   // one notch (100 px) travels about 100 * BOOST / (1 - FRICTION) = 250 px

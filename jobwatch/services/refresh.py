@@ -10,7 +10,6 @@ from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import log
-from jobwatch.models import FETCHED_SOURCES
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.services.documents import restore_cv_jobs
 from jobwatch.services.enrich import enrich_pending_linkedin, enrich_work_modes
@@ -268,17 +267,3 @@ def scheduler():
         time.sleep(60)
 
 
-def run_selection(f):
-    """From the Sources form: (source names or None for all, own-source ids). "one" = a single row's button."""
-    one = f.get("one", "")
-    if one.startswith("cs:"):
-        return set(), {one[3:]}
-    if one:
-        return {one}, set()
-    if f.get("all") or "selected" not in f:
-        return None, set()
-    names = {k for k in FETCHED_SOURCES if ("run_" + k) in f}
-    cids = {k[len("run_cs_"):] for k in f if k.startswith("run_cs_")}
-    if cids:
-        names.discard("custom")  # only the ticked own sources, not all of them
-    return (names or (set() if cids else None)), cids
