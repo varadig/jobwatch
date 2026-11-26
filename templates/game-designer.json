@@ -1,0 +1,113 @@
+{
+  "interval_minutes": 60,
+  "min_score": 4,
+  "notify_min_score": 7,
+  "notify_work_modes": [
+    "remote",
+    "unknown"
+  ],
+  "default_work_filter": "remote_unknown",
+  "sources": {
+    "linkedin": true,
+    "meetfrank": true,
+    "4dayweek": true,
+    "flexa": true,
+    "remotive": true,
+    "studios": true,
+    "rss": true
+  },
+  "search_terms": [
+    "game designer | Hungary",
+    "game designer",
+    "systems designer",
+    "level designer",
+    "content designer",
+    "economy designer"
+  ],
+  "search_locations": [
+    "European Union"
+  ],
+  "search_filter": {
+    "meetfrank": true,
+    "4dayweek": true,
+    "studios": false,
+    "rss": false,
+    "custom": false
+  },
+  "scoring": {
+    "interests": [
+      "game designer",
+      "systems designer / system designer",
+      "level designer",
+      "content designer",
+      "economy designer",
+      "narrative designer",
+      "quest designer / mission designer",
+      "combat designer",
+      "senior",
+      "designer",
+      "game / games",
+      "live ops / liveops",
+      "mobile"
+    ],
+    "desc": [
+      "game design",
+      "systems design",
+      "live ops / liveops",
+      "economy",
+      "mobile game / mobile games",
+      "f2p / free-to-play",
+      "unity"
+    ],
+    "less": [
+      "junior",
+      "artist",
+      "graphic designer",
+      "product designer",
+      "engineer",
+      "developer",
+      "programmer"
+    ],
+    "never": [
+      "producer",
+      "product manager",
+      "project manager",
+      "marketing",
+      "sales",
+      "recruiter",
+      "intern",
+      "internship",
+      "trainee",
+      "student",
+      "qa / tester",
+      "web designer",
+      "interior designer",
+      "fashion designer",
+      "instructional designer"
+    ],
+    "loc_good": [
+      "hungary / magyarország",
+      "european union / europe / emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "united states / usa",
+      "india",
+      "china"
+    ]
+  },
+  "rss_feeds": [],
+  "studios": [
+    "ashby | thatgamecompany | thatgamecompany",
+    "ashby | badrobotgames | Bad Robot Games",
+    "ashby | believer | The Believer Company",
+    "ashby | SecondDinner | Second Dinner",
+    "ashby | gardens | Gardens Interactive",
+    "lever | theorycraftgames | Theorycraft Games",
+    "greenhouse | gravitywell | Gravity Well",
+    "bamboohr | seriesai | Series AI",
+    "bamboohr | void | Void Interactive",
+    "smartrecruiters | OdysseyInteractive | Odyssey Interactive"
+  ],
+  "_about": "Game design profile (game, systems, level, content and economy designer roles). Producer and other non-design roles are hidden."
+}

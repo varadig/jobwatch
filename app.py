@@ -85,10 +85,9 @@ DEFAULT_CONFIG = {
     "rss_feeds": [],
     "custom_sources": [],      # own sources from Settings, see CUSTOM_TYPES
     "studios": [],            # "rendszer | azonosito | nev", pl. "ashby | acme | Acme"
-    "title_keywords": {},      # keyword: points if the title contains it
-    "body_keywords": {},       # keyword: points if the description contains it (max 4 points)
-    "location_keywords": {"remote": 1, "europe": 1},
-    "negative_keywords": {"junior": -6, "intern": -8, "internship": -8, "trainee": -6, "student": -5},
+    # Scoring as ordered chips (see SCORING_KINDS): in the ordered lists the position is the score.
+    "scoring": {"interests": [], "desc": [], "less": [], "never": ["intern", "internship", "junior", "trainee", "student"],
+                "loc_good": ["remote", "europe"], "loc_bad": []},
 }
 
 CFG_LOCK = threading.Lock()
@@ -100,16 +99,17 @@ REQ = threading.local()  # current request path (active menu item)
 # ---------------------------------------------------------------- config / db
 def load_config():
     cfg = copy.deepcopy(DEFAULT_CONFIG)
+    saved = {}
     if os.path.exists(CFG_PATH):
         with open(CFG_PATH, encoding="utf-8") as f:
             saved = json.load(f)
         for k, v in saved.items():
-            if isinstance(v, dict) and isinstance(cfg.get(k), dict) and k not in (
-                    "title_keywords", "body_keywords", "negative_keywords", "location_keywords"):
+            if isinstance(v, dict) and isinstance(cfg.get(k), dict) and k not in OLD_SCORING:
                 cfg[k].update(v)
             else:
                 cfg[k] = v
     changed = migrate_search(cfg)
+    changed = migrate_scoring(cfg, saved) or changed
     if not cfg["ntfy"].get("topic"):
         cfg["ntfy"]["topic"] = "jobwatch-" + secrets.token_hex(6)
         changed = True
@@ -137,6 +137,109 @@ def migrate_search(cfg):
                 seen.add(q.strip().lower())
         cfg["search_terms"] = terms
     return True
+
+
+OLD_SCORING = ("title_keywords", "body_keywords", "negative_keywords", "location_keywords")
+
+
+def migrate_scoring(cfg, saved):
+    """The old "term = points" lists become ordered chips: sorted by their points, so the order keeps the old weights.
+    Negative title terms: -5 or lower -> "not for me", the milder ones -> "less relevant"."""
+    if not any(k in saved for k in OLD_SCORING):
+        return False
+    if "scoring" not in saved:
+        by_pts = lambda d, sign: [k for k, v in sorted(d.items(), key=lambda kv: -kv[1] * sign) if v * sign > 0]
+        title = cfg.get("title_keywords") or {}
+        negs = {k: v for k, v in title.items() if v < 0}
+        negs.update(cfg.get("negative_keywords") or {})
+        loc = cfg.get("location_keywords") or {}
+        cfg["scoring"] = {"interests": by_pts(title, 1), "desc": by_pts(cfg.get("body_keywords") or {}, 1),
+                          "never": [k for k in by_pts(negs, -1) if negs[k] <= -5],
+                          "less": [k for k in by_pts(negs, -1) if negs[k] > -5],
+                          "loc_good": by_pts(loc, 1), "loc_bad": by_pts(loc, -1)}
+    for k in OLD_SCORING:
+        cfg.pop(k, None)
+    return True
+
+
+# ---------------------------------------------------------------- presets
+# A preset is a named "what am I looking for": the search and the scoring. Switching re-scores every posting.
+PRESET_KEYS = ("search_terms", "search_locations", "search_filter", "scoring", "min_score")
+TEMPLATE_DIR = os.path.join(BASE, "templates")
+
+
+def template_presets():
+    """{name: preset} from templates/*.json (the job-type templates, read-only)."""
+    out = {}
+    for fn in sorted(os.listdir(TEMPLATE_DIR)) if os.path.isdir(TEMPLATE_DIR) else []:
+        if not fn.endswith(".json") or fn.startswith("profile"):
+            continue
+        try:
+            with open(os.path.join(TEMPLATE_DIR, fn), encoding="utf-8") as f:
+                t = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if "search_terms" not in t and "linkedin_searches" not in t:
+            continue
+        t = dict(t)
+        migrate_search(t)
+        migrate_scoring(t, t)
+        out[fn[:-5]] = {k: copy.deepcopy(t[k]) for k in PRESET_KEYS if k in t}
+    return out
+
+
+def preset_of(cfg):
+    return {k: copy.deepcopy(cfg.get(k)) for k in PRESET_KEYS if k in cfg}
+
+
+def apply_preset(cfg, preset):
+    for k in PRESET_KEYS:
+        if k in preset:
+            cfg[k] = copy.deepcopy(preset[k])
+
+
+def preset_action(f):
+    """Settings → Presets buttons. Returns the message to show."""
+    act, pick = f.get("preset_do", ""), f.get("preset_pick", "")
+    if act == "save":
+        if "ntfy_server" in f:  # sent with the settings form: what is on the screen counts
+            save_settings(f)
+        name = re.sub(r"\s+", " ", f.get("preset_name", "")).strip()[:60]
+        if not name:
+            return "Give the preset a name."
+        with CFG_LOCK:
+            cfg = load_config()
+            cfg.setdefault("presets", {})[name] = preset_of(cfg)
+            cfg["active_preset"] = name
+            save_config(cfg)
+        return "Saved as preset “%s”." % name
+    if act == "load":
+        if pick.startswith("tpl:"):
+            preset, name = template_presets().get(pick[4:]), "%s (template)" % pick[4:]
+        else:
+            with CFG_LOCK:
+                preset, name = (load_config().get("presets") or {}).get(pick), pick
+        if not preset:
+            return "Pick a preset first."
+        with CFG_LOCK:
+            cfg = load_config()
+            apply_preset(cfg, preset)
+            cfg["active_preset"] = "" if pick.startswith("tpl:") else pick
+            save_config(cfg)
+        rescore_all()
+        return ("Switched to “%s”, postings re-scored. Refresh the sources (Sources page) to search with it."
+                + (" Save it under a name of your own to keep your changes." if pick.startswith("tpl:") else "")) % name
+    if act == "delete":
+        with CFG_LOCK:
+            cfg = load_config()
+            if pick not in (cfg.get("presets") or {}):
+                return "Pick one of your presets to delete (templates cannot be deleted)."
+            del cfg["presets"][pick]
+            if cfg.get("active_preset") == pick:
+                cfg["active_preset"] = ""
+            save_config(cfg)
+        return "Preset “%s” deleted; the current settings did not change." % pick
+    return ""
 
 
 def search_entries(cfg):
@@ -275,32 +378,80 @@ def term_re(term):
     return _re_cache[t]
 
 
+# Scoring: what interests you, as chips. In the ordered lists the position is the score (first = most points);
+# the other lists give the same points to every chip. "unity / unity3d": words that count as one.
+SCORING_KINDS = {  # kind: (points by position, points after the table / for every chip)
+    "interests": ((6, 5, 4, 4, 3, 3, 2, 2, 2), 1),   # in the job title
+    "desc": ((3, 2), 1),                              # in the description, at most DESC_MAX together
+    "less": ((), -3),                                 # in the title: less relevant
+    "never": ((), -8),                                # in the title: hides the posting
+    "loc_good": ((3, 2), 1),                          # in the location, only for a fitting title
+    "loc_bad": ((), -5),                              # in the location
+}
+DESC_MAX = 4
+
+
+def chip_points(kind, rank):
+    table, rest = SCORING_KINDS[kind]
+    return table[rank] if rank < len(table) else rest
+
+
+def chip_alts(chip):
+    return [a.strip().lower() for a in re.split(r"\s+/\s+", chip or "") if a.strip()]
+
+
+def scoring_rules(cfg):
+    """{kind: [(alternatives, points)]} from the chips, or from the old term = points lists (templates, old configs)."""
+    sc = cfg.get("scoring")
+    if sc is not None:
+        return {k: [(chip_alts(c), chip_points(k, i)) for i, c in enumerate(sc.get(k) or []) if chip_alts(c)]
+                for k in SCORING_KINDS}
+    d = lambda k: [([t.lower()], int(w)) for t, w in (cfg.get(k) or {}).items()]
+    title, loc = d("title_keywords"), d("location_keywords")
+    return {"interests": [x for x in title if x[1] > 0], "desc": d("body_keywords"),
+            "less": [x for x in title if x[1] < 0] + d("negative_keywords"), "never": [],
+            "loc_good": [x for x in loc if x[1] > 0], "loc_bad": [x for x in loc if x[1] < 0]}
+
+
+def _hit(alts, text):
+    for a in alts:
+        if term_re(a).search(text):
+            return a
+    return None
+
+
 def score_job(cfg, j):
+    rules = scoring_rules(cfg)
     title = (j.get("title") or "").lower()
     body = " ".join([(j.get("description") or ""), (j.get("company") or "")]).lower()
-    score, hits = 0, []
-    for term, w in cfg["title_keywords"].items():
-        if term_re(term).search(title):
-            score += int(w)
-            hits.append(term)
+    score, hits, seen = 0, [], set()
+    for alts, w in rules["interests"]:
+        a = _hit(alts, title)
+        if a:
+            score += w
+            hits.append(a)
+            seen.update(alts)
     title_pts = score
     body_pts = 0
-    for term, w in cfg["body_keywords"].items():
-        if term not in hits and term_re(term).search(body):
-            body_pts += int(w)
-            hits.append(term)
-    score += min(body_pts, 4)  # the description can give at most 4 points
-    for term, w in cfg["negative_keywords"].items():
-        if term_re(term).search(title):
-            score += int(w)
-            hits.append("%s(%d)" % (term, int(w)))
+    for alts, w in rules["desc"]:
+        a = None if seen.intersection(alts) else _hit(alts, body)
+        if a:
+            body_pts += w
+            hits.append(a)
+    score += min(body_pts, DESC_MAX)  # the description can give at most DESC_MAX points
+    for alts, w in rules["less"] + rules["never"]:
+        a = _hit(alts, title)
+        if a:
+            score += w
+            hits.append("%s(%d)" % (a, w))
     loc = (j.get("location") or "").lower()
-    for term, w in (cfg.get("location_keywords") or {}).items():
-        if term_re(term).search(loc):
-            if int(w) > 0 and title_pts < 4:
+    for alts, w in rules["loc_good"] + rules["loc_bad"]:
+        a = _hit(alts, loc)
+        if a:
+            if w > 0 and title_pts < 4:
                 continue  # location bonus only for a relevant position
-            score += int(w)
-            hits.append("📍%s(%+d)" % (term, int(w)))
+            score += w
+            hits.append("📍%s(%+d)" % (a, w))
     if re.search(r",\s*[A-Z]{2}$", j.get("location") or ""):  # US allam (pl. "Louisville, CO")
         score -= 4
         hits.append("📍USA(-4)")
@@ -1829,6 +1980,15 @@ details.wm-pick>summary::-webkit-details-marker{display:none}
   box-shadow:0 -6px 18px rgba(0,0,0,.12)}.ui-savebar .muted{font-size:13px}
 .ui-danger{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
 .ui-danger .help{display:block}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:7px;min-height:44px;border:1px solid var(--line);
+  border-radius:10px;background:var(--card)}.chips:focus-within{border-color:var(--acc)}
+.chip{display:inline-flex;align-items:center;gap:2px;padding:2px 3px 2px 9px;border-radius:99px;background:var(--soft);
+  border:1px solid var(--line);font-size:13px;cursor:grab;user-select:none;white-space:nowrap}
+.chip .pts{font:600 12px ui-monospace,Menlo,Consolas,monospace;color:var(--acc);margin-right:5px}.chip.neg .pts{color:#d14343}
+.chip button{border:0;background:none;padding:0 5px;border-radius:99px;cursor:pointer;color:var(--muted);font-size:15px;line-height:20px}
+.chip button:hover,.chip button:focus-visible{background:var(--line);color:var(--fg)}.chip.dragging{opacity:.4}
+.chip.over{outline:2px solid var(--acc)}
+.chips input{flex:1;min-width:150px;border:0;outline:0;background:transparent;font-size:13px;padding:4px;color:inherit}
 section.ui-section{scroll-margin-top:70px}
 @media (max-width:860px){.ui-layout{grid-template-columns:1fr}.ui-side{position:static;flex-direction:row;flex-wrap:wrap}}
 .rc{max-width:900px;margin:0 auto}
@@ -2313,6 +2473,17 @@ Sources are turned on and off in <a href="/settings#search">Settings → Job sea
     return page("Sources", body, flash, refresh=3 if busy else 0)
 
 
+def parse_chips(text):
+    """One chip per line, in order; duplicates (case-insensitive) dropped."""
+    out, seen = [], set()
+    for line in (text or "").splitlines():
+        c = re.sub(r"\s+", " ", line).strip().strip(",")
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+    return out
+
+
 def kv_text(d):
     return "\n".join("%s = %s" % (k, v) for k, v in d.items())
 
@@ -2430,7 +2601,7 @@ def ui_sec(anchor, title, desc, inner, foot=""):
         ('<div class="ui-foot">%s</div>' % foot) if foot else "")
 
 
-SETTINGS_NAV = (("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("mail", "E-mail alerts"), ("scoring", "Scoring"),
+SETTINGS_NAV = (("presets", "Presets"), ("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("mail", "E-mail alerts"), ("scoring", "Scoring"),
                 ("claude", "Claude API"), ("general", "General"), ("danger", "Maintenance"))
 
 
@@ -2533,13 +2704,44 @@ def settings_page(flash=""):
         test("mail", "Save and test e-mail alerts"))
     own += mail
 
-    scoring = ui_sec("scoring", "Scoring", "How well a posting fits your CV. One rule per line: <code>term = points</code>. "
-                     "Title terms count the most; negative terms apply to the title only. Saving re-scores every posting.",
+    mine, tpls, active = sorted(cfg.get("presets") or {}), template_presets(), cfg.get("active_preset") or ""
+    opts = (('<optgroup label="My presets">%s</optgroup>' % "".join('<option value="%s"%s>%s</option>' % (
+                e(n), " selected" if n == active else "", e(n)) for n in mine) if mine else "")
+            + '<optgroup label="Templates (read-only)">%s</optgroup>' % "".join(
+                '<option value="tpl:%s">%s</option>' % (e(n), e(n)) for n in tpls))
+    pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
+                                       % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
+    presets = ui_sec("presets", "Presets", "A preset is what you are looking for: the search terms, locations, filters, the "
+                     "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
+                     "Switching re-scores every posting; the postings already found stay. Saving the settings also "
+                     "updates the active preset.",
+        '<p class="ui-lead">Active: <b>%s</b></p><div class="ui-grid"><div><label for="preset_pick">Preset</label>'
+        '<select class="select" id="preset_pick" name="preset_pick">%s</select>'
+        '<div class="ui-inline">%s%s</div><span class="help">Switching drops the unsaved changes on this page.</span></div>'
+        '<div><label for="preset_name">Save the current settings as</label><input class="input" id="preset_name" '
+        'name="preset_name" maxlength="60" placeholder="e.g. Game designer" value="%s"><div class="ui-inline">%s</div>'
+        '<span class="help">Saves what is on this page (also the unsaved changes). The same name overwrites.</span></div></div>' % (
+            e(active) if active else "none (not saved as a preset)", opts, pbtn("load", "Switch to it", "btn-primary"),
+            pbtn("delete", "Delete", "btn-ghost text-error") if mine else "", e(active), pbtn("save", "Save as preset")))
+    sc = cfg.get("scoring") or {}
+    chips = lambda kind, label, help_: (
+        '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
+        'rows="4" data-kind="%s">%s</textarea><span class="help">%s</span></div>' % (
+            kind, label, kind, kind, kind, e("\n".join(sc.get(kind) or [])), help_))
+    scoring = ui_sec("scoring", "Scoring", "Tell jobwatch what interests you, most important first: the order is the score. "
+                     "Drag a chip or use its arrows to move it; Enter adds one. <code>unity / unity3d</code> counts as one "
+                     "(words that mean the same). Saving re-scores every posting.",
         '<div class="ui-grid">'
-        + ta("title_keywords", "Title", kv_text(cfg["title_keywords"]), 12, wide=False)
-        + ta("body_keywords", "Description (max. 4 points)", kv_text(cfg["body_keywords"]), 12, wide=False)
-        + ta("negative_keywords", "Negative (title)", kv_text(cfg["negative_keywords"]), 8, wide=False)
-        + ta("location_keywords", "Location", kv_text(cfg.get("location_keywords") or {}), 8, wide=False)
+        + chips("interests", "What interests me (job title)", "By position: +6, +5, +4, +4, +3, +3, +2, +2, +2, then +1 each.")
+        + chips("desc", "Bonus if the description mentions it", "+3, +2, then +1 each; at most +%d together. Not counted "
+                "again when the title already has it." % DESC_MAX)
+        + chips("less", "Less relevant (job title)", "&minus;3 each: still listed when the rest fits well.")
+        + chips("never", "Not for me (job title)", "&minus;8 each: hides the posting.")
+        + chips("loc_good", "Preferred locations", "+3, +2, then +1 each; only for postings whose title fits (4+ points).")
+        + chips("loc_bad", "Locations to avoid", "&minus;5 each.")
+        + '<div class="wide"><label for="score_try">Try a job title</label><input class="input" id="score_try" type="text" '
+          'placeholder="e.g. Senior Unity Developer" autocomplete="off"><span class="help" id="score_try_out" aria-live="polite">'
+          'The title part of the score, with the chips above (also before saving).</span></div>'
         + ui_field("min_score", "Minimum score in the list", cfg["min_score"], "number", "Postings below this are hidden by default.")
         + '<div><label for="default_work_filter">Default list filter</label><select class="select" id="default_work_filter" '
           'name="default_work_filter">%s</select></div></div>' % filt)
@@ -2567,11 +2769,12 @@ def settings_page(flash=""):
     body = ('<div class="ui"><div class="ui-head"><h1>Settings</h1><p>Notifications, job sources, scoring and API keys. '
             'Changes take effect after you save.</p></div>'
             '<div class="ui-layout"><nav class="ui-side" aria-label="Settings sections">%s</nav><div>'
-            '<form method="post" action="/settings" id="settings">%s%s%s%s%s%s'
+            '<form method="post" action="/settings" id="settings">%s%s%s%s%s%s%s'
             '<div class="ui-savebar"><span class="muted">Saving re-scores every posting.</span>'
             '<button class="btn btn-primary">Save changes</button></div></form>%s</div></div></div>') % (
-        nav, notify, search, own, scoring, claude, general, danger)
-    return page("Settings", body, flash)
+        nav, presets, notify, search, own, scoring, claude, general, danger)
+    return page("Settings", body + CHIPS_JS % json.dumps(
+        {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}), flash)
 
 
 def save_settings(f):
@@ -2613,8 +2816,10 @@ def save_settings(f):
                 ms["password"] = g("mail_pass").replace(" ", "")
             if not ms["username"]:
                 ms["password"] = ""  # no own login: the e-mail account's is used
-        for k in ("title_keywords", "body_keywords", "negative_keywords", "location_keywords"):
-            cfg[k] = parse_kv(g(k))
+        if "sc_interests" in f:
+            cfg["scoring"] = {k: parse_chips(g("sc_" + k)) for k in SCORING_KINDS}
+        if cfg.get("active_preset") in (cfg.get("presets") or {}):
+            cfg["presets"][cfg["active_preset"]] = preset_of(cfg)  # the active preset follows your edits
         save_config(cfg)
     rescore_all()
 
@@ -2835,6 +3040,94 @@ def outreach_signature(prof):
 
 
 OUTREACH_CSS = ""  # the styles are in CSS (shared ui-* blocks + rc-* for this page)
+
+CHIPS_JS = """<script>(function () {
+var P = %s;
+function pts(k, i) { var p = P[k]; return i < p.t.length ? p.t[i] : p.rest; }
+function fmt(n) { return (n >= 0 ? "+" : "\u2212") + Math.abs(n); }
+function alts(c) { return c.toLowerCase().split(/\\s+\\/\\s+/).map(function (s) { return s.trim(); }).filter(Boolean); }
+function esc(s) { return s.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"); }
+function hit(as, txt) {
+  for (var i = 0; i < as.length; i++)
+    if (new RegExp("(?<![a-z0-9])" + esc(as[i]) + "(?![a-z0-9#+])").test(txt)) return as[i];
+  return null;
+}
+document.querySelectorAll("textarea.chips-src").forEach(function (ta) {
+  var k = ta.dataset.kind, ordered = P[k].t.length > 0, drag = null;
+  var items = ta.value.split("\\n").map(function (s) { return s.trim(); }).filter(Boolean);
+  var box = document.createElement("div"), inp = document.createElement("input");
+  box.className = "chips"; box.setAttribute("role", "list");
+  inp.type = "text"; inp.id = ta.id + "_in"; inp.placeholder = "Add… (Enter)"; inp.autocomplete = "off";
+  var lab = document.querySelector('label[for="' + ta.id + '"]');
+  if (lab) { lab.htmlFor = inp.id; inp.setAttribute("aria-label", "Add to: " + lab.textContent); }
+  ta.hidden = true; ta.after(box);
+  function sync(focus) {
+    ta.value = items.join("\\n"); render();
+    if (focus) { var el = box.querySelector(focus); if (el) el.focus(); }
+    document.dispatchEvent(new Event("chips"));
+  }
+  function button(label, text, fn) {
+    var b = document.createElement("button"); b.type = "button"; b.textContent = text;
+    b.setAttribute("aria-label", label); b.title = label; b.onclick = fn; return b;
+  }
+  function render() {
+    box.textContent = "";
+    items.forEach(function (t, i) {
+      var c = document.createElement("span"), p = pts(k, i), b = document.createElement("b");
+      c.className = "chip" + (p < 0 ? " neg" : ""); c.setAttribute("role", "listitem"); c.draggable = true;
+      b.className = "pts"; b.textContent = fmt(p); c.append(b, document.createTextNode(t));
+      if (ordered) {
+        if (i > 0) c.append(button("Move " + t + " up", "\u2039", function () {
+          items.splice(i - 1, 0, items.splice(i, 1)[0]); sync(".chip:nth-child(" + i + ") button"); }));
+        if (i < items.length - 1) c.append(button("Move " + t + " down", "\u203a", function () {
+          items.splice(i + 1, 0, items.splice(i, 1)[0]); sync(".chip:nth-child(" + (i + 2) + ") button:last-of-type"); }));
+      }
+      c.append(button("Remove " + t, "\u00d7", function () { items.splice(i, 1); sync("input"); }));
+      c.addEventListener("dragstart", function (ev) { drag = i; c.classList.add("dragging"); ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData("text/plain", t); });
+      c.addEventListener("dragend", function () { drag = null; c.classList.remove("dragging"); });
+      c.addEventListener("dragover", function (ev) { if (drag !== null) { ev.preventDefault(); c.classList.add("over"); } });
+      c.addEventListener("dragleave", function () { c.classList.remove("over"); });
+      c.addEventListener("drop", function (ev) {
+        ev.preventDefault(); c.classList.remove("over");
+        if (drag === null || drag === i) return;
+        items.splice(i, 0, items.splice(drag, 1)[0]); drag = null; sync();
+      });
+      box.append(c);
+    });
+    box.append(inp);
+  }
+  function add(focus) {
+    var v = inp.value.replace(/,+$/, "").trim();
+    if (!v) return;
+    if (!items.some(function (x) { return x.toLowerCase() === v.toLowerCase(); })) items.push(v);
+    inp.value = ""; sync(focus ? "input" : null);
+  }
+  inp.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" || ev.key === ",") { ev.preventDefault(); add(true); }
+    else if (ev.key === "Backspace" && !inp.value && items.length) { items.pop(); sync("input"); }
+  });
+  inp.addEventListener("change", function () { add(false); });
+  render();
+});
+var tr = document.getElementById("score_try"), out = document.getElementById("score_try_out");
+if (!tr) return;
+var hint = out.textContent;
+function lines(k) { var t = document.getElementById("sc_" + k); return t ? t.value.split("\\n").map(function (s) { return s.trim(); }).filter(Boolean) : []; }
+function num(id, d) { var el = document.getElementById(id); return el && el.value !== "" ? +el.value : d; }
+function calc() {
+  var t = tr.value.toLowerCase().trim();
+  if (!t) { out.textContent = hint; return; }
+  var s = 0, parts = [];
+  ["interests", "less", "never"].forEach(function (k) {
+    lines(k).forEach(function (c, i) { var a = hit(alts(c), t); if (a) { var p = pts(k, i); s += p; parts.push(a + " " + fmt(p)); } });
+  });
+  var min = num("min_score", 4), note = num("notify_min_score", 7);
+  out.textContent = (parts.length ? parts.join(", ") : "nothing matches") + "  =  " + s + " points (title only) \u00b7 " +
+    (s >= note ? "listed and notified" : s >= min ? "listed" : "hidden; the description can add up to +" + P.desc.t[0] + "\u2026+4");
+}
+tr.addEventListener("input", calc); document.addEventListener("chips", calc);
+document.querySelectorAll("#min_score,#notify_min_score").forEach(function (el) { el.addEventListener("input", calc); });
+})();</script>"""
 
 OUTREACH_JS = """<script>
 function ocount(id, lim) { var t = document.getElementById('om' + id), c = document.getElementById('on' + id);
@@ -3765,6 +4058,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/settings":
                 save_settings(f)
                 return self.redirect("/settings?msg=" + urllib.parse.quote("Saved, postings re-scored."))
+            if u.path == "/preset":
+                return self.redirect("/settings?msg=" + urllib.parse.quote(preset_action(f) or "Nothing to do.") + "#presets")
             if u.path == "/test":
                 if "ntfy_server" in f:  # sent from the settings form: save what is on the screen first
                     save_settings(f)

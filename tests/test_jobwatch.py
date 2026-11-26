@@ -80,7 +80,7 @@ class Scoring(unittest.TestCase):
 
     def test_defaults_are_generic(self):
         # The shipped defaults must not carry game-specific keywords any more.
-        self.assertEqual(app.DEFAULT_CONFIG["title_keywords"], {})
+        self.assertEqual(app.DEFAULT_CONFIG["scoring"]["interests"], [])
         self.assertEqual(app.DEFAULT_CONFIG["search_terms"], [])
 
 
@@ -299,7 +299,7 @@ class ResetCache(unittest.TestCase):
         with app.db() as con:
             self.assertEqual(con.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
             self.assertEqual(con.execute("SELECT count(*) FROM source_state").fetchone()[0], 0)
-        self.assertEqual(app.load_config()["title_keywords"], cfg_before["title_keywords"])
+        self.assertEqual(app.load_config()["scoring"], cfg_before["scoring"])
 
 
 class OwnSources(unittest.TestCase):
@@ -918,7 +918,7 @@ class EnrichAnySource(unittest.TestCase):
                         "('mail:x','mail','Mobile Engineer','ElevenLabs','Hungary (Remote)','https://www.linkedin.com/jobs/view/4486152955/',"
                         "2,'new','2026-11-25','li:4486152955')")
         cfg = app.load_config()
-        cfg["body_keywords"] = {"unity": 3}
+        cfg["scoring"]["desc"] = ["unity"]
         with mock.patch.object(app, "linkedin_detail", lambda jid: "We build our app in Unity. Fully remote."), \
                 mock.patch.object(app.time, "sleep", lambda s: None):
             app.enrich_pending_linkedin(cfg)
@@ -1109,3 +1109,55 @@ class UnifiedSearch(unittest.TestCase):
         with app.db() as con:
             ids = {r[0] for r in con.execute("SELECT id FROM jobs")}
         self.assertEqual(ids, {"meetfrank:1", "studios:s1", "studios:s2"})
+
+
+class ChipScoring(unittest.TestCase):
+    def test_order_is_the_score(self):
+        cfg = {"scoring": {"interests": ["unity / unity3d", "game", "senior"], "desc": ["c#"], "less": ["artist"],
+                           "never": ["producer"], "loc_good": ["hungary"], "loc_bad": ["india"]}}
+        self.assertEqual(app.score_job(cfg, {"title": "Senior Unity3D Developer"})[0], 6 + 4)
+        self.assertEqual(app.score_job(cfg, {"title": "Game Producer"})[0], 5 - 8)
+        self.assertEqual(app.score_job(cfg, {"title": "Unity Artist", "location": "Budapest, Hungary"})[0], 6 - 3 + 3)
+        self.assertEqual(app.score_job(cfg, {"title": "Game Dev", "location": "Pune, India"})[0], 5 - 5)
+        # a description chip counts once, and not again when the title already has the word
+        self.assertEqual(app.score_job(cfg, {"title": "Unity Dev", "description": "C# and Unity"})[0], 6 + 3)
+
+    def test_old_lists_become_ordered_chips(self):
+        saved = {"title_keywords": {"c#": 3, "unity": 6, "game": 3}, "body_keywords": {"unity": 3},
+                 "negative_keywords": {"junior": -6, "designer": -3}, "location_keywords": {"hungary": 3, "india": -5}}
+        cfg = dict(saved)
+        self.assertTrue(app.migrate_scoring(cfg, saved))
+        self.assertEqual(cfg["scoring"], {"interests": ["unity", "c#", "game"], "desc": ["unity"], "never": ["junior"],
+                                          "less": ["designer"], "loc_good": ["hungary"], "loc_bad": ["india"]})
+        self.assertNotIn("title_keywords", cfg)
+
+    def test_chips_from_the_form(self):
+        self.assertEqual(app.parse_chips(" Unity \n\nunity\nC#,\n  game   designer "), ["Unity", "C#", "game designer"])
+
+    def test_settings_page_has_the_chip_editor(self):
+        h = app.settings_page()
+        self.assertIn('class="textarea ui-mono chips-src"', h)
+        self.assertIn('id="score_try"', h)
+        self.assertIn('id="presets"', h)
+
+
+class Presets(unittest.TestCase):
+    def test_save_switch_and_templates(self):
+        app.init_db()
+        cfg = app.load_config()
+        cfg["search_terms"] = ["unity developer"]
+        cfg["scoring"]["interests"] = ["unity"]
+        cfg["presets"], cfg["active_preset"] = {}, ""
+        app.save_config(cfg)
+        self.assertIn("Saved", app.preset_action({"preset_do": "save", "preset_name": "Unity"}))
+        self.assertIn("game-designer", app.template_presets())
+        self.assertIn("Switched", app.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"}))
+        cfg = app.load_config()
+        self.assertIn("game designer", cfg["scoring"]["interests"])
+        self.assertEqual(cfg["active_preset"], "")
+        self.assertEqual(cfg["presets"]["Unity"]["search_terms"], ["unity developer"])  # the saved one is untouched
+        app.preset_action({"preset_do": "load", "preset_pick": "Unity"})
+        cfg = app.load_config()
+        self.assertEqual((cfg["search_terms"], cfg["scoring"]["interests"], cfg["active_preset"]), (["unity developer"], ["unity"], "Unity"))
+        self.assertIn("deleted", app.preset_action({"preset_do": "delete", "preset_pick": "Unity"}))
+        self.assertEqual(app.load_config()["active_preset"], "")

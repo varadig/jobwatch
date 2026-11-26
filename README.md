@@ -69,8 +69,8 @@ Claude turns it into the profile structure and shows the result in the editor. C
 then press Save. Your full CV text, contact details included, is sent to the Anthropic API for this step.
 A scanned PDF with no text layer cannot be read; paste the text instead. The API key is set in Settings.
 
-To change what a profile searches for, edit the Settings page (Job search → What to search for: one list for every source), or the `search_terms`,
-`search_locations`, `search_filter` and keyword lists in its `config.json`.
+To change what a profile searches for, edit the Settings page (Job search → What to search for: one list for every source; Scoring: ordered chips, the order is the score; Presets: save and switch whole searches), or the `search_terms`,
+`search_locations`, `search_filter`, `scoring` and `presets` in its `config.json`. Templates: `unity-game`, `game-designer`, `project-manager`.
 
 ## Running and settings
 

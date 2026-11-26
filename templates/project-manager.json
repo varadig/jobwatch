@@ -32,51 +32,57 @@
     "rss": false,
     "custom": false
   },
+  "scoring": {
+    "interests": [
+      "project manager",
+      "programme manager",
+      "program manager",
+      "product owner",
+      "scrum master",
+      "delivery manager",
+      "operations manager",
+      "agile",
+      "pmo",
+      "pmp"
+    ],
+    "desc": [
+      "stakeholder",
+      "roadmap",
+      "agile",
+      "scrum",
+      "budget",
+      "cross-functional",
+      "delivery"
+    ],
+    "never": [
+      "intern",
+      "internship",
+      "junior",
+      "trainee",
+      "recruiter",
+      "student"
+    ],
+    "less": [
+      "sales",
+      "developer",
+      "engineer"
+    ],
+    "loc_good": [
+      "hungary",
+      "budapest",
+      "european union",
+      "europe",
+      "emea",
+      "remote"
+    ],
+    "loc_bad": [
+      "china",
+      "india",
+      "united states",
+      "usa"
+    ]
+  },
   "rss_feeds": [],
   "studios": [],
-  "title_keywords": {
-    "project manager": 6,
-    "programme manager": 5,
-    "program manager": 5,
-    "product owner": 5,
-    "scrum master": 4,
-    "delivery manager": 4,
-    "operations manager": 3,
-    "agile": 2,
-    "pmo": 2,
-    "pmp": 2
-  },
-  "body_keywords": {
-    "stakeholder": 1,
-    "roadmap": 1,
-    "agile": 1,
-    "scrum": 1,
-    "budget": 1,
-    "cross-functional": 1,
-    "delivery": 1
-  },
-  "location_keywords": {
-    "hungary": 3,
-    "budapest": 2,
-    "european union": 1,
-    "europe": 1,
-    "emea": 1,
-    "remote": 1,
-    "united states": -4,
-    "usa": -4,
-    "india": -5,
-    "china": -6
-  },
-  "negative_keywords": {
-    "junior": -6,
-    "intern": -8,
-    "internship": -8,
-    "trainee": -6,
-    "student": -5,
-    "developer": -2,
-    "engineer": -2,
-    "sales": -4,
-    "recruiter": -6
-  },
   "_about": "Project and programme management profile (PM, product owner, delivery). Example: copy and adapt the searches and keywords."
 }
