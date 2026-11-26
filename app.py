@@ -2690,11 +2690,9 @@ def page(title, body, flash="", refresh=0):
 <title>%s · jobwatch</title>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#5b5bd6">
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.0" rel="stylesheet" type="text/css"><style>%s</style></head><body><header><div class="bar"><span class="brand">%s jobwatch</span><nav class="tabs tabs-box tabs-sm">%s</nav>
-<div class="right">%s%s
-<button type="button" class="btn btn-sm btn-ghost text-error" onclick="document.getElementById('clear_dlg').showModal()">%s Clear cache</button></div></div></header>
+<div class="right">%s%s</div></div></header>
 <main>%s%s</main>%s</body></html>"""
             % ((SOFT_REFRESH % refresh) if refresh else "", e(title), CSS, ic("work"), nav, running, refresh_menu(),
-               ic("delete"),
                '<div class="alert alert-info flash">%s</div>' % e(flash) if flash else "", daisify(body), CLEAR_DIALOG))
 
 

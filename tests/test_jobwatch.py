@@ -1295,10 +1295,11 @@ class CvPostingsStay(unittest.TestCase):
 
 
 class ClearCacheButton(unittest.TestCase):
-    def test_every_page_has_the_button_and_the_dialog(self):
+    def test_button_in_settings_not_in_the_header(self):
         h = app.page("X", "<p>x</p>")
-        self.assertIn("Clear cache</button>", h)
+        self.assertNotIn("Clear cache</button>", h.split("</header>")[0])
         self.assertIn('<dialog id="clear_dlg"', h)
+        self.assertIn("showModal()", app.settings_page().split("</header>", 1)[1])
         self.assertIn('action="/reset-jobs"', h)
         self.assertNotIn("confirm(", app.settings_page())   # no browser confirm any more
 
