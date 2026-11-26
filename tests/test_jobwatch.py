@@ -1209,3 +1209,31 @@ class NewSearch(unittest.TestCase):
         h = app.settings_page()
         self.assertIn('id="leave_dlg"', h)
         self.assertIn('id="settings_next"', h)
+
+
+class PresetPickedInTheForm(unittest.TestCase):
+    def test_saving_applies_the_picked_preset(self):
+        from unittest import mock
+        app.init_db()
+        cfg = app.load_config()
+        self.addCleanup(app.save_config, json.loads(json.dumps(cfg)))
+        cfg["presets"] = {"Unity": {"search_terms": ["unity"]}, "Design": {"search_terms": ["game designer"]}}
+        cfg["active_preset"] = "Unity"
+        app.save_config(cfg)
+        form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "game designer", "sc_interests": "game designer",
+                "min_score": "4", "active_preset_set": "Design"}
+        with mock.patch.object(app, "search_again", lambda: 0):
+            app.save_settings(form)
+        cfg = app.load_config()
+        self.assertEqual(cfg["active_preset"], "Design")
+        self.assertEqual(cfg["presets"]["Unity"], {"search_terms": ["unity"]})        # the old one is untouched
+        self.assertEqual(cfg["presets"]["Design"]["scoring"]["interests"], ["game designer"])
+        with mock.patch.object(app, "search_again", lambda: 0):
+            app.save_settings(dict(form, active_preset_set=""))                    # a template was picked
+        self.assertEqual(app.load_config()["active_preset"], "")
+
+    def test_page_carries_the_presets_for_the_form(self):
+        h = app.settings_page()
+        self.assertIn('id="preset_data"', h)
+        self.assertIn('"tpl:game-designer"', h)
+        self.assertNotIn('value="load"', h)   # no server-side switch button any more

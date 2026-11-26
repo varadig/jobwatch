@@ -2755,24 +2755,30 @@ def settings_page(flash=""):
     own += mail
 
     mine, tpls, active = sorted(cfg.get("presets") or {}), template_presets(), cfg.get("active_preset") or ""
-    opts = (('<optgroup label="My presets">%s</optgroup>' % "".join('<option value="%s"%s>%s</option>' % (
+    opts = (('<option value=""%s>Choose a preset or template…</option>' % ("" if active in mine else " selected"))
+            + ('<optgroup label="My presets">%s</optgroup>' % "".join('<option value="%s"%s>%s</option>' % (
                 e(n), " selected" if n == active else "", e(n)) for n in mine) if mine else "")
             + '<optgroup label="Templates (read-only)">%s</optgroup>' % "".join(
                 '<option value="tpl:%s">%s</option>' % (e(n), e(n)) for n in tpls))
+    pdata = dict({n: (cfg.get("presets") or {})[n] for n in mine}, **{"tpl:" + n: t for n, t in tpls.items()})
     pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
                                        % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
     presets = ui_sec("presets", "Presets", "A preset is what you are looking for: the search terms, locations, filters, the "
                      "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
-                     "Switching re-scores every posting; the postings already found stay. Saving the settings also "
-                     "updates the active preset.",
-        '<p class="ui-lead">Active: <b>%s</b></p><div class="ui-grid"><div><label for="preset_pick">Preset</label>'
-        '<select class="select" id="preset_pick" name="preset_pick">%s</select>'
-        '<div class="ui-inline">%s%s</div><span class="help">Switching drops the unsaved changes on this page.</span></div>'
+                     "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
+                     "also updates the active preset.",
+        '<p class="ui-lead" id="preset_state" aria-live="polite">Active: <b>%s</b></p><div class="ui-grid"><div>'
+        '<label for="preset_pick">Preset</label><select class="select" id="preset_pick" name="preset_pick">%s</select>'
+        '<input type="hidden" name="active_preset_set" id="active_preset_set" value="%s">'
+        '<div class="ui-inline">%s</div><span class="help">Fills in Job search and Scoring below. Review it, then Save changes; '
+        'leaving without saving asks first.</span></div>'
         '<div><label for="preset_name">Save the current settings as</label><input class="input" id="preset_name" '
         'name="preset_name" maxlength="60" placeholder="e.g. Game designer" value="%s"><div class="ui-inline">%s</div>'
-        '<span class="help">Saves what is on this page (also the unsaved changes). The same name overwrites.</span></div></div>' % (
-            e(active) if active else "none (not saved as a preset)", opts, pbtn("load", "Switch to it", "btn-primary"),
-            pbtn("delete", "Delete", "btn-ghost text-error") if mine else "", e(active), pbtn("save", "Save as preset")))
+        '<span class="help">Saves what is on this page (also the unsaved changes). The same name overwrites.</span></div></div>'
+        '<script type="application/json" id="preset_data">%s</script>' % (
+            e(active) if active else "none (not saved as a preset)", opts, e(active),
+            pbtn("delete", "Delete this preset", "btn-ghost text-error") if mine else "", e(active), pbtn("save", "Save as preset"),
+            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/")))
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
@@ -2877,6 +2883,9 @@ def save_settings(f):
                 ms["password"] = ""  # no own login: the e-mail account's is used
         if "sc_interests" in f:
             cfg["scoring"] = {k: parse_chips(g("sc_" + k)) for k in SCORING_KINDS}
+        if "active_preset_set" in f:  # picked in the Presets box (a template: no active preset)
+            pick = g("active_preset_set")
+            cfg["active_preset"] = pick if pick in (cfg.get("presets") or {}) else ""
         if cfg.get("active_preset") in (cfg.get("presets") or {}):
             cfg["presets"][cfg["active_preset"]] = preset_of(cfg)  # the active preset follows your edits
         save_config(cfg)
@@ -3175,6 +3184,7 @@ document.querySelectorAll("textarea.chips-src").forEach(function (ta) {
     else if (ev.key === "Backspace" && !inp.value && items.length) { items.pop(); sync("input"); }
   });
   inp.addEventListener("change", function () { add(false); });
+  ta.setChips = function (list) { items = (list || []).slice(); sync(); };
   render();
 });
 var tr = document.getElementById("score_try"), out = document.getElementById("score_try_out");
@@ -3265,17 +3275,24 @@ document.querySelectorAll("form").forEach(function (f) {
         function () { leaving = true; f.requestSubmit(sub || undefined); }, "Save (stay here)", "Don't save, continue");
   });
 });
-// switching a preset replaces the settings: offer to save them first
-form.addEventListener("submit", function (ev) {
-  var b = ev.submitter;
-  if (!b || b.name !== "preset_do" || b.value !== "load" || pending === "go" || !dirty().length) return;
-  ev.preventDefault(); leaving = false;
-  function go(saveFirst) {
-    var h = form.querySelector("input[name=save_first]");
-    if (!h) { h = document.createElement("input"); h.type = "hidden"; h.name = "save_first"; form.append(h); }
-    h.value = saveFirst ? "1" : ""; pending = "go"; leaving = true; form.requestSubmit(b);
-  }
-  ask(function () { go(true); }, function () { go(false); }, "Save, then switch", "Switch without saving");
+// picking a preset or template fills in the form; it is applied only when you save
+var pick = document.getElementById("preset_pick"), data = JSON.parse(document.getElementById("preset_data").textContent || "{}");
+pick.addEventListener("change", function () {
+  var p = data[pick.value];
+  if (!p) return;
+  function set(id, v) { var el = document.getElementById(id); if (el && v !== undefined) el.value = v; }
+  if (p.search_terms) set("search_terms", p.search_terms.join("\\n"));
+  if (p.search_locations) set("search_locations", p.search_locations.join("\\n"));
+  if (p.min_score !== undefined) set("min_score", p.min_score);
+  if (p.search_filter) form.querySelectorAll("input[name^=sf_]").forEach(function (c) { c.checked = !!p.search_filter[c.name.slice(3)]; });
+  if (p.scoring) Object.keys(p.scoring).forEach(function (k) {
+    var ta = document.getElementById("sc_" + k); if (ta && ta.setChips) ta.setChips(p.scoring[k]); });
+  var tpl = pick.value.indexOf("tpl:") === 0;
+  document.getElementById("active_preset_set").value = tpl ? "" : pick.value;
+  document.getElementById("preset_state").innerHTML = "";
+  document.getElementById("preset_state").append("Loaded \\u201c" + pick.options[pick.selectedIndex].text + "\\u201d" +
+    (tpl ? " (template)" : "") + " into the settings below. Nothing is applied until you click Save changes.");
+  update();
 });
 })();</script>"""
 
