@@ -1848,3 +1848,24 @@ class IcsFileName(unittest.TestCase):
         r = {"company": "Ünal Games, Kft.", "starts": "2026-12-01T10:40+01:00"}
         self.assertEqual(app.ics_filename(r), "Interview_Unal_Games_Kft_2026-12-01_10-40.ics")
         self.assertEqual(app.ics_filename({"company": "", "starts": ""}), "Interview.ics")
+
+
+
+class InterviewDialog(unittest.TestCase):
+    def test_rows_open_a_dialog_with_the_interview(self):
+        app.init_db()
+        with app.db() as con:
+            iid = app.add_interview(con, "Dialog Co", "Dev", app.datetime(2030, 12, 3, 14, 0).astimezone())
+            con.execute("UPDATE interviews SET research_status='running' WHERE id=?", (iid,))
+        page_ = app.interviews_page({})
+        self.assertIn('<dialog id="iv_dlg"', page_)
+        self.assertIn('data-href="/interviews/%d"' % iid, page_)
+        self.assertIn('<div id="iv_lists">', page_)
+        part = app.interview_page(iid, modal=True)
+        self.assertNotIn("<html", part)
+        self.assertNotIn('href="/interviews" style', part)     # no back link in the dialog
+        self.assertIn('data-running="1"', part)                # it reloads itself while researching
+        self.assertIn('id="iv-title"', part)
+        self.assertIn("not here any more", app.interview_page(999999, modal=True))
+        with app.db() as con:
+            con.execute("DELETE FROM interviews WHERE id=?", (iid,))

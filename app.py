@@ -3131,6 +3131,10 @@ def iv_form(r=None, job=None, action="/interviews"):
 
 
 def iv_row(r, logos, now):
+    return _iv_row(r, logos, now).replace('<div class="ui-row iv', '<div data-href="/interviews/%d" class="ui-row iv' % r["id"], 1)
+
+
+def _iv_row(r, logos, now):
     st = iv_start(r)
     end = st + timedelta(minutes=r["minutes"] or 60) if st else None
     badges = []
@@ -3228,13 +3232,17 @@ def interviews_page(q, flash=""):
           % e(feed))
     boxes = ui_sec("mailboxes", "Mailboxes", "Where interview invitations can arrive. Add every address you gave to "
                    "employers or job sites.", mailboxes_html(cfg))
-    return page("Interviews", '<div class="ui">%s%s%s%s%s%s</div>' % (head, add, upcoming, old, settings, boxes), flash)
+    return page("Interviews", '<div class="ui">%s%s<div id="iv_lists">%s%s</div>%s%s</div>' % (
+        head, add, upcoming, old, settings, boxes) + IV_MODAL, flash)
 
 
-def interview_page(iid, flash=""):
+def interview_page(iid, flash="", modal=False):
+    """An interview with its preparation. modal: only the content, for the dialog on the Interviews page."""
     with db() as con:
         r = con.execute("SELECT * FROM interviews WHERE id=?", (iid,)).fetchone()
         job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
+    if not r and modal:
+        return '<div class="ui-empty">This interview is not here any more.</div>'
     if not r:
         return page("Not found", '<div class="ui"><section class="ui-section"><div class="ui-body ui-empty">This interview '
                                  'is not here any more. <a href="/interviews">All interviews</a></div></section></div>', flash)
@@ -3271,7 +3279,7 @@ def interview_page(iid, flash=""):
             "" if key else ' Set a <a href="/settings#claude">Claude API key</a> to have the company researched.'))
     gcal = google_calendar_link(r)
     info = ('<div class="ui-head"><a href="/interviews" style="font-size:13px">%s Interviews</a><div class="job-head" style="margin-top:6px">%s'
-            '<div><h1>%s</h1><p style="margin-top:2px"><b>%s</b>%s · %d min · %s</p></div></div>'
+            '<div><h1 id="iv-title">%s</h1><p style="margin-top:2px"><b>%s</b>%s · %d min · %s</p></div></div>'
             '<div class="chips" style="margin-top:10px">%s%s%s</div>'
             '<div class="ui-btns" style="margin-top:12px">%s%s<a class="btn btn-sm btn-ghost" href="/interviews/%d.ics">%s .ics</a>%s</div></div>') % (
         ic("arrow_back"), logo_html(r["company"], logo_files(), 52),
@@ -3298,8 +3306,89 @@ def interview_page(iid, flash=""):
               'style="cursor:pointer">Delete this interview…</summary><button class="btn btn-sm btn-error" name="act" '
               'value="delete" style="margin-top:8px">Yes, delete it</button></details></form></div></details>' % (
                   iv_form(r, action="/interviews/%d" % r["id"]), r["id"]))
+    if modal:   # no back link; while the research runs the dialog reloads itself (data-running)
+        body = body.replace('<a href="/interviews" style="font-size:13px">%s Interviews</a>' % ic("arrow_back"), "", 1)
+        return '<div class="ui iv-m"%s>%s</div>' % (' data-running="1"' if rs == "running" else "", body)
     return page("Interview: %s" % (r["company"] or "?"), '<div class="ui">%s</div>' % body, flash,
                 refresh=10 if rs == "running" else 0)
+
+
+# Interviews page: an interview opens in a dialog (Ctrl/Cmd or middle click: its own page). Its buttons and forms are
+# sent in the background: the dialog shows the result, the lists behind it are refreshed, and a deleted one closes it.
+# While Claude researches, the dialog reloads itself every few seconds.
+IV_MODAL = """<dialog id="iv_dlg" class="modal" aria-labelledby="iv-title"><div class="modal-box jd-modal">
+<form method="dialog"><button class="btn btn-sm btn-circle btn-ghost jd-close" aria-label="Close">""" + ic("close") + """</button></form>
+<div id="iv_dlg_body"></div></div><form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>
+<div id="iv_live" class="sr-only" aria-live="polite"></div>
+<script>(function () {
+var dlg = document.getElementById("iv_dlg"), body = document.getElementById("iv_dlg_body"), live = document.getElementById("iv_live");
+var cur = null, timer = 0, changed = false;
+function refreshList() {
+  fetch(location.pathname, {cache: "no-store"}).then(function (r) { return r.text(); }).then(function (h) {
+    var doc = new DOMParser().parseFromString(h, "text/html"), a = document.getElementById("iv_lists"), b = doc.getElementById("iv_lists");
+    if (a && b) a.innerHTML = b.innerHTML;
+  });
+}
+function watch() {
+  clearTimeout(timer);
+  if (dlg.open && body.querySelector("[data-running]")) timer = setTimeout(function () {
+    load(cur).then(function () { if (!body.querySelector("[data-running]")) refreshList(); });
+  }, 6000);
+}
+function load(href) {
+  cur = href;
+  return fetch(href + "?partial=1", {cache: "no-store"}).then(function (r) { if (!r.ok) throw r; return r.text(); })
+    .then(function (h) { body.innerHTML = h; watch(); });
+}
+function note(msg) {
+  if (!msg) return;
+  live.textContent = msg;
+  var d = document.createElement("div"); d.className = "alert alert-info iv-flash"; d.textContent = msg;
+  if (body.firstChild) body.insertBefore(d, body.firstChild);
+}
+function open(href) {
+  body.innerHTML = '<p class="muted" style="padding:20px">Loading\u2026</p>';
+  dlg.showModal();
+  load(href).catch(function () { location.href = href; });
+}
+dlg.addEventListener("close", function () {
+  clearTimeout(timer); body.innerHTML = "";
+  if (changed) { changed = false; refreshList(); }
+});
+body.addEventListener("submit", function (ev) {
+  var f = ev.target;
+  if ((f.method || "").toLowerCase() !== "post") return;
+  ev.preventDefault();
+  var fd = new FormData(f, ev.submitter);
+  f.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+  fetch(f.action, {method: "POST", body: new URLSearchParams(fd)}).then(function (r) {
+    var u = new URL(r.url), msg = u.searchParams.get("msg") || "";
+    changed = true;
+    if (!/^[/]interviews[/][0-9]+$/.test(u.pathname)) { dlg.close(); live.textContent = msg; return; }   // deleted
+    return load(cur).then(function () { note(msg); });
+  }).catch(function () { location.reload(); });
+});
+function rowOf(ev) {
+  var a = ev.target.closest("a"), row = ev.target.closest(".iv[data-href]");
+  if (!row) return null;
+  if (a) return /^[/]interviews[/][0-9]+$/.test(a.getAttribute("href") || "") ? {row: row, link: true} : null;   // "Open"
+  if (ev.target.closest("button,summary,details,form,input,select,textarea,label")) return null;
+  if (String(window.getSelection && window.getSelection()).trim()) return null;   // selecting text
+  return {row: row, link: false};
+}
+document.addEventListener("click", function (ev) {
+  if (ev.button !== 0 || dlg.contains(ev.target)) return;
+  var t = rowOf(ev);
+  if (!t) return;
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { if (!t.link) window.open(t.row.dataset.href, "_blank"); return; }
+  ev.preventDefault();
+  open(t.row.dataset.href);
+});
+document.addEventListener("auxclick", function (ev) {
+  var t = rowOf(ev);
+  if (t && !t.link && ev.button === 1) { ev.preventDefault(); window.open(t.row.dataset.href, "_blank"); }
+});
+})();</script>"""
 
 
 def interview_form_values(f):
@@ -3426,6 +3515,8 @@ nav.tabs a:hover{background:var(--soft);text-decoration:none}nav.tabs a.on{backg
 .pp-x:hover,.pp-x:focus-visible{background:color-mix(in oklab,var(--color-error) 16%,transparent);color:var(--color-error)}
 .pp-x.sure{background:var(--color-error);color:var(--color-error-content);font-weight:600}
 .iv{align-items:center}.iv.past{opacity:.7}
+.iv[data-href]{cursor:pointer;transition:background .15s}.iv[data-href]:hover{background:var(--soft)}
+.iv-m{margin:0}.iv-m .ui-head{padding-right:34px}.iv-flash{margin-bottom:12px}
 .iv-when{flex:none;width:96px;display:flex;flex-direction:column;line-height:1.25}
 .iv-when b{font-size:15px}.iv-when span{font-size:13.5px}.iv-when small{color:var(--acc);font-weight:600;font-size:12.5px}
 .iv-sub{font-size:13.5px;margin-top:2px;overflow-wrap:anywhere}
@@ -6070,6 +6161,8 @@ class Handler(BaseHTTPRequestHandler):
                         cfg_ = load_config()
                     return self.send_bytes(interviews_ics(rows, cfg_).encode("utf-8"), "text/calendar; charset=utf-8",
                                            ics_filename(rows[0]) if rows else "Interview.ics")
+                if q.get("partial"):
+                    return self.send_html(interview_page(int(m.group(1)), modal=True))
                 return self.send_html(interview_page(int(m.group(1)), q.get("msg", "")))
             m = re.fullmatch(r"/calendar/([A-Za-z0-9_-]{20,})\.ics", u.path)
             if m:
