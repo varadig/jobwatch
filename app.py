@@ -396,6 +396,8 @@ def init_db():
           msgid TEXT PRIMARY KEY, processed_at TEXT, found INTEGER);
         CREATE TABLE IF NOT EXISTS company_logos(
           ckey TEXT PRIMARY KEY, url TEXT, file TEXT, tried TEXT);
+        CREATE TABLE IF NOT EXISTS job_modes(
+          k TEXT PRIMARY KEY, mode TEXT, title TEXT, company TEXT, at TEXT);
         CREATE TABLE IF NOT EXISTS job_marks(
           k TEXT PRIMARY KEY, status TEXT, title TEXT, company TEXT, at TEXT);
         CREATE TABLE IF NOT EXISTS source_state(
@@ -429,7 +431,7 @@ def migrate_db():
                 m = "remote" if r["source"] == "remotive" else classify_mode(r["title"], r["location"], r["description"])
                 con.execute("UPDATE jobs SET work_mode=? WHERE id=?", (m, r["id"]))
         # mode_src: where the work mode comes from (source / page / text / claude / manual); mode_note: the evidence
-        for col in ("urlkey", "also_sources", "dup_of", "mode_src", "mode_note", "mode_checked"):
+        for col in ("urlkey", "also_sources", "dup_of", "mode_src", "mode_note", "mode_checked", "desc_html"):
             if col not in cols:
                 con.execute("ALTER TABLE jobs ADD COLUMN %s TEXT" % col)
         con.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(urlkey)")
@@ -448,6 +450,10 @@ def migrate_db():
                              % ",".join("?" * len(KEPT_STATUSES)), KEPT_STATUSES).fetchall():
             con.executemany("INSERT OR IGNORE INTO job_marks(k, status, title, company, at) VALUES(?,?,?,?,?)",
                             [(k, r["status"], r["title"], r["company"], now_iso()) for k in mark_keys(r["id"], r["urlkey"], r["dupkey"])])
+        for r in con.execute("SELECT id, work_mode, title, company, urlkey, dupkey FROM jobs WHERE mode_src='manual' "
+                             "AND work_mode IN ('remote','hybrid','onsite')").fetchall():
+            con.executemany("INSERT OR IGNORE INTO job_modes(k, mode, title, company, at) VALUES(?,?,?,?,?)",
+                            [(k, r["work_mode"], r["title"], r["company"], now_iso()) for k in mark_keys(r["id"], r["urlkey"], r["dupkey"])])
         if not con.execute("SELECT 1 FROM meta WHERE k='cv_applied'").fetchone():
             con.execute("UPDATE jobs SET status='applied' WHERE COALESCE(status,'new') IN ('new','seen') "
                         "AND id IN (SELECT job_id FROM cvs WHERE status='done')")
@@ -484,6 +490,9 @@ def restore_cv_jobs(con=None):
             else:
                 wm, mnote = classify_mode_ex(it["title"], it["location"], it["description"])
                 msrc = "text" if wm != "unknown" else None
+            hand = remembered_mode(con, cv["job_id"], url_key(it["url"]), dup_key(it["title"], it["company"], it["url"]))
+            if hand:
+                wm, msrc, mnote = hand, "manual", "set by you"
             ts = cv["created"] or info.get("generated") or now_iso()
             con.execute(
                 "INSERT INTO jobs(id,source,title,company,location,url,posted,description,score,matched,dupkey,first_seen,"
@@ -657,6 +666,26 @@ def remembered_status(con, jid, urlkey, dupkey):
     r = con.execute("SELECT status FROM job_marks WHERE k IN (%s) ORDER BY at DESC LIMIT 1" % ",".join("?" * len(keys)),
                     keys).fetchone() if keys else None
     return r["status"] if r else None
+
+
+def set_manual_mode(con, jid, mode):
+    """Remembers the work mode you set by hand for a posting (mode None: forgets it)."""
+    r = con.execute("SELECT title, company, urlkey, dupkey FROM jobs WHERE id=?", (jid,)).fetchone()
+    keys = mark_keys(jid, r["urlkey"], r["dupkey"]) if r else mark_keys(jid, "", "")
+    if mode:
+        con.executemany("INSERT OR REPLACE INTO job_modes(k, mode, title, company, at) VALUES(?,?,?,?,?)",
+                        [(k, mode, r["title"] if r else "", r["company"] if r else "", now_iso()) for k in keys])
+    else:
+        con.executemany("DELETE FROM job_modes WHERE k=?", [(k,) for k in keys])
+        if r and r["title"]:
+            con.execute("DELETE FROM job_modes WHERE title=? AND COALESCE(company,'')=?", (r["title"], r["company"] or ""))
+
+
+def remembered_mode(con, jid, urlkey, dupkey):
+    keys = mark_keys(jid, urlkey, dupkey)
+    r = con.execute("SELECT mode FROM job_modes WHERE k IN (%s) ORDER BY at DESC LIMIT 1" % ",".join("?" * len(keys)),
+                    keys).fetchone() if keys else None
+    return r["mode"] if r else None
 
 
 def find_duplicate(con, title, company, url):
@@ -1857,6 +1886,16 @@ def mode_picker(r):
             '</form></details>') % (e(wm), e(mode_why(r)), e(WORK_MODES.get(wm, wm)), mark, why_short, qid, e(mode_why(r)), opts)
 
 
+def mode_quick(r):
+    """On a card whose work mode is still unknown: one-click buttons to set it by hand (remembered)."""
+    if (r.get("work_mode") or "unknown") != "unknown" or r.get("mode_src") == "manual":
+        return ""
+    return ('<form class="wm-quick" method="post" action="/job/%s"><span>Set:</span>%s</form>' % (
+        e(urllib.parse.quote(r["id"], safe="")), "".join(
+            '<button class="btn btn-xs btn-ghost" name="work_mode" value="%s" title="Set by hand: %s">%s</button>' % (
+                k, e(WORK_MODES[k]), e(WORK_MODES[k])) for k in ("remote", "hybrid", "onsite"))))
+
+
 def mode_from_page(source, url):
     """The work mode a job board states on the posting's own page (4dayweek, Flexa): (mode, note) or (None, "")."""
     if source == "4dayweek":
@@ -2019,6 +2058,9 @@ def run_all(force=False, only=None, custom_ids=None):
                         merge_into(con, same, name, it)  # already listed from another source
                         continue
                     kept = remembered_status(con, jid, url_key(it["url"]), dup)  # hidden / saved / applied before
+                    hand = remembered_mode(con, jid, url_key(it["url"]), dup)    # a work mode you set by hand before
+                    if hand:
+                        wm, msrc, mnote = hand, "manual", "set by you"
                     notified = 0 if (seeded and not kept and sc >= cfg["notify_min_score"]
                                      and wm in cfg.get("notify_work_modes", ["remote", "unknown"])) else 1
                     con.execute(
@@ -2194,6 +2236,14 @@ details.wm-pick>summary::-webkit-details-marker{display:none}
 .chip button{border:0;background:none;padding:0 5px;border-radius:99px;cursor:pointer;color:var(--muted);font-size:15px;line-height:20px}
 .chip button:hover,.chip button:focus-visible{background:var(--line);color:var(--fg)}.chip.dragging{opacity:.4}
 .chip.over{outline:2px solid var(--acc)}
+.jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
+.wm-quick{display:inline-flex;align-items:center;gap:1px;font-size:12px;color:var(--muted)}.wm-quick span{margin:0 3px 0 2px}
+.jd-head{display:flex;gap:14px;align-items:center}.jd-t{min-width:0;flex:1}.jd-head h1{font-size:22px;font-weight:700;margin:0;line-height:1.25}
+.jd-score{flex:0 0 auto}.jd .chips{margin-top:12px}
+.jd-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:14px}.jd-status{display:flex;flex-wrap:wrap;gap:4px}
+.jd-text{line-height:1.65;max-width:80ch;font-size:15px}.jd-text p{margin:0 0 10px}.jd-text h3,.jd-text h4{font-weight:650;margin:18px 0 6px}
+.jd-text h3{font-size:16.5px}.jd-text ul{list-style:disc;padding-left:22px;margin:0 0 10px}.jd-text ol{list-style:decimal;padding-left:22px;margin:0 0 10px}
+.jd-text li{margin:2px 0}.jd-text blockquote{border-left:3px solid var(--line);padding-left:12px;color:var(--muted)}
 .chips input{flex:1;min-width:150px;border:0;outline:0;background:transparent;font-size:13px;padding:4px;color:inherit}
 section.ui-section{scroll-margin-top:70px}
 @media (max-width:860px){.ui-layout{grid-template-columns:1fr}.ui-side{position:static;flex-direction:row;flex-wrap:wrap}}
@@ -2580,7 +2630,7 @@ def jobs_page(q):
         sc = r["score"]
         cls = "s-hi" if sc >= cfg["notify_min_score"] else ("s-mid" if sc >= cfg["min_score"] else "")
         qid = e(urllib.parse.quote(r["id"], safe=""))
-        chips = [mode_picker(r)]
+        chips = [mode_picker(r), mode_quick(r)]
         if r["location"] and r["location"].strip().lower() not in ("remote", "(remote)", "anywhere"):
             chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:60]))
         if r["_closed"]:
@@ -2605,12 +2655,12 @@ def jobs_page(q):
         cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if r["id"] in has_cv else
                   '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
         cards.append("""<article class="job st-%s%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
-<div><div class="job-head">%s<div><div class="jt"><a href="/open/%s" target="_blank" rel="noopener noreferrer">%s</a></div>
+<div><div class="job-head">%s<div><div class="jt"><a href="/job/%s">%s</a> <a class="ext" href="/open/%s" target="_blank" rel="noopener noreferrer" title="Open the original posting" aria-label="Open the original posting">↗</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div></div></div><div class="chips">%s</div>
 <details class="why"><summary>Why this score?</summary>%s</details></div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
             e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", cls, sc,
-            logo_html(r["company"], logos), qid, e(r["title"]), e(r["company"] or "?"),
+            logo_html(r["company"], logos), qid, e(r["title"]), qid, e(r["company"] or "?"),
             e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
             "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
     if not cards:
@@ -2618,12 +2668,173 @@ def jobs_page(q):
                      'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
     busy = bool(STATE.get("progress") or STATE.get("enrich") or STATE["running"])
     top = ('<div class="ui-head"><h1>Jobs</h1><p>Postings from your sources, scored against your CV. '
-           'Click a title to open the posting; “CV + Resume” writes documents tailored to it.</p>'
+           'Click a title for the details and the full posting; ↗ opens the original. “CV + Resume” writes documents tailored to it.</p>'
            '<form method="post" action="/add-job" class="join ui-addjob"><input class="input input-sm join-item" type="url" name="url" required '
            'placeholder="Found a posting elsewhere? Paste its link to add it" aria-label="Link of a posting to add">'
            '<button class="btn btn-sm btn-primary btn-outline join-item">Add posting</button></form></div>')
     return page("Jobs", '<div class="ui">%s%s%s%s%s%s</div>' % (top, progress_html(), stats, filt, head, "".join(cards)),
                 q.get("msg", ""), refresh=3 if busy else 0)
+
+
+class _CleanHTML(__import__("html.parser").parser.HTMLParser):
+    """Keeps the text and the simple structure of a posting (paragraphs, lists, headings, bold); drops the rest."""
+    KEEP = {"p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "h3", "h4", "blockquote"}
+    MAP = {"h1": "h3", "h2": "h3", "h5": "h4", "h6": "h4"}
+    BLOCK = {"div", "section", "article", "tr", "table"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript", "iframe", "svg", "button", "form"):
+            self.skip += 1
+            return
+        t = self.MAP.get(tag, tag)
+        if not self.skip and t in self.KEEP:
+            self.out.append("<%s>" % t)
+        elif not self.skip and tag in self.BLOCK:
+            self.out.append("<br>")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "iframe", "svg", "button", "form"):
+            self.skip = max(0, self.skip - 1)
+            return
+        t = self.MAP.get(tag, tag)
+        if not self.skip and t in self.KEEP and t != "br":
+            self.out.append("</%s>" % t)
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(html.escape(data, quote=False))
+
+
+def clean_posting_html(raw):
+    """Safe HTML of a posting: plain text becomes paragraphs; HTML keeps only simple tags (no links, no scripts)."""
+    raw = (raw or "").strip()
+    if "&lt;" in raw[:500] and "<" not in raw[:200]:
+        raw = html.unescape(raw)
+    if not re.search(r"<(p|br|ul|li|div|strong|b|h\d)\b", raw, re.I):
+        paras = [x.strip() for x in re.split(r"\n\s*\n", raw) if x.strip()]
+        return "".join("<p>%s</p>" % html.escape(x).replace("\n", "<br>") for x in paras)
+    c = _CleanHTML()
+    c.feed(raw)
+    c.close()
+    out = re.sub(r"(\s*<br>\s*){3,}", "<br><br>", "".join(c.out))
+    out = re.sub(r"<(p|li|h3|h4)>\s*</\1>", "", out)
+    return re.sub(r"^(\s*<br>)+|(<br>\s*)+$", "", out.strip()).strip()
+
+
+def fetch_posting_html(r):
+    """The posting as it is on its own page (LinkedIn's public posting, or the page's JobPosting data). None if not found."""
+    uk = r["urlkey"] or ""
+    if uk.startswith("li:"):
+        pg = fetch("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/%s" % uk[3:], timeout=20)
+        m = re.search(r'show-more-less-html__markup[^>]*>(.*?)</div>', pg, re.S)
+        return m.group(1) if m else None
+    if not (r["url"] or "").startswith("http"):
+        return None
+    pg = fetch(r["url"], timeout=20)
+    for blk in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', pg, re.S | re.I):
+        try:
+            data = json.loads(blk.strip())
+        except ValueError:
+            continue
+        nodes = data if isinstance(data, list) else data.get("@graph", [data]) if isinstance(data, dict) else []
+        for n in nodes:
+            if isinstance(n, dict) and "JobPosting" in str(n.get("@type")) and n.get("description"):
+                return n["description"]
+    return None
+
+
+def posting_preview(jid):
+    """The cleaned posting HTML for the detail page: stored once fetched; fills in a missing description too."""
+    with db() as con:
+        r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+    if not r:
+        return None
+    if r["desc_html"]:
+        return r["desc_html"]
+    try:
+        raw = fetch_posting_html(r)
+    except Exception as ex:
+        log.info("Posting preview %s: %s", jid, ex)
+        raw = None
+    if not raw:
+        return None
+    clean = clean_posting_html(raw)
+    if len(strip_tags(clean)) < 40:
+        return None
+    with db() as con:
+        con.execute("UPDATE jobs SET desc_html=? WHERE id=?", (clean, jid))
+        if not (r["description"] or "").strip():
+            text = strip_tags(clean.replace("<br>", "\n").replace("</p>", "\n").replace("</li>", "\n"))[:12000]
+            with CFG_LOCK:
+                cfg = load_config()
+            sc, hits = score_job(cfg, dict(dict(r), description=text))
+            con.execute("UPDATE jobs SET description=?, score=?, matched=? WHERE id=?", (text, sc, ", ".join(hits), jid))
+    return clean
+
+
+def job_page(jid, back="/", flash=""):
+    """One posting in detail: its data, your status and documents, and the full posting text."""
+    with db() as con:
+        r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        if r and r["status"] == "new":
+            set_job_status(con, jid, "seen")   # opened: seen (remembered)
+            r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        has_cv = bool(r and con.execute("SELECT 1 FROM cvs WHERE job_id=? AND status='done'", (jid,)).fetchone())
+    if not r:
+        return page("Not found", '<div class="ui"><a class="btn btn-sm btn-ghost" href="/">← Jobs</a><section class="ui-section">'
+                                 '<div class="ui-body ui-empty">This posting is not in the list any more.</div></section></div>')
+    r = dict(r)
+    with CFG_LOCK:
+        cfg = load_config()
+    qid = e(urllib.parse.quote(jid, safe=""))
+    sc = r["score"] or 0
+    cls = "s-hi" if sc >= cfg["notify_min_score"] else ("s-mid" if sc >= cfg["min_score"] else "")
+    chips = [mode_picker(r), mode_quick(r)]
+    if r["location"]:
+        chips.append('<span class="chip">📍 %s</span>' % e(r["location"][:80]))
+    posted = parse_dt(r["posted"])
+    chips.append('<span class="chip">📅 %s</span>' % (e("posted " + posted.astimezone().strftime("%Y-%m-%d")) if posted else "posted date unknown"))
+    chips.append('<span class="chip">📥 collected %s</span>' % e(fmt_dt(r["first_seen"])))
+    chips.append('<span class="chip st">%s</span>' % e(STATUS_LABEL.get(r["status"], r["status"])))
+    if r.get("also_sources"):
+        chips.append('<span class="chip">🔁 also on %s</span>' % e(
+            ", ".join(SOURCES_INFO.get(x, (x,))[0] for x in r["also_sources"].split(",") if x)))
+    acts = "".join('<button class="btn btn-sm btn-ghost" name="status" value="%s">%s %s</button>' % (s_, ic, t) for s_, ic, t in (
+        ("saved", "⭐", "Save"), ("applied", "✅", "Applied"), ("seen", "👁", "Seen"), ("hidden", "🚫", "Hide"),
+        ("new", "↺", "Mark new again")) if s_ != r["status"])
+    cv_btn = ('<a class="btn btn-sm btn-outline" href="/cv/%s">Documents ✓</a>' if has_cv else
+              '<a class="btn btn-sm btn-primary" href="/cv/%s">CV + Resume</a>') % qid
+    text = r["desc_html"] or clean_posting_html(r["description"] or "")
+    loading = not r["desc_html"]
+    body = ('<div class="ui jd"><a class="btn btn-sm btn-ghost" href="%s">← Back to the list</a>'
+            '<section class="ui-section"><div class="ui-body"><div class="jd-head">%s<div class="jd-t"><h1>%s</h1>'
+            '<div class="co"><b>%s</b> <span class="src">· %s</span></div></div>'
+            '<div class="score %s jd-score" title="Score against your CV">%d<small>pts</small></div></div>'
+            '<div class="chips">%s</div>'
+            '<div class="jd-acts">%s<a class="btn btn-sm btn-outline" href="/open/%s" target="_blank" rel="noopener noreferrer">'
+            'Open the original ↗</a><form method="post" action="/job/%s" class="jd-status">%s</form></div>'
+            '<details class="why"><summary>Why this score?</summary>%s</details></div></section>'
+            '<section class="ui-section" aria-labelledby="jd-post-h"><header><div><h2 id="jd-post-h">The posting</h2>'
+            '<p class="ui-desc" id="jd-src">%s</p></div></header><div class="ui-body"><div class="jd-text" id="jd-text">%s</div>'
+            '</div></section></div>') % (
+        e(back), logo_html(r["company"], logo_files(), 56), e(r["title"]), e(r["company"] or "?"),
+        e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, qid, acts,
+        e(r["matched"] or "-"),
+        "Loading the full posting from its page…" if loading else "From the posting's own page.",
+        text or '<p class="muted">No text stored for this posting yet.</p>')
+    if loading:
+        body += ("""<script>(function () {
+var box = document.getElementById("jd-text"), src = document.getElementById("jd-src");
+fetch("/job/%s/preview").then(function (r) { return r.ok ? r.text() : ""; }).then(function (h) {
+  if (h) { box.innerHTML = h; src.textContent = "From the posting's own page."; }
+  else src.textContent = "The full posting could not be read from its page (it may need a login); this is the text jobwatch has. Use “Open the original ↗”.";
+}).catch(function () { src.textContent = "The full posting could not be loaded; this is the text jobwatch has."; });
+})();</script>""" % qid)
+    return page(r["title"][:60], body, flash)
 
 
 def run_selection(f):
@@ -4241,6 +4452,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
                 return self.wfile.write(b)
+            m = re.match(r"^/job/([^/]+)(/preview)?$", u.path)
+            if m:
+                jid = urllib.parse.unquote(m.group(1))
+                if m.group(2):
+                    h = posting_preview(jid)
+                    return self.send_html(h or "", 200 if h else 404)
+                back = self.back()
+                return self.send_html(job_page(jid, back if not back.startswith("/job/") else "/", q.get("msg", "")))
             m = re.match(r"^/cv/([^/]+?)(?:/(cv|resume|letter)\.pdf)?$", u.path)
             if m:
                 jid = urllib.parse.unquote(m.group(1))
@@ -4338,11 +4557,13 @@ class Handler(BaseHTTPRequestHandler):
                     with db() as con:
                         set_job_status(con, jid, st)
                 wm = f.get("work_mode")
-                if wm in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten
+                if wm in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten, remembered
                     with db() as con:
                         con.execute("UPDATE jobs SET work_mode=?, mode_src='manual', mode_note='set by you' WHERE id=?", (wm, jid))
+                        set_manual_mode(con, jid, wm)
                 elif wm == "auto":                           # back to automatic: decided again in the background
                     with db() as con:
+                        set_manual_mode(con, jid, None)
                         con.execute("UPDATE jobs SET work_mode='unknown', mode_src=NULL, mode_note=NULL, mode_checked=NULL WHERE id=?", (jid,))
                     with CFG_LOCK:
                         cfg_ = load_config()

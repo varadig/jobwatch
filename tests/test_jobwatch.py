@@ -1366,3 +1366,49 @@ class SeenIsRemembered(unittest.TestCase):
             app.set_job_status(con, "rss:9", "new")                           # "Mark new again"
             self.assertIsNone(app.remembered_status(con, "rss:9", app.url_key(url), ""))
             con.execute("DELETE FROM jobs WHERE id='rss:9'")
+
+
+class ManualModeAndDetailPage(unittest.TestCase):
+    def setUp(self):
+        app.init_db()
+        app.migrate_db()
+        self.url = "https://delta.example/jobs/5"
+        with app.db() as con:
+            con.execute("DELETE FROM job_modes")
+            con.execute("DELETE FROM jobs WHERE id='rss:5'")
+            con.execute("INSERT INTO jobs(id,source,title,company,url,score,status,first_seen,urlkey,dupkey,work_mode,description) "
+                        "VALUES('rss:5','rss','Unity Dev','Delta',?,7,'new','2026-11-26T10:00:00+00:00',?,?,'unknown','We use Unity.')",
+                        (self.url, app.url_key(self.url), app.dup_key("Unity Dev", "Delta", self.url)))
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        with app.db() as con:
+            con.execute("DELETE FROM jobs WHERE id='rss:5'")
+            con.execute("DELETE FROM job_modes")
+
+    def test_hand_set_mode_is_remembered(self):
+        with app.db() as con:
+            app.set_manual_mode(con, "rss:5", "hybrid")
+            con.execute("DELETE FROM jobs WHERE id='rss:5'")                      # cache reset
+            self.assertEqual(app.remembered_mode(con, "mail:other", app.url_key(self.url), ""), "hybrid")
+
+    def test_unknown_cards_offer_quick_buttons(self):
+        with app.db() as con:
+            r = dict(con.execute("SELECT * FROM jobs WHERE id='rss:5'").fetchone())
+        self.assertIn('class="wm-quick"', app.mode_quick(r))
+        self.assertEqual(app.mode_quick(dict(r, work_mode="remote")), "")
+
+    def test_detail_page_marks_seen_and_shows_the_text(self):
+        h = app.job_page("rss:5", "/?work=all")
+        self.assertIn("<h1>Unity Dev</h1>", h)
+        self.assertIn("We use Unity.", h)
+        self.assertIn('href="/?work=all"', h)
+        self.assertIn("/job/rss%3A5/preview", h)
+        with app.db() as con:
+            self.assertEqual(con.execute("SELECT status FROM jobs WHERE id='rss:5'").fetchone()[0], "seen")
+
+    def test_posting_html_is_cleaned(self):
+        raw = '<div><h2>About</h2><p onclick="x()">Hi <a href="javascript:alert(1)">there</a></p><script>bad()</script><ul><li>C#</li></ul></div>'
+        self.assertEqual(app.clean_posting_html(raw), "<h3>About</h3><p>Hi there</p><ul><li>C#</li></ul>")
+        self.assertEqual(app.clean_posting_html("Line one\nline two\n\nPara 2 & more"),
+                         "<p>Line one<br>line two</p><p>Para 2 &amp; more</p>")
