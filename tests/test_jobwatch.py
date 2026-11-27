@@ -1450,6 +1450,18 @@ class ManualModeAndDetailPage(unittest.TestCase):
         self.assertIn('class="wm-quick"', components.mode_quick(r))
         self.assertEqual(components.mode_quick(dict(r, work_mode="remote")), "")
 
+    def test_why_this_score_is_chips_on_the_list(self):
+        h = jobs_view.why_chips("unity, junior(-3), 📍budapest(+2), <b>x</b>")
+        self.assertIn('class="hit pos" title="Found in the title or the description">unity</span>', h)
+        self.assertIn('class="hit neg"', h)
+        self.assertIn('junior<b class="pts">-3</b>', h)
+        self.assertIn('budapest<b class="pts">+2</b>', h)
+        self.assertNotIn("<b>x</b>", h)   # escaped
+        self.assertIn("no matching terms", jobs_view.why_chips(""))
+        jobs = jobs_view.jobs_page({"work": "all", "min": "-99", "status": "all"})
+        self.assertIn('class="why-hits"', jobs)
+        self.assertNotIn("Why this score?</summary>", jobs)
+
     def test_detail_page_marks_seen_and_shows_the_text(self):
         h = jobs_view.job_page("rss:5", "/?work=all")
         self.assertIn('<h1 id="jd-title">Unity Dev</h1>', h)

@@ -1,4 +1,5 @@
 """The Jobs page and a posting's detail view."""
+import re
 import threading
 import time
 import urllib.error
@@ -20,6 +21,30 @@ from jobwatch.web.components import (
     STATUS_BUTTONS, ic, logo_html, mode_picker, mode_quick, page, progress_html, script, wm_html
 )
 from jobwatch.web.views.log import history_html
+
+
+_HIT_POINTS = re.compile(r"\(([+-]?\d+)\)$")
+
+
+def why_chips(matched):
+    """The terms that gave a posting its score, as chips (green: adds points, red: takes them off)."""
+    hits = [h.strip() for h in (matched or "").split(", ") if h.strip()]
+    if not hits:
+        return '<div class="why-hits"><span class="hit none" title="Nothing in the posting matched your scoring chips">no matching terms</span></div>'
+    out = []
+    for h in hits:
+        loc = h.startswith("📍")
+        if loc:
+            h = h[1:]
+        m = _HIT_POINTS.search(h)
+        pts = m.group(1) if m else ""
+        term = h[:m.start()] if m else h
+        neg = pts.startswith("-")
+        tip = ("Location" if loc else ("Less relevant / unwanted in the title" if neg else "Found in the title or the description"))
+        out.append('<span class="hit %s" title="%s">%s%s%s</span>' % (
+            "neg" if neg else "pos", e(tip), ic("location_on") if loc else "", e(term),
+            ('<b class="pts">%s</b>' % e(pts if pts[:1] in "+-" else "+" + pts)) if pts else ""))
+    return '<div class="why-hits" aria-label="Why this score">%s</div>' % "".join(out)
 
 
 def jobs_page(q):
@@ -228,12 +253,12 @@ def jobs_page(q):
         cards.append("""<article class="job st-%s%s" data-href="/job/%s"><div class="score %s" title="Score against your CV">%d<small>pts</small></div>
 <div><div class="job-head">%s<div><div class="jt"><a href="/job/%s">%s</a> <a class="ext" href="/open/%s" target="_blank" rel="noopener noreferrer" title="Open the original posting" aria-label="Open the original posting">%s</a></div>
 <div class="co"><b>%s</b> <span class="src">· %s</span></div></div></div><div class="chips">%s</div>
-<details class="why"><summary>Why this score?</summary>%s</details></div>
+%s</div>
 <form class="acts" method="post" action="/job/%s">%s<div class="icons">%s</div></form></article>""" % (
             e(r["status"]), " stale" if (r["_closed"] or r["_pdays"] > 30) else "", qid, cls, sc,
             logo_html(r["company"], logos), qid, e(r["title"]), qid, ic("open_in_new"), e(r["company"] or "?"),
             e(SOURCES_INFO.get(r["source"], (r["source"],))[0]),
-            "".join(chips), e(r["matched"] or "-"), qid, cv_btn, icon_btns))
+            "".join(chips), why_chips(r["matched"]), qid, cv_btn, icon_btns))
     if not cards:
         cards.append('<section class="ui-section"><div class="ui-body ui-empty">No postings match the filters. '
                      'Loosen them, or press “Refresh” to fetch new ones.</div></section>')
