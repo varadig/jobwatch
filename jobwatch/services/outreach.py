@@ -1,7 +1,6 @@
 """Recruiter messages: who to write to, about which role, and writing the message."""
 import html
 import json
-import os
 import re
 import threading
 import time
@@ -13,6 +12,7 @@ from jobwatch import cvgen
 from jobwatch.config import config_store
 from jobwatch.db import database
 from jobwatch.env import log
+from jobwatch.llm import llm_for
 from jobwatch.net import http
 from jobwatch.services.documents import load_profile
 from jobwatch.services.notify import notifier
@@ -39,9 +39,9 @@ def outreach_generate(oid):
     try:
         with config_store.lock:
             cfg = config_store.load()
-        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-        if not key:
-            raise cvgen.CVError("No Anthropic API key (Settings → Claude API).")
+        llm = llm_for(cfg)
+        if not llm:
+            raise cvgen.CVError("No AI key is set (Settings → AI).")
         with database.connect() as con:
             r = dict(con.execute("SELECT * FROM outreach WHERE id=?", (oid,)).fetchone())
             job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r["job_id"] else None
@@ -49,7 +49,7 @@ def outreach_generate(oid):
             r["role_text"] = resolve_role(r["role_ref"])
             with database.connect() as con:
                 con.execute("UPDATE outreach SET role_text=? WHERE id=?", (r["role_text"], oid))
-        data = cvgen.outreach_message(key, load_profile(), r, dict(job) if job else None,
+        data = cvgen.outreach_message(llm, load_profile(), r, dict(job) if job else None,
                                       r["channel"], r["language"], r["note"] or "")
         with database.connect() as con:
             con.execute("UPDATE outreach SET status='draft', error=NULL, subject=?, message=?, model=? WHERE id=?",

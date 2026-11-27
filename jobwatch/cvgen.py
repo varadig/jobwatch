@@ -1,13 +1,16 @@
-"""Builds a CV + cover letter tailored to a posting with the Claude API, rendered to PDF (reportlab).
+"""Builds a CV + cover letter tailored to a posting with a language model (DeepSeek or Claude, see llm.py),
+rendered to PDF (reportlab).
 Design: Inter typeface, round photo, clickable links."""
 import json
 import os
 import re
 
-MODEL = "claude-opus-5-5"
+from jobwatch.llm import LlmError
+
+CVError = LlmError   # what the callers catch
 
 # The source material for the CV: the profile (data/profile.json). See DEFAULT_PROFILE below.
-# The "contact" section is NOT sent to the Claude API; it only goes into the PDF locally.
+# The "contact" section is NOT sent to a model; it only goes into the PDF locally.
 # Base (template) profile: used if the instance has no data/profile.json.
 # Write your own data into data/profile.json (see README: "Profile"). This file must not contain
 # real personal data.
@@ -99,10 +102,6 @@ Ground rules:
 - match_notes: 2-5 short notes for the candidate: what you emphasized and any gaps or risks (time zone, location, missing requirements)."""
 
 
-class CVError(Exception):
-    pass
-
-
 # ---------------------------------------------------------------- recruiter outreach
 # channel -> (label, character limit of the message, what the platform expects)
 OUTREACH_CHANNELS = {
@@ -143,10 +142,8 @@ Ground rules:
 - subject: always write one, in the message's language, for every channel (LinkedIn InMail and e-mail use it): at most 70 characters, specific and calm, naming the role or the kind of role and the candidate's main angle, e.g. "Senior Unity developer – open to new roles" or "Senior Unity Developer role at Kolibri Games". No clickbait, no "Quick question", no exclamation marks."""
 
 
-def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_message", language="auto", note=""):
-    """Claude API call: a short message to one recruiter. Returns {"subject", "message", "_model"}."""
-    import anthropic
-
+def outreach_message(llm, profile, recruiter, job=None, channel="linkedin_message", language="auto", note=""):
+    """A short message to one recruiter. Returns {"subject", "message", "_model"}."""
     label, limit, how = OUTREACH_CHANNELS.get(channel, OUTREACH_CHANNELS["linkedin_message"])
     facts = {k: v for k, v in profile.items() if k != "contact"}  # contact details are not sent out
     lang = {"en": "Write in English.", "hu": "Write in Hungarian, addressing the recruiter formally (magázás).",
@@ -174,39 +171,10 @@ def outreach_message(api_key, profile, recruiter, job=None, channel="linkedin_me
     if note:
         parts.append("<candidate_note>\n%s\n</candidate_note>" % note)
     parts.append("Channel: %s. Write %s (hard limit: %d characters for the message). %s" % (label, how, limit, lang))
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
-    try:
-        resp = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": OUTREACH_SCHEMA}},
-            system=OUTREACH_SYSTEM,
-            messages=[{"role": "user", "content": "\n\n".join(parts)}],
-        )
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.PermissionDeniedError:
-        raise CVError("The API key has no permission for this model.")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.BadRequestError as e:
-        raise CVError("Claude API bad request: %s" % e.message)
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-    if resp.stop_reason == "refusal":
-        raise CVError("The model refused the request.")
-    if resp.stop_reason == "max_tokens":
-        raise CVError("The response was too long, try again.")
-    try:
-        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
+    done = llm.json(system=OUTREACH_SYSTEM, user="\n\n".join(parts), schema=OUTREACH_SCHEMA, effort="medium")
+    data = done.data
     data["message"] = data["message"].strip()
-    data["_model"] = resp.model
+    data["_model"] = done.model
     return data
 
 
@@ -248,77 +216,19 @@ WORK_MODE_SYSTEM = """You decide where the work of one job posting is done. The 
 evidence: the short quote (max 140 characters, in the posting's language) that decides it; "" for unknown."""
 
 
-def work_mode_from_text(api_key, title, location, description):
-    """Claude API call: (work mode, evidence quote) from the posting text, for postings the rules could not decide."""
-    import anthropic
-
+def work_mode_from_text(llm, title, location, description):
+    """(work mode, evidence quote) from the posting text, for postings the rules could not decide."""
     user = "<posting>\nTitle: %s\nLocation: %s\n\n%s\n</posting>" % (title, location or "-", (description or "")[:12000])
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
-    try:
-        resp = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": WORK_MODE_SCHEMA}},
-            system=WORK_MODE_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-    if resp.stop_reason in ("refusal", "max_tokens"):
-        raise CVError("The model did not answer (%s)." % resp.stop_reason)
-    try:
-        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
+    data = llm.json(system=WORK_MODE_SYSTEM, user=user, schema=WORK_MODE_SCHEMA, effort="low").data
     mode = data.get("work_mode") if data.get("work_mode") in ("remote", "hybrid", "onsite") else "unknown"
     return mode, (data.get("evidence") or "")[:200] if mode != "unknown" else ""
 
 
-def jobs_from_email(api_key, subject, sender, text, links):
-    """Claude API call: the postings in a job alert e-mail. links: [(text, url)]. Returns [{title, company, location, url}]."""
-    import anthropic
-
+def jobs_from_email(llm, subject, sender, text, links):
+    """The postings in a job alert e-mail. links: [(text, url)]. Returns [{title, company, location, url}]."""
     link_lines = "\n".join("[%d] %s -> %s" % (i, t[:120], u) for i, (t, u) in enumerate(links[:150]))
     user = "<email>\nFrom: %s\nSubject: %s\n\n%s\n</email>\n\n<links>\n%s\n</links>" % (sender, subject, text[:15000], link_lines)
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=120.0, max_retries=2)
-    try:
-        resp = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": MAIL_JOBS_SCHEMA}},
-            system=MAIL_JOBS_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.PermissionDeniedError:
-        raise CVError("The API key has no permission for this model.")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.BadRequestError as e:
-        raise CVError("Claude API bad request: %s" % e.message)
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-    if resp.stop_reason == "refusal":
-        raise CVError("The model refused the request.")
-    if resp.stop_reason == "max_tokens":
-        raise CVError("The response was too long.")
-    try:
-        data = json.loads("".join(b.text for b in resp.content if b.type == "text"))
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
+    data = llm.json(system=MAIL_JOBS_SYSTEM, user=user, schema=MAIL_JOBS_SCHEMA, effort="low").data
     known = {u for _, u in links}
     out = []
     for j in data.get("jobs", []):
@@ -329,26 +239,6 @@ def jobs_from_email(api_key, subject, sender, text, links):
 
 
 # ---------------------------------------------------------------- interviews
-def _call(api_key, timeout, **kw):
-    """One Claude API request with the error handling used here. Returns the response."""
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=timeout, max_retries=2)
-    try:
-        return client.beta.messages.create(model=MODEL, betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kw)
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.PermissionDeniedError:
-        raise CVError("The API key has no permission for this model.")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.BadRequestError as e:
-        raise CVError("Claude API bad request: %s" % e.message)
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-
-
 INTERVIEW_MAIL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -370,22 +260,14 @@ INTERVIEW_MAIL_SYSTEM = """You read one e-mail from the mailbox of a job seeker 
 - summary: one short line about what the interview is (e.g. "45 min technical interview with the Unity team")."""
 
 
-def interview_from_email(api_key, sender, subject, sent, text, calendar, tz_name, now_local, companies=()):
-    """Claude API call: the interview an e-mail fixes (or cancels). calendar: the invitation's events as text."""
+def interview_from_email(llm, sender, subject, sent, text, calendar, tz_name, now_local, companies=()):
+    """The interview an e-mail fixes (or cancels). calendar: the invitation's events as text."""
     user = ("Job seeker's time zone: %s. Now: %s.\nCompanies the job seeker applied to (for the names): %s\n\n"
             "<email>\nFrom: %s\nDate: %s\nSubject: %s\n\n%s\n</email>" % (
                 tz_name, now_local, ", ".join(companies[:60]) or "-", sender, sent, subject, text[:12000]))
     if calendar:
         user += "\n\n<calendar_invitation>\n%s\n</calendar_invitation>" % calendar[:4000]
-    resp = _call(api_key, 120.0, max_tokens=16000, system=INTERVIEW_MAIL_SYSTEM,
-                 output_config={"effort": "low", "format": {"type": "json_schema", "schema": INTERVIEW_MAIL_SCHEMA}},
-                 messages=[{"role": "user", "content": user}])
-    if resp.stop_reason in ("refusal", "max_tokens"):
-        raise CVError("The model did not answer (%s)." % resp.stop_reason)
-    try:
-        return json.loads("".join(b.text for b in resp.content if b.type == "text"))
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
+    return llm.json(system=INTERVIEW_MAIL_SYSTEM, user=user, schema=INTERVIEW_MAIL_SCHEMA, effort="low").data
 
 
 RESEARCH_SYSTEM = """You prepare a job seeker for an interview. Search the web and write a short, practical briefing about the company and the interview, in English.
@@ -402,61 +284,19 @@ Use these sections (## headings), each with short bullet points; leave a section
 Be factual: say "not found" rather than guess, and write the date of anything time-sensitive. No introduction and no closing remarks."""
 
 
-def research_sources(blocks):
-    """[(title, url)] the briefing rests on: the citations; without them the pages read, then the search results."""
-    cited, fetched, found = [], [], []
-    for b in blocks:
-        t = getattr(b, "type", "")
-        if t == "text":
-            for c in getattr(b, "citations", None) or []:
-                cited.append((getattr(c, "title", None), getattr(c, "url", None)))
-        elif t == "web_fetch_tool_result":
-            c = getattr(b, "content", None)
-            fetched.append((getattr(getattr(c, "content", None), "title", None), getattr(c, "url", None)))
-        elif t == "web_search_tool_result":
-            c = getattr(b, "content", None)
-            for r in c if isinstance(c, list) else []:   # an error is an object, not a list
-                found.append((getattr(r, "title", None), getattr(r, "url", None)))
-    out, seen = [], set()
-    for title, url in cited or (fetched + found[:12]):
-        if url and url.startswith("http") and url not in seen:
-            seen.add(url)
-            out.append((title or url, url))
-    return out
-
-
-def company_research(api_key, company, role="", posting="", people="", place="", candidate=""):
-    """Claude API call with web search: an interview briefing about the company (markdown-like text) and the sources
-    [(title, url)]. Server-side tools may pause a long turn (pause_turn); it is resumed a few times."""
+def company_research(llm, company, role="", posting="", people="", place="", candidate=""):
+    """An interview briefing about the company (markdown-like text) and its sources [(title, url)]. It needs a model
+    that can search the web (Claude)."""
     user = "Company: %s\nRole: %s\nInterviewers: %s\nWhere: %s" % (company, role or "-", people or "-", place or "-")
     if posting:
         user += "\n\n<posting>\n%s\n</posting>" % posting[:8000]
     if candidate:
         user += "\n\n<candidate>\nThe job seeker, to tailor the likely questions: %s\n</candidate>" % candidate[:1500]
-    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 8},
-             {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5}]
-    messages = [{"role": "user", "content": user}]
-    blocks = []   # every part of the answer: a paused turn is continued, and the new response carries only the rest
-    for _ in range(5):
-        resp = _call(api_key, 600.0, max_tokens=16000, system=RESEARCH_SYSTEM, tools=tools,
-                     output_config={"effort": "medium"}, messages=messages)
-        blocks.extend(resp.content)
-        if resp.stop_reason != "pause_turn":
-            break
-        messages = [messages[0], {"role": "assistant", "content": blocks}]
-    if resp.stop_reason == "refusal":
-        raise CVError("The model refused the request.")
-    out = "".join(b.text for b in blocks if b.type == "text").strip()
-    sources = research_sources(blocks)
-    if not out:
-        raise CVError("The research came back empty (%s)." % resp.stop_reason)
-    return out, sources
+    return llm.research(RESEARCH_SYSTEM, user)
 
 
-def tailor(api_key, profile, job, description):
-    """Claude API call: returns the tailored CV data (dict, same structure as the profile)."""
-    import anthropic
-
+def tailor(llm, profile, job, description):
+    """The tailored CV data (dict, same structure as the profile)."""
     facts = {k: v for k, v in profile.items() if k != "contact"}  # contact details are not sent out
     facts = json.loads(json.dumps(facts))  # the model does not need links; the renderer puts them back
     for x in facts.get("experience", []):
@@ -466,39 +306,9 @@ def tailor(api_key, profile, job, description):
     user = ("<candidate_profile>\n%s\n</candidate_profile>\n\n<job_posting>\nTitle: %s\nCompany: %s\nLocation: %s\nURL: %s\n\n%s\n</job_posting>"
             % (json.dumps(facts, ensure_ascii=False, indent=1), job["title"], job["company"], job["location"] or "-",
                job["url"], description or "(The full posting text is not available; work from the title and company.)"))
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=300.0, max_retries=2)
-    try:
-        resp = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            output_config={"effort": "high", "format": {"type": "json_schema", "schema": SCHEMA}},
-            system=SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.PermissionDeniedError:
-        raise CVError("The API key has no permission for this model.")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.BadRequestError as e:
-        raise CVError("Claude API bad request: %s" % e.message)
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-    if resp.stop_reason == "refusal":
-        raise CVError("The model refused the request.")
-    if resp.stop_reason == "max_tokens":
-        raise CVError("The response was too long, try again.")
-    text = "".join(b.text for b in resp.content if b.type == "text")
-    try:
-        data = json.loads(text)
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
-    data["_model"] = resp.model
+    done = llm.json(system=SYSTEM, user=user, schema=SCHEMA, effort="high", timeout=300.0)
+    data = done.data
+    data["_model"] = done.model
     return data
 
 
@@ -801,41 +611,17 @@ PROFILE_SYSTEM = """You convert a candidate's CV into a structured profile.
 MAX_CV_CHARS = 60000
 
 
-def profile_from_text(api_key, text):
-    """Claude API: profile JSON (dict) from the CV text. Same structure as DEFAULT_PROFILE."""
-    import anthropic
-
+def profile_from_text(llm, text):
+    """Profile JSON (dict) from the CV text. Same structure as DEFAULT_PROFILE."""
     text = (text or "").strip()
     if not text:
         raise CVError("No CV text.")
     if len(text) > MAX_CV_CHARS:
         raise CVError("The CV text is too long (max. %d characters)." % MAX_CV_CHARS)
-    if not (api_key or os.environ.get("ANTHROPIC_API_KEY")):
-        raise CVError("No Anthropic API key (Settings → Claude API).")
-    client = anthropic.Anthropic(api_key=api_key or None, timeout=300.0, max_retries=2)
-    try:
-        resp = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=12000,
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": PROFILE_SCHEMA}},
-            system=PROFILE_SYSTEM,
-            messages=[{"role": "user", "content": "<cv>\n%s\n</cv>" % text}],
-        )
-    except anthropic.AuthenticationError:
-        raise CVError("Invalid Anthropic API key (Settings → Claude API).")
-    except anthropic.RateLimitError:
-        raise CVError("Claude API: too many requests, try again in a few minutes.")
-    except anthropic.APIStatusError as e:
-        raise CVError("Claude API error (%s): %s" % (e.status_code, e.message))
-    except anthropic.APIConnectionError:
-        raise CVError("Cannot reach the Claude API (network error).")
-    if resp.stop_reason in ("refusal", "max_tokens"):
-        raise CVError("The profile was not created (%s). Try a shorter text." % resp.stop_reason)
-    raw = "".join(b.text for b in resp.content if b.type == "text")
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        raise CVError("The model's response is not valid JSON.")
+    if not llm:
+        raise CVError("No AI key is set (Settings → AI).")
+    data = llm.json(system=PROFILE_SYSTEM, user="<cv>\n%s\n</cv>" % text, schema=PROFILE_SCHEMA, effort="medium",
+                    timeout=300.0, max_tokens=12000).data
     if not data.get("name") or not data.get("experience"):
         raise CVError("Could not extract the name or work experience from the CV.")
     return data

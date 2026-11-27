@@ -151,7 +151,7 @@ cover letter or recruiter message. The <code>contact</code> part is never sent t
 <div class="ui-btns" style="margin-top:12px"><a class="btn btn-sm btn-primary" href="/base-cv.pdf?photo=1" target="_blank">Base CV with photo (PDF)</a>
 <a class="btn btn-sm btn-outline" href="/base-cv.pdf?photo=0" target="_blank">Base CV without photo (for the US)</a></div></div>
 <section class="ui-section"><header><div><h2>Create it from your existing CV</h2><p class="ui-desc">Claude reads the CV (contact details included)
-and fills in the editor below. Nothing is saved until you check it and press Save. Needs the API key (Settings → Claude API).</p></div></header>
+and fills in the editor below. Nothing is saved until you check it and press Save. Needs an AI key (Settings → AI).</p></div></header>
 <div class="ui-body"><div class="ui-grid">
 <form class="wide" method="post" action="/profile/import-pdf" enctype="multipart/form-data"><label for="pdf">From a PDF</label>
 <div class="join" style="width:100%%"><input class="file-input join-item" style="flex:1" type="file" id="pdf" name="pdf" accept="application/pdf">

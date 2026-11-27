@@ -18,6 +18,9 @@ DEFAULT_CONFIG = {
     "default_work_filter": "remote_unknown",
     "public_url": "http://localhost:%d/" % PORT,
     "anthropic_api_key": "",
+    "deepseek_api_key": "",
+    # which model answers first: DeepSeek (cheap) or Claude; the other is the fallback when a key is set
+    "llm": {"primary": "deepseek", "deepseek_model": "deepseek-chat"},
     "ntfy": {"enabled": True, "server": "https://ntfy.sh", "topic": ""},
     "email": {"enabled": False, "smtp_host": "smtp.gmail.com", "smtp_port": 587,
               "username": "", "password": "", "to": ""},

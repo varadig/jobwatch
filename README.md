@@ -22,6 +22,10 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
   On request ("Research the company" on an interview; automatic only if you turn it on) Claude researches the
   company and the interviewers on the web (news, products, likely questions, questions to ask), with your API key.
   Each interview has "Add to Google Calendar" and an .ics file; all of them are also a calendar feed (a secret address).
+- **AI models:** DeepSeek and Claude (Settings → AI models). Whichever has a key is used; DeepSeek answers first
+  (cheap: a tailored CV costs about a cent), Claude is the fallback, or the other way round. If the first one fails
+  (no balance, a malformed answer), the other is asked. The company research for interviews needs web search, which
+  only Claude has. "Save and test the AI connection" checks the keys at once.
 - **Optional boards** (off until you switch them on in Settings): Remote OK, We Work Remotely, Himalayas,
   Jobicy, Working Nomads, Arbeitnow (EU, mostly Germany), and for games Remote Game Jobs and Work With Indies.
   The boards that list every trade keep only the postings that match a search term (a word of it in the title).
@@ -163,7 +167,7 @@ The code is a layered MVC application in the `jobwatch` package; each layer only
 | Sources | `sources/` | `JobSource` and one subclass per job board; each says how its postings are narrowed to the search and how often it may run. |
 | Domain | `domain/`, `search.py`, `models.py` | Scoring, work-mode rules, duplicate keys, search terms: plain logic without storage. |
 | Data | `repositories/`, `db.py`, `config.py` | `JobRepository`, `InterviewRepository` on a connection; `Database` (SQLite, WAL, migrations); `ConfigStore`. |
-| Infrastructure | `env.py`, `net.py`, `cvgen.py` | Paths and environment, `HttpClient`, the Claude API calls and the PDF rendering. |
+| Infrastructure | `env.py`, `net.py`, `llm.py`, `cvgen.py` | Paths and environment, `HttpClient`, the language models (`Llm`, `DeepSeekProvider`, `AnthropicProvider`), the prompts and the PDF rendering. |
 
 Shared objects (`config_store`, `database`, `http`, `notifier`, `refresher`) are module-level instances, so a test
 replaces one in a single place.

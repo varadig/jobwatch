@@ -1,6 +1,5 @@
 """Interviews: their settings, the company research and the reminders."""
 import json
-import os
 import secrets
 import threading
 from datetime import datetime, timedelta
@@ -9,6 +8,7 @@ from jobwatch import cvgen
 from jobwatch.config import config_store
 from jobwatch.db import database
 from jobwatch.env import log
+from jobwatch.llm import llm_for
 from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.services.documents import load_profile
 from jobwatch.services.notify import notifier
@@ -49,31 +49,31 @@ def calendar_token(cfg_lock=True):
 
 class Researcher:
     """Researches the company of an interview with Claude and web search, in the background (it takes a minute or
-    two); the result is stored with the interview. Needs a Claude API key."""
+    two); the result is stored with the interview. Needs a Claude API key (web search)."""
 
     def start(self, iid, force=False):
-        """Starts the research; False if there is no key, no such interview, or it is already running."""
+        """Starts the research; False if no Claude key is set, no such interview, or it is already running."""
         with config_store.lock:
             cfg = config_store.load()
-        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-        if not key:
+        llm = llm_for(cfg)
+        if not llm.can_search_web:   # only Claude can search the web
             return False
         with database.connect() as con:
             r = con.execute("SELECT research_status FROM interviews WHERE id=?", (iid,)).fetchone()
             if not r or (r["research_status"] == "running" and not force):
                 return False
             con.execute("UPDATE interviews SET research_status='running', research_error=NULL WHERE id=?", (iid,))
-        threading.Thread(target=self.run, args=(iid, key), daemon=True).start()
+        threading.Thread(target=self.run, args=(iid, llm), daemon=True).start()
         return True
 
-    def run(self, iid, key):
+    def run(self, iid, llm):
         try:
             with database.connect() as con:
                 r = InterviewRepository(con).get(iid)
                 job = con.execute("SELECT * FROM jobs WHERE id=?", (r["job_id"],)).fetchone() if r and r["job_id"] else None
             if not r:
                 return
-            text, sources = cvgen.company_research(key, r["company"], r["role"], self._posting(job), r["people"],
+            text, sources = cvgen.company_research(llm, r["company"], r["role"], self._posting(job), r["people"],
                                                    r["place"], self._candidate())
             with database.connect() as con:
                 InterviewRepository(con).update(iid, research=text, research_sources=json.dumps(sources),

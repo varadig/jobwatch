@@ -116,7 +116,7 @@ class InterviewsController(Controller):
                 return Response.redirect("/interviews", "Interview deleted.")
         if act == "research":
             return Response.redirect(here, "Claude is researching the company…" if researcher.start(iid, force=True)
-                                     else "Set a Claude API key first (Settings → Claude API).")
+                                     else "The research needs an Anthropic API key (web search): Settings → AI.")
         return Response.redirect(here, "Nothing to do.")
 
     def save_settings(self, req):

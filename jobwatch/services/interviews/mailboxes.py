@@ -1,7 +1,6 @@
 """Interviews found in the mailboxes (invitations, recruiters' e-mails)."""
 import hashlib
 import json
-import os
 import re
 import secrets
 import threading
@@ -12,6 +11,7 @@ from jobwatch import cvgen
 from jobwatch.config import config_store
 from jobwatch.db import database
 from jobwatch.env import log
+from jobwatch.llm import llm_for
 from jobwatch.repositories.interviews import InterviewRepository
 from jobwatch.services.interviews.core import fmt_iv_when, interview_cfg, notify_interview, researcher
 from jobwatch.services.interviews.ics import meeting_link, parse_ics
@@ -250,16 +250,16 @@ def interview_from_mail(cfg, sender, subject, sent, msg, companies):
     ev = next((x for x in events if x["start"] or x["cancelled"]), None)
     if not ev and (IV_NOT_RX.search(subject) or not IV_TIME_RX.search(subject + " " + text[:6000])):
         return None   # no invitation and no fixed time, or clearly not an interview: not worth a Claude call
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    llm = llm_for(cfg)
     found = None
-    if key:
+    if llm:
         cal = ""
         if ev:
             cal = "Summary: %s\nStart: %s\nEnd: %s\nLocation: %s\nOrganizer: %s\nAttendees: %s\nStatus: %s\n\n%s" % (
                 ev["summary"], ev["start"] and to_local(ev["start"]).isoformat(timespec="minutes"),
                 ev["end"] and to_local(ev["end"]).isoformat(timespec="minutes"), ev["location"], ev["organizer"],
                 ", ".join(ev["attendees"][:10]), "cancelled" if ev["cancelled"] else "confirmed", ev["description"][:2500])
-        d = cvgen.interview_from_email(key, sender, subject, sent, text, cal, local_tz_name(),
+        d = cvgen.interview_from_email(llm, sender, subject, sent, text, cal, local_tz_name(),
                                        datetime.now().astimezone().isoformat(timespec="minutes"), companies)
         if not d.get("is_interview"):
             return None

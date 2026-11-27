@@ -114,7 +114,7 @@ def unknown_reason(r):
     linkedin = (r.get("urlkey") or "").startswith("li:") or r.get("source") == "linkedin"
     if not code:  # not checked yet: say what it is waiting for
         code = "li_wait" if linkedin and not (r.get("description") or "") else "pending"
-    by = {"claude": " and Claude", "claude_off": "; Claude is turned off in Settings", "no_key": "; no Claude API key",
+    by = {"claude": " and Claude", "claude_off": "; Claude is turned off in Settings", "no_key": "; no AI key",
           "claude_error": "; Claude could not be reached", "": ""}.get(extra, "")
     board = SOURCES_INFO.get(r.get("source"), (r.get("source") or "",))[0]
     short, long_ = UNKNOWN_WHY.get(code, UNKNOWN_WHY["pending"])

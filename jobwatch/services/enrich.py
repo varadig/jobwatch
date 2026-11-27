@@ -1,6 +1,5 @@
 """Filling in what a source leaves out: LinkedIn descriptions and the work mode."""
 import html
-import os
 import re
 import threading
 import time
@@ -11,6 +10,7 @@ from jobwatch.db import database
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import FLEXA_MODE, FOURDAY_MODE, classify_mode_ex
 from jobwatch.env import log
+from jobwatch.llm import llm_for
 from jobwatch.net import http
 from jobwatch.services.state import ENRICH_LOCK, MODE_LOCK, STATE
 from jobwatch.sources.linkedin import enrich_linkedin
@@ -75,7 +75,7 @@ def mode_from_page(source, url):
 
 def enrich_work_modes(cfg, limit=80):
     """Background job: settles postings whose work mode is unknown — first from the job board's own page
-    (4dayweek, Flexa), then from the text in many languages, then (if turned on) Claude reads the posting.
+    (4dayweek, Flexa), then from the text in many languages, then (if turned on) a language model reads the posting.
     A manual choice is never touched. Each posting is checked once (again after 3 days if still unknown)."""
     if not MODE_LOCK.acquire(blocking=False):
         return
@@ -87,8 +87,8 @@ def enrich_work_modes(cfg, limit=80):
                 "COALESCE(work_mode,'unknown')='unknown' AND COALESCE(mode_src,'')!='manual' AND "
                 "NOT ((COALESCE(urlkey,'') LIKE 'li:%' OR source='linkedin') AND COALESCE(description,'')='') AND "
                 "(mode_checked IS NULL OR mode_checked < ?) ORDER BY first_seen DESC LIMIT ?", (old, limit))]
-        key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-        use_claude = cfg.get("mode_claude", True) and key
+        llm = llm_for(cfg)
+        use_claude = cfg.get("mode_claude", True) and llm
         settled, asked = 0, 0
         for r in rows:
             mode, src, note = None, None, ""
@@ -108,11 +108,11 @@ def enrich_work_modes(cfg, limit=80):
                 m2, n2 = classify_mode_ex(r["title"], r["location"], r["description"])
                 if m2 != "unknown":
                     mode, src, note = m2, "text", n2
-            claude_state = "claude_off" if not cfg.get("mode_claude", True) else ("no_key" if not key else "")
+            claude_state = "claude_off" if not cfg.get("mode_claude", True) else ("no_key" if not llm else "")
             if not mode and use_claude and len(r["description"] or "") > 200 and asked < MODE_CLAUDE_PER_RUN:
                 asked += 1
                 try:
-                    m3, n3 = cvgen.work_mode_from_text(key, r["title"], r["location"], r["description"])
+                    m3, n3 = cvgen.work_mode_from_text(llm, r["title"], r["location"], r["description"])
                     claude_state = "claude"
                     if m3 != "unknown":
                         mode, src, note = m3, "claude", n3

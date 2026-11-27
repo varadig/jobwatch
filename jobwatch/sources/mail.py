@@ -1,7 +1,6 @@
 """Job alert e-mails: reading the mailbox and the postings in the e-mails."""
 import hashlib
 import html
-import os
 import re
 import time
 import urllib.error
@@ -11,6 +10,7 @@ import urllib.request
 from jobwatch import cvgen
 from jobwatch.db import database
 from jobwatch.env import log
+from jobwatch.llm import llm_for
 from jobwatch.services.state import STATE
 from jobwatch.sources.base import JobSource
 from jobwatch.util.text import html_attr, strip_tags
@@ -113,9 +113,9 @@ def read_alert_mails(cfg, only_new=True, limit=40):
 def jobs_from_mail(cfg, sender, subject, msg):
     """The postings in one alert e-mail: Claude reads it when that is turned on (and a key is set), else the links."""
     text, links = mail_body(msg)
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-    if (cfg.get("mail_source") or {}).get("use_claude", True) and key:
-        found = cvgen.jobs_from_email(key, subject, sender, text, links)
+    llm = llm_for(cfg)
+    if (cfg.get("mail_source") or {}).get("use_claude", True) and llm:
+        found = cvgen.jobs_from_email(llm, subject, sender, text, links)
         for j in found:
             j["url"] = canonical_job_url(html.unescape(j.get("url") or ""))
         return found

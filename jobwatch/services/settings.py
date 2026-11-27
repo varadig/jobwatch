@@ -110,6 +110,12 @@ def save_settings(f):
                             to=g("email_to").strip())
         if g("anthropic_api_key").strip():
             cfg["anthropic_api_key"] = g("anthropic_api_key").strip()
+        if g("deepseek_api_key").strip():
+            cfg["deepseek_api_key"] = g("deepseek_api_key").strip()
+        if "llm_primary" in f:   # the AI section is part of the form
+            cfg["llm"] = {"primary": g("llm_primary") if g("llm_primary") in ("deepseek", "anthropic") else "deepseek",
+                          "deepseek_model": g("deepseek_model") if g("deepseek_model") in ("deepseek-chat", "deepseek-reasoner")
+                          else "deepseek-chat"}
         if g("smtp_pass"):
             cfg["email"]["password"] = g("smtp_pass").replace(" ", "")
         cfg["interval_minutes"] = max(15, int(g("interval", "60") or 60))

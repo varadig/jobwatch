@@ -14,6 +14,7 @@ from jobwatch.domain.identity import dup_key, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import DOCS_ROOT, FONT_DIR, PHOTO_PATH, PROFILE_PATH, SMB_BASE, SMB_PREFIX, log
+from jobwatch.llm import llm_for
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.util.text import safe_name
 from jobwatch.util.timeutil import now_iso
@@ -103,9 +104,8 @@ def profile_from_cv_text(text):
     """Builds the profile JSON from the CV text with the Claude API. On error raises ValueError with a user message."""
     with config_store.lock:
         cfg = config_store.load()
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     try:
-        prof = cvgen.profile_from_text(key, text)
+        prof = cvgen.profile_from_text(llm_for(cfg), text)
     except cvgen.CVError as ex:
         raise ValueError(str(ex))
     return json.dumps(prof, ensure_ascii=False, indent=2)
@@ -194,13 +194,13 @@ def render_cv_files(jid, data, archive=False):
 def cv_generate(jid, description):
     with config_store.lock:
         cfg = config_store.load()
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    llm = llm_for(cfg)
     with database.connect() as con:
         job = dict(con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
     try:
-        if not key:
-            raise cvgen.CVError("No Anthropic API key (Settings → Claude API).")
-        data = cvgen.tailor(key, load_profile(), job, description)
+        if not llm:
+            raise cvgen.CVError("No AI key is set (Settings → AI).")
+        data = cvgen.tailor(llm, load_profile(), job, description)
         data["_photo"] = cvgen.photo_default(job)
         render_cv_files(jid, data, archive=True)
         with database.connect() as con:

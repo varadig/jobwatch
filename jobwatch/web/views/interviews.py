@@ -1,6 +1,5 @@
 """The Interviews page and an interview's view."""
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -8,6 +7,7 @@ from datetime import datetime, timedelta
 
 from jobwatch.config import config_store
 from jobwatch.db import database
+from jobwatch.llm import llm_for
 from jobwatch.models import INTERVIEW_STATUS
 from jobwatch.services.interviews.core import calendar_token, fmt_iv_when, interview_cfg, iv_start, rel_when
 from jobwatch.services.interviews.ics import google_calendar_link
@@ -121,7 +121,9 @@ def interviews_page(q, flash=""):
     logos = logo_files()
     soon = [r for r in rows if r["status"] == "planned" and (iv_start(r) or now) >= now - timedelta(hours=2)]
     past = [r for r in reversed(rows) if r not in soon]
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    llm = llm_for(cfg)
+    key = llm.can_search_web   # the research needs web search: only Claude has it
+    ai = bool(llm)
     ntfy_on = cfg["ntfy"].get("enabled") and cfg["ntfy"].get("topic")
     mailbox = bool(interview_mailboxes(cfg))
     feed = "%s/calendar/%s.ics" % ((cfg.get("public_url") or "").rstrip("/"), calendar_token())
@@ -154,14 +156,14 @@ def interviews_page(q, flash=""):
           '</span></div>' % (chk(ivc["from_mail"]),
                              ("Every 30 minutes the e-mails of the last %d days in your mailboxes (below) whose subject looks like an interview are read "
                               "(calendar invitations directly%s). Nothing is marked as read." % (
-                                  int(ivc["mail_days"] or 14), ", the others by Claude" if key else "; set a Claude key to "
+                                  int(ivc["mail_days"] or 14), ", the others by the AI model" if ai else "; set an AI key (Settings → AI) to "
                                   "read the others too")) if mailbox else
                              'Needs a mailbox: add one below.')
         + '<div><label>Research</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
           'class="toggle toggle-sm toggle-primary" name="iv_research"%s> Research every new interview automatically</label>'
           '<span class="help">Claude searches the web: the company, recent news, the interviewers\' professional background, '
-          'likely questions, using your Claude API key (roughly 10–50 cents each). Off: it runs only when you click “Research the company” on an interview.%s</span></div>' % (
-              chk(ivc["research"]), "" if key else ' Needs a <a href="/settings#claude">Claude API key</a>.')
+          'likely questions, using your Anthropic API key (roughly 10–50 cents each; DeepSeek cannot search the web). Off: it runs only when you click “Research the company” on an interview.%s</span></div>' % (
+              chk(ivc["research"]), "" if key else ' Needs a <a href="/settings#ai">Anthropic API key</a>.')
         + '<div class="wide ui-inline"><button class="btn btn-sm btn-primary">Save</button>'
           '<button class="btn btn-sm btn-outline" formaction="/interviews/scan"%s>%s Check the e-mails now</button></div></form>'
           % ("" if mailbox and ivc["from_mail"] else " disabled", ic("mail"))
@@ -193,7 +195,7 @@ def interview_page(iid, flash="", modal=False):
     now = datetime.now().astimezone()
     with config_store.lock:
         cfg = config_store.load()
-    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    key = llm_for(cfg).can_search_web   # the research needs web search: only Claude has it
     st = iv_start(r)
     act = lambda v, label, cls="btn-outline": '<button class="btn btn-sm %s" name="act" value="%s">%s</button>' % (cls, v, label)
     acts = "".join([
@@ -219,7 +221,7 @@ def interview_page(iid, flash="", modal=False):
         research = '<div class="ui-err">The research failed: %s</div>' % e(r["research_error"] or "")
     else:
         research = ('<p class="muted">Not researched yet.%s</p>' % (
-            "" if key else ' Set a <a href="/settings#claude">Claude API key</a> to have the company researched.'))
+            "" if key else ' Set a <a href="/settings#ai">Anthropic API key</a> to have the company researched.'))
     gcal = google_calendar_link(r)
     info = ('<div class="ui-head"><a href="/interviews" style="font-size:13px">%s Interviews</a><div class="job-head" style="margin-top:6px">%s'
             '<div><h1 id="iv-title">%s</h1><p style="margin-top:2px"><b>%s</b>%s · %d min · %s</p></div></div>'

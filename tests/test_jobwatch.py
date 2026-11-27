@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 # app.py reads its data folder when it is imported, so point it at a throwaway one.
 os.environ.setdefault("JOBWATCH_DATA", tempfile.mkdtemp(prefix="jobwatch-test-"))
-from jobwatch import config, cvgen, env, models, search
+from jobwatch import config, cvgen, env, llm, models, search
 from jobwatch.config import config_store
 from jobwatch.db import database
 from jobwatch.domain import identity, scoring, workmode
@@ -60,6 +60,12 @@ def post(path, form):
     resp = server.dispatch(req)
     loc = urllib.parse.urlparse(dict(resp.headers)["Location"])
     return loc.path + ("#" + loc.fragment if loc.fragment else ""), urllib.parse.parse_qs(loc.query).get("msg", [""])[0]
+
+
+
+def anthropic_llm(key="k"):
+    """An Llm that asks Claude only (the tests replace the SDK)."""
+    return llm.Llm([llm.AnthropicProvider(key)])
 
 
 def template(name):
@@ -486,7 +492,7 @@ class Outreach(unittest.TestCase):
         cap = {}
         prof = {"name": "Gábor", "contact": {"email": "secret@example.com"}, "summary": "Unity dev"}
         with mock.patch.dict(sys.modules, {"anthropic": self.fake_sdk(cap)}):
-            out = cvgen.outreach_message("k", prof, {"name": "Anna", "title": "TA @ Supercell", "via": "Péter | ex-colleague"},
+            out = cvgen.outreach_message(anthropic_llm(), prof, {"name": "Anna", "title": "TA @ Supercell", "via": "Péter | ex-colleague"},
                                          {"title": "Unity Developer", "company": "Supercell"}, "linkedin_intro", "hu")
         self.assertEqual(out["message"], "Hi Anna, ...")
         self.assertEqual(cap["model"], "claude-opus-5-5")
@@ -501,7 +507,7 @@ class Outreach(unittest.TestCase):
         from unittest import mock
         with mock.patch.dict(sys.modules, {"anthropic": self.fake_sdk({}, stop="refusal")}):
             with self.assertRaises(cvgen.CVError):
-                cvgen.outreach_message("k", {"name": "x"}, {"name": "Anna"})
+                cvgen.outreach_message(anthropic_llm(), {"name": "x"}, {"name": "Anna"})
 
     def test_recruiter_lines(self):
         r = outreach.parse_recruiters("Anna Kovács | TA @ Supercell | https://www.linkedin.com/in/anna/\nBob | bob@corp.com\n\n | x")
@@ -631,7 +637,7 @@ class OutreachSpecific(unittest.TestCase):
         cap = {}
         sdk = Outreach().fake_sdk(cap)
         with mock.patch.dict(sys.modules, {"anthropic": sdk}):
-            cvgen.outreach_message("k", {"name": "G"}, {"name": "Tom", "profile": "Hiring for Nordic mobile studios",
+            cvgen.outreach_message(anthropic_llm(), {"name": "G"}, {"name": "Tom", "profile": "Hiring for Nordic mobile studios",
                                                         "role_text": "Title: Senior Unity Developer\nCompany: Kolibri"},
                                    {"title": "General posting", "company": "Other"})
         user = cap["messages"][0]["content"]
@@ -847,7 +853,7 @@ class MailAlerts(unittest.TestCase):
         sdk = Outreach().fake_sdk(cap, text='{"jobs": [{"title": "A", "company": "", "location": "", "url": "https://evil.example/x"},'
                                             '{"title": "B", "company": "", "location": "", "url": "https://ok.example/j/1"}]}')
         with mock.patch.dict(sys.modules, {"anthropic": sdk}):
-            out = cvgen.jobs_from_email("k", "s", "f", "t", [("B", "https://ok.example/j/1")])
+            out = cvgen.jobs_from_email(anthropic_llm(), "s", "f", "t", [("B", "https://ok.example/j/1")])
         self.assertEqual([j["title"] for j in out], ["B"])
 
 
@@ -1784,10 +1790,10 @@ class ResearchSources(unittest.TestCase):
         fetch = N(type="web_fetch_tool_result", content=N(url="https://f.test", content=N(title="F")))
         err = N(type="web_search_tool_result", content=N(error_code="max_uses_exceeded"))
         plain = N(type="text", text="x", citations=None)
-        self.assertEqual(cvgen.research_sources([search, err, fetch, plain]),
+        self.assertEqual(llm.research_sources([search, err, fetch, plain]),
                          [("F", "https://f.test"), ("S1", "https://s1.test"), ("S2", "https://s2.test")])
         cited = N(type="text", text="y", citations=[N(title="C", url="https://c.test"), N(title="C", url="https://c.test")])
-        self.assertEqual(cvgen.research_sources([search, fetch, cited]), [("C", "https://c.test")])
+        self.assertEqual(llm.research_sources([search, fetch, cited]), [("C", "https://c.test")])
 
     def test_a_paused_turn_is_continued_and_all_its_text_kept(self):
         from types import SimpleNamespace as N
@@ -1795,8 +1801,8 @@ class ResearchSources(unittest.TestCase):
         part2 = N(stop_reason="end_turn", content=[N(type="text", text="- Big studio", citations=None)])
         seen = []
         replies = iter([part1, part2])
-        with mock.patch.object(cvgen, "_call", lambda key, t, **kw: seen.append(kw["messages"]) or next(replies)):
-            text, _ = cvgen.company_research("k", "Acme")
+        with mock.patch.object(llm.AnthropicProvider, "_create", lambda self, t, **kw: seen.append(kw["messages"]) or next(replies)):
+            text, _ = cvgen.company_research(anthropic_llm(), "Acme")
         self.assertEqual(text, "## At a glance\n- Big studio")
         self.assertEqual(seen[1][1]["role"], "assistant")   # the paused part was sent back
 
@@ -1934,3 +1940,94 @@ class Routing(unittest.TestCase):
         resp = server.dispatch(Request("GET", "/x", {}, lambda n: b""), router)
         self.assertEqual(resp.status, 500)
         self.assertIn(b"boom", resp.body)
+
+
+class ModelRouter(unittest.TestCase):
+    SCHEMA = {"type": "object", "properties": {"mode": {"type": "string", "enum": ["a", "b"]}, "n": {"type": "integer"}},
+              "required": ["mode"]}
+
+    def deepseek(self, content, finish="stop", http_error=None):
+        calls = []
+
+        class Http:
+            def get(self_, url, data=None, headers=None, timeout=30):
+                calls.append((url, json.loads(data), headers))
+                if http_error:
+                    raise http_error
+                return json.dumps({"model": "deepseek-chat", "choices": [{"finish_reason": finish, "message": {"content": content}}]})
+        return llm.DeepSeekProvider("sk-d", client=Http()), calls
+
+    def test_deepseek_request_and_answer(self):
+        provider, calls = self.deepseek('```json\n{"mode": "a", "n": 2}\n```')
+        done = provider.json("Decide.", "Which?", self.SCHEMA, effort="low", max_tokens=16000)
+        self.assertEqual((done.data, done.provider, done.model), ({"mode": "a", "n": 2}, "deepseek", "deepseek-chat"))
+        url, body, headers = calls[0]
+        self.assertEqual(url, "https://api.deepseek.com/chat/completions")
+        self.assertEqual(headers["Authorization"], "Bearer sk-d")
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(body["max_tokens"], 8192)                       # deepseek-chat's limit
+        self.assertIn("JSON schema", body["messages"][0]["content"])     # the shape is described
+        self.assertEqual(body["messages"][1], {"role": "user", "content": "Which?"})
+
+    def test_an_answer_that_does_not_fit_is_an_error(self):
+        for content, why in (('{"mode": "c"}', "one of a, b"), ('{"n": 1}', "missing"), ('{"mode": "a", "n": "x"}', "whole number"),
+                             ("not json", "not valid JSON"), ('["a"]', "not a JSON object")):
+            provider, _ = self.deepseek(content)
+            with self.assertRaises(llm.LlmError) as cm:
+                provider.json("s", "u", self.SCHEMA)
+            self.assertIn(why, str(cm.exception))
+        provider, _ = self.deepseek('{"mode": "a"', finish="length")
+        with self.assertRaises(llm.LlmError):
+            provider.json("s", "u", self.SCHEMA)
+
+    def test_http_errors_say_what_to_do(self):
+        import io
+        import urllib.error
+        for code, text in ((401, "Invalid DeepSeek API key"), (402, "balance is used up"), (429, "too many requests"),
+                           (500, "DeepSeek API error (500): boom")):
+            err = urllib.error.HTTPError("u", code, "Bad", {}, io.BytesIO(b'{"error": {"message": "boom"}}'))
+            provider, _ = self.deepseek("{}", http_error=err)
+            with self.assertRaises(llm.LlmError) as cm:
+                provider.json("s", "u", self.SCHEMA)
+            self.assertIn(text, str(cm.exception))
+
+    def test_order_and_fallback(self):
+        cfg = {"deepseek_api_key": "d", "anthropic_api_key": "a"}
+        self.assertEqual(llm.llm_for(cfg).names, ["DeepSeek", "Claude"])                          # DeepSeek first by default
+        self.assertEqual(llm.llm_for(dict(cfg, llm={"primary": "anthropic"})).names, ["Claude", "DeepSeek"])
+        self.assertEqual(llm.llm_for({"anthropic_api_key": "a"}).names, ["Claude"])
+        self.assertFalse(llm.llm_for({}))
+        self.assertFalse(llm.llm_for({"deepseek_api_key": "d"}).can_search_web)
+        self.assertTrue(llm.llm_for(cfg).can_search_web)
+
+        class Fails(llm.Provider):
+            name, label = "deepseek", "DeepSeek"
+
+            def json(self, **kw):
+                raise llm.LlmError("no balance")
+
+        class Works(llm.Provider):
+            name, label = "anthropic", "Claude"
+
+            def json(self, **kw):
+                return llm.Completion({"mode": "b"}, "claude-x", "anthropic")
+        done = llm.Llm([Fails(), Works()]).json(system="s", user="u", schema=self.SCHEMA)
+        self.assertEqual((done.provider, done.data), ("anthropic", {"mode": "b"}))
+        with self.assertRaises(llm.LlmError) as cm:
+            llm.Llm([Fails(), Fails()]).json(system="s", user="u", schema=self.SCHEMA)
+        self.assertIn("DeepSeek: no balance; DeepSeek: no balance", str(cm.exception))
+        with self.assertRaises(llm.LlmError):
+            llm.Llm([]).json(system="s", user="u", schema=self.SCHEMA)
+
+    def test_research_needs_a_model_that_can_search(self):
+        deepseek_only = llm.llm_for({"deepseek_api_key": "d"})
+        with self.assertRaises(llm.LlmError) as cm:
+            deepseek_only.research("s", "u")
+        self.assertIn("Anthropic API key", str(cm.exception))
+        self.assertFalse(ivcore.researcher.start(1))   # no Claude key: nothing starts
+
+    def test_settings_keep_a_key_left_empty_and_the_ai_form_is_saved(self):
+        cfg = {"deepseek_api_key": "old"}
+        self.assertIn("Save and test the AI connection", settings_view.settings_page())
+        out = llm.llm_for(dict(cfg, llm={"primary": "deepseek", "deepseek_model": "nonsense"}))
+        self.assertEqual(out.providers[0].model, "deepseek-chat")   # an unknown model falls back to the default

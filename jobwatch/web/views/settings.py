@@ -12,7 +12,7 @@ from jobwatch.web.components import page, script, ui_field, ui_sec, ui_toggle, w
 from jobwatch.web.views.sources import custom_sources_card
 
 SETTINGS_NAV = (("presets", "Presets"), ("notify", "Notifications"), ("search", "Job search"), ("own", "Own sources"), ("mail", "E-mail alerts"), ("scoring", "Scoring"),
-                ("claude", "Claude API"), ("general", "General"), ("danger", "Maintenance"))
+                ("ai", "AI models"), ("general", "General"), ("danger", "Maintenance"))
 
 
 def settings_page(flash=""):
@@ -74,7 +74,7 @@ def settings_page(flash=""):
            '(a word of it in the title). Remote Game Jobs and Work With Indies are for game roles.</span></div>' % board_boxes)
         + ui_field("interval", "Refresh every (minutes)", cfg["interval_minutes"], "number", "At least 15.", ' min="15"')
         + '<div><label>Work mode (remote / hybrid / on-site)</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
-          'class="toggle toggle-sm toggle-primary" name="mode_claude"%s> Claude reads the postings the rules cannot settle</label>'
+          'class="toggle toggle-sm toggle-primary" name="mode_claude"%s> An AI model reads the postings the rules cannot settle</label>'
           '<span class="help">First the job board\'s own data and the posting text (in many languages) decide; Claude only reads '
           'what is still unknown, about ¼ cent per posting. You can always set it by hand on the card.</span></div>' % chk(cfg.get("mode_claude", True))
         + ta("search_terms", "What to search for", "\n".join(cfg.get("search_terms") or []), 7,
@@ -105,7 +105,7 @@ def settings_page(flash=""):
              "<code>jobalerts-noreply@linkedin.com</code>.")
         + ui_field("mail_days", "Look back (days)", ms.get("days", 7), "number", "Only e-mails from the last days.", ' min="1" max="60"')
         + '<div><label>Reading the e-mails</label><label class="ui-toggle" style="font-weight:400"><input type="checkbox" '
-          'class="toggle toggle-sm toggle-primary" name="mail_use_claude"%s> Claude reads them</label><span class="help">More accurate '
+          'class="toggle toggle-sm toggle-primary" name="mail_use_claude"%s> An AI model reads them</label><span class="help">More accurate '
           '(title, company, location) in any format; about 1 cent per e-mail, every e-mail once. Off: only the links that look like '
           'postings, free.</span></div>' % chk(ms.get("use_claude", True))
         + '<div class="wide"><span class="help">Mailbox: by default the e-mail account under Notifications (for Gmail the same app '
@@ -173,12 +173,32 @@ def settings_page(flash=""):
         + '<div><label for="default_work_filter">Default list filter</label><select class="select" id="default_work_filter" '
           'name="default_work_filter">%s</select></div></div>' % filt)
 
-    claude = ui_sec("claude", "Claude API", "Used for tailored CVs, cover letters and recruiter messages. "
-                    "A CV + cover letter costs about 5–15 cents, a recruiter message 1–3 cents. The key stays on this machine.",
-        '<div class="ui-grid"><div class="wide"><label for="anthropic_api_key">Anthropic API key %s</label>'
+    ai = cfg.get("llm") or {}
+    pick = lambda value, current, label: '<option value="%s"%s>%s</option>' % (value, " selected" if value == current else "", label)
+    primary = ai.get("primary") if ai.get("primary") in ("deepseek", "anthropic") else "deepseek"
+    ai_sec = ui_sec("ai", "AI models", "What writes the tailored CVs, cover letters and recruiter messages, and reads the "
+                    "job alert e-mails, interview e-mails and postings. DeepSeek is used first when its key is set, "
+                    "Claude is the fallback (or the other way round: pick it below). The keys stay on this machine.",
+        '<div class="ui-grid"><div><label for="deepseek_api_key">DeepSeek API key %s</label>'
+        '<input class="input" id="deepseek_api_key" type="password" name="deepseek_api_key" placeholder="Leave empty to keep" '
+        'autocomplete="new-password"><span class="help">Cheap and fast; a CV costs about a cent. Create one at '
+        '<a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com → API keys</a> '
+        'and add a little balance.</span></div>'
+        '<div><label for="anthropic_api_key">Anthropic (Claude) API key %s</label>'
         '<input class="input" id="anthropic_api_key" type="password" name="anthropic_api_key" placeholder="Leave empty to keep" '
-        'autocomplete="new-password"><span class="help">Create one at <a href="https://console.anthropic.com/settings/keys" '
-        'target="_blank" rel="noopener">console.anthropic.com → API Keys</a>.</span></div></div>' % set_badge(cfg.get("anthropic_api_key")))
+        'autocomplete="new-password"><span class="help">The fallback, and the only one that can search the web (the company '
+        'research for interviews). A CV costs about 5–15 cents. <a href="https://console.anthropic.com/settings/keys" '
+        'target="_blank" rel="noopener">console.anthropic.com → API Keys</a>.</span></div>'
+        '<div><label for="llm_primary">Answers first</label><select class="select" id="llm_primary" name="llm_primary">%s%s</select>'
+        '<span class="help">If it fails (no balance, a bad answer), the other one is asked.</span></div>'
+        '<div><label for="deepseek_model">DeepSeek model</label><select class="select" id="deepseek_model" name="deepseek_model">%s%s</select>'
+        '<span class="help">deepseek-chat is the everyday one; deepseek-reasoner thinks longer, slower and dearer.</span></div>'
+        '<div class="wide ui-inline">%s</div></div>' % (
+            set_badge(cfg.get("deepseek_api_key")), set_badge(cfg.get("anthropic_api_key")),
+            pick("deepseek", primary, "DeepSeek"), pick("anthropic", primary, "Claude"),
+            pick("deepseek-chat", ai.get("deepseek_model", "deepseek-chat"), "deepseek-chat"),
+            pick("deepseek-reasoner", ai.get("deepseek_model", "deepseek-chat"), "deepseek-reasoner"),
+            test("llm", "Save and test the AI connection")))
 
     general = ui_sec("general", "General", "",
         '<div class="ui-grid">' + ui_field("public_url", "Web address of this app", cfg.get("public_url", ""), "url",
@@ -206,7 +226,7 @@ def settings_page(flash=""):
             'id="leave_stay">Stay here</button><button type="button" class="btn btn-outline" id="leave_discard">Don\'t save'
             '</button><button type="button" class="btn btn-primary" id="leave_save">Save</button></div></div>'
             '<form method="dialog" class="modal-backdrop"><button aria-label="Close" tabindex="-1"></button></form></dialog>') % (
-        nav, presets, notify, search, own, scoring, claude, general, danger, e(KEPT_ON_NEW_SEARCH))
+        nav, presets, notify, search, own, scoring, ai_sec, general, danger, e(KEPT_ON_NEW_SEARCH))
     return page("Settings", body + '<script type="application/json" id="jw_scoring">%s</script>' % json.dumps(
         {k: {"t": list(t), "rest": r} for k, (t, r) in SCORING_KINDS.items()}) + CHIPS_JS + LEAVE_JS, flash)
 

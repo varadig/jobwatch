@@ -1,5 +1,6 @@
 """The Settings page: saving it, presets, and the test buttons (push, e-mail, own sources, e-mail alerts)."""
 from jobwatch.config import config_store
+from jobwatch.llm import LlmError, llm_for
 from jobwatch.services.notify import notifier
 from jobwatch.services.settings import preset_action, save_settings, saved_message
 from jobwatch.sources.custom import test_custom_sources
@@ -36,6 +37,8 @@ class SettingsController(Controller):
         what = f.get("what")
         if what == "custom":
             return Response.redirect("/settings", test_custom_sources(cfg)[:1500])
+        if what == "llm":
+            return Response.redirect("/settings", test_llm(cfg), "ai")
         if what == "mail":
             return Response.redirect("/settings", test_mail_source(cfg)[:1500], "mail")
         try:
@@ -47,3 +50,20 @@ class SettingsController(Controller):
         except Exception as ex:
             msg = "Test error: %s" % ex
         return Response.redirect("/settings", msg)
+
+
+def test_llm(cfg):
+    """Asks each configured model a trivial question, so a wrong key or an empty balance shows up here and now."""
+    llm = llm_for(cfg)
+    if not llm:
+        return "No AI key is set: add a DeepSeek or an Anthropic key."
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+    results = []
+    for provider in llm.providers:
+        try:
+            done = provider.json(system="Answer with the word ok.", user="Say ok.", schema=schema, effort="low",
+                                 timeout=60.0, max_tokens=200)
+            results.append("%s works (%s)" % (provider.label, done.model))
+        except LlmError as ex:
+            results.append("%s: %s" % (provider.label, ex))
+    return "; ".join(results) + "."
