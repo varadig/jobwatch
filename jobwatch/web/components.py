@@ -220,7 +220,7 @@ def page(title, body, flash="", refresh=0):
     cur = getattr(REQ, "path", "/")
     tabs = [("/", "Jobs"), ("/docs", "Documents"), ("/outreach", "Recruiters"), ("/interviews", "Interviews"),
             ("/sources", "Sources"),
-            ("/profile", "CV profile"), ("/settings", "Settings")]
+            ("/profile", "CV profile"), ("/settings", "Settings"), ("/log", "Log")]
     nav = "".join('<a role="tab" class="tab%s" href="%s">%s</a>' % (
         " tab-active" if (cur == h or (h == "/" and cur.startswith("/cv/"))) else "", h, l) for h, l in tabs)
     running = '<span class="badge badge-soft badge-warning">' + ic("hourglass_top") + ' refresh running…</span>' if STATE["running"] else ""

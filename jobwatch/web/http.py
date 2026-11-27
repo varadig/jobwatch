@@ -28,6 +28,10 @@ class Request:
             self._form = {k: v[-1] for k, v in urllib.parse.parse_qs(data, keep_blank_values=True).items()}
         return self._form
 
+    def form_fields(self):
+        """The names of the fields of the form, if the form was read (never their values), else None."""
+        return sorted(self._form) if self._form is not None else None
+
     @property
     def msg(self):
         """The message a redirect brought along (?msg=…)."""

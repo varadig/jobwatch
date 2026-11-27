@@ -3,6 +3,7 @@
 Everything comes from environment variables with defaults next to the code, so one copy of the code can run
 several profiles (JOBWATCH_DATA) on several ports (JOBWATCH_PORT)."""
 import logging
+import logging.handlers
 import os
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the project folder (above the package)
@@ -30,3 +31,15 @@ UA = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Ch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jobwatch")
+
+
+def add_log_file(path=None):
+    """Also writes the log to DATA/logs/jobwatch.log (2 MB, 3 files), so it can be read after the journal has moved on."""
+    path = path or os.path.join(DATA, "logs", "jobwatch.log")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+    except OSError as ex:
+        log.warning("No log file: %s", ex)

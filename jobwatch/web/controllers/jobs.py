@@ -73,7 +73,7 @@ class JobsController(Controller):
         with database.connect() as con:
             r = con.execute("SELECT url, status FROM jobs WHERE id=?", (jid,)).fetchone()
             if r and r["status"] == "new":
-                JobRepository(con).set_status(jid, "seen")
+                JobRepository(con).set_status(jid, "seen", by="opened the original posting")
         return Response.redirect(safe_url(r["url"]) if r else "/")
 
     def api_list(self, req):
@@ -91,7 +91,7 @@ class JobsController(Controller):
         with database.connect() as con:
             jobs = JobRepository(con)
             if status in STATUS_LABEL:
-                jobs.set_status(jid, status)
+                jobs.set_status(jid, status, by="you, on the %s" % ("dialog or card" if req.headers.get("X-Requested-With") else "page"))
             if mode in ("remote", "hybrid", "onsite"):   # set by hand: never overwritten, remembered
                 con.execute("UPDATE jobs SET work_mode=?, mode_src='manual', mode_note='set by you' WHERE id=?", (mode, jid))
                 jobs.set_manual_mode(jid, mode)
@@ -118,7 +118,7 @@ class JobsController(Controller):
         with database.connect() as con:
             jobs = JobRepository(con)
             for r in con.execute("SELECT id FROM jobs WHERE status='new'").fetchall():
-                jobs.set_status(r["id"], "seen")
+                jobs.set_status(r["id"], "seen", by="mark all new as seen")
         return Response.redirect(req.back())
 
     def refresh(self, req):

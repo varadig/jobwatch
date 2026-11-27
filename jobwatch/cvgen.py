@@ -171,7 +171,7 @@ def outreach_message(llm, profile, recruiter, job=None, channel="linkedin_messag
     if note:
         parts.append("<candidate_note>\n%s\n</candidate_note>" % note)
     parts.append("Channel: %s. Write %s (hard limit: %d characters for the message). %s" % (label, how, limit, lang))
-    done = llm.json(system=OUTREACH_SYSTEM, user="\n\n".join(parts), schema=OUTREACH_SCHEMA, effort="medium")
+    done = llm.json(purpose="recruiter message", system=OUTREACH_SYSTEM, user="\n\n".join(parts), schema=OUTREACH_SCHEMA, effort="medium")
     data = done.data
     data["message"] = data["message"].strip()
     data["_model"] = done.model
@@ -219,7 +219,7 @@ evidence: the short quote (max 140 characters, in the posting's language) that d
 def work_mode_from_text(llm, title, location, description):
     """(work mode, evidence quote) from the posting text, for postings the rules could not decide."""
     user = "<posting>\nTitle: %s\nLocation: %s\n\n%s\n</posting>" % (title, location or "-", (description or "")[:12000])
-    data = llm.json(system=WORK_MODE_SYSTEM, user=user, schema=WORK_MODE_SCHEMA, effort="low").data
+    data = llm.json(purpose="work mode", system=WORK_MODE_SYSTEM, user=user, schema=WORK_MODE_SCHEMA, effort="low").data
     mode = data.get("work_mode") if data.get("work_mode") in ("remote", "hybrid", "onsite") else "unknown"
     return mode, (data.get("evidence") or "")[:200] if mode != "unknown" else ""
 
@@ -228,7 +228,7 @@ def jobs_from_email(llm, subject, sender, text, links):
     """The postings in a job alert e-mail. links: [(text, url)]. Returns [{title, company, location, url}]."""
     link_lines = "\n".join("[%d] %s -> %s" % (i, t[:120], u) for i, (t, u) in enumerate(links[:150]))
     user = "<email>\nFrom: %s\nSubject: %s\n\n%s\n</email>\n\n<links>\n%s\n</links>" % (sender, subject, text[:15000], link_lines)
-    data = llm.json(system=MAIL_JOBS_SYSTEM, user=user, schema=MAIL_JOBS_SCHEMA, effort="low").data
+    data = llm.json(purpose="job alert e-mail", system=MAIL_JOBS_SYSTEM, user=user, schema=MAIL_JOBS_SCHEMA, effort="low").data
     known = {u for _, u in links}
     out = []
     for j in data.get("jobs", []):
@@ -267,7 +267,7 @@ def interview_from_email(llm, sender, subject, sent, text, calendar, tz_name, no
                 tz_name, now_local, ", ".join(companies[:60]) or "-", sender, sent, subject, text[:12000]))
     if calendar:
         user += "\n\n<calendar_invitation>\n%s\n</calendar_invitation>" % calendar[:4000]
-    return llm.json(system=INTERVIEW_MAIL_SYSTEM, user=user, schema=INTERVIEW_MAIL_SCHEMA, effort="low").data
+    return llm.json(purpose="interview e-mail", system=INTERVIEW_MAIL_SYSTEM, user=user, schema=INTERVIEW_MAIL_SCHEMA, effort="low").data
 
 
 RESEARCH_SYSTEM = """You prepare a job seeker for an interview. Search the web and write a short, practical briefing about the company and the interview, in English.
@@ -306,7 +306,7 @@ def tailor(llm, profile, job, description):
     user = ("<candidate_profile>\n%s\n</candidate_profile>\n\n<job_posting>\nTitle: %s\nCompany: %s\nLocation: %s\nURL: %s\n\n%s\n</job_posting>"
             % (json.dumps(facts, ensure_ascii=False, indent=1), job["title"], job["company"], job["location"] or "-",
                job["url"], description or "(The full posting text is not available; work from the title and company.)"))
-    done = llm.json(system=SYSTEM, user=user, schema=SCHEMA, effort="high", timeout=300.0)
+    done = llm.json(purpose="tailored CV", system=SYSTEM, user=user, schema=SCHEMA, effort="high", timeout=300.0)
     data = done.data
     data["_model"] = done.model
     return data
@@ -620,7 +620,7 @@ def profile_from_text(llm, text):
         raise CVError("The CV text is too long (max. %d characters)." % MAX_CV_CHARS)
     if not llm:
         raise CVError("No AI key is set (Settings → AI).")
-    data = llm.json(system=PROFILE_SYSTEM, user="<cv>\n%s\n</cv>" % text, schema=PROFILE_SCHEMA, effort="medium",
+    data = llm.json(purpose="CV profile import", system=PROFILE_SYSTEM, user="<cv>\n%s\n</cv>" % text, schema=PROFILE_SCHEMA, effort="medium",
                     timeout=300.0, max_tokens=12000).data
     if not data.get("name") or not data.get("experience"):
         raise CVError("Could not extract the name or work experience from the CV.")

@@ -9,6 +9,7 @@ import urllib.request
 from email.message import EmailMessage
 
 from jobwatch.env import log
+from jobwatch.services.activity import record
 
 
 class Notifier:
@@ -22,7 +23,12 @@ class Notifier:
             body["click"] = click
         req = urllib.request.Request(n["server"].rstrip("/") + "/", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "User-Agent": "jobwatch"})
-        urllib.request.urlopen(req, timeout=20).read()
+        try:
+            urllib.request.urlopen(req, timeout=20).read()
+        except Exception as ex:
+            record("notify", "Push FAILED: %s (%s)" % (title[:80], ex), level="warn", channel="push", ok=False, error=str(ex))
+            raise
+        record("notify", "Push sent: %s" % title[:100], channel="push", ok=True, priority=priority)
 
 
     def email(self, cfg, subject, text, html_body=None, to=None, attachments=()):
@@ -42,6 +48,7 @@ class Notifier:
             s.starttls(context=ssl.create_default_context())
             s.login(m["username"], m["password"])
             s.send_message(msg)
+        record("notify", "E-mail sent: %s" % subject[:100], channel="email", ok=True, to=msg["To"])
 
 
     def new_jobs(self, cfg, jobs):

@@ -13,6 +13,7 @@ from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.llm import llm_for
 from jobwatch.repositories.interviews import InterviewRepository
+from jobwatch.services.activity import record
 from jobwatch.services.interviews.core import fmt_iv_when, interview_cfg, notify_interview, researcher
 from jobwatch.services.interviews.ics import meeting_link, parse_ics
 from jobwatch.services.state import IV_LOCK
@@ -355,6 +356,8 @@ def scan_interview_mails():
             log.warning("Interview e-mail errors: %s", "; ".join(errs))
         msg = "%d e-mail(s) checked: %d new interview(s)%s." % (len(mails), len(added),
                                                                (", %d changed" % changed) if changed else "")
+        record("interview", "Mailbox scan: " + msg + (" Errors: %s" % "; ".join(errs)[:300] if errs else ""),
+               level="warn" if errs else "info", checked=len(mails), added=len(added), changed=changed, errors=errs)
         return msg + (" Errors: %s" % "; ".join(errs)[:300] if errs else "")
     finally:
         IV_LOCK.release()

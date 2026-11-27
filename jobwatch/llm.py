@@ -6,6 +6,7 @@ The company research needs web search, which only Claude offers, so it goes to a
 import json
 import os
 import re
+import time
 import urllib.error
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ class Completion:
     data: dict       # the answer, already checked against the schema
     model: str       # the model that wrote it
     provider: str    # "deepseek" or "anthropic"
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 # ---------------------------------------------------------------- checking an answer against a schema
@@ -116,7 +119,9 @@ class DeepSeekProvider(Provider):
         err = schema_error(schema, data)
         if err:
             raise LlmError("DeepSeek's answer does not fit: %s." % err)
-        return Completion(data, reply.get("model") or self.model, self.name)
+        usage = reply.get("usage") or {}
+        return Completion(data, reply.get("model") or self.model, self.name, usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0))
 
     def _post(self, body, timeout):
         try:
@@ -160,7 +165,8 @@ class AnthropicProvider(Provider):
                             messages=[{"role": "user", "content": user}])
         self._check(resp)
         data = parse_json_answer("".join(b.text for b in resp.content if b.type == "text"))
-        return Completion(data, resp.model, self.name)
+        usage = getattr(resp, "usage", None)
+        return Completion(data, resp.model, self.name, getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0)
 
     def research(self, system, user, timeout=600.0):
         """(text, sources): a briefing written with Claude's web search and page reading. A long turn the server
@@ -236,6 +242,13 @@ def research_sources(blocks):
 
 
 # ---------------------------------------------------------------- the router
+def _no_observer(provider, purpose, seconds, error=None, completion=None, fell_back_from=None):
+    """What a call to the models reports to (see services.activity.model_call); the server sets the real one."""
+
+
+observer = _no_observer
+
+
 class Llm:
     """The providers in the order they are tried. Falsy when no key is set at all."""
 
@@ -253,25 +266,39 @@ class Llm:
     def names(self):
         return [p.label for p in self.providers]
 
-    def json(self, **request):
-        """A Completion from the first provider that can answer; when all fail, one error that lists why."""
+    def json(self, purpose="", **request):
+        """A Completion from the first provider that can answer; when all fail, one error that lists why. `purpose`
+        says what it is for, in the activity log."""
         if not self.providers:
             raise LlmError("No AI key is set (Settings → AI).")
-        errors = []
+        errors, failed = [], None
         for provider in self.providers:
+            started = time.monotonic()
             try:
-                return provider.json(**request)
+                done = provider.json(**request)
             except LlmError as ex:
+                observer(provider, purpose, time.monotonic() - started, error=str(ex), fell_back_from=failed)
                 errors.append("%s: %s" % (provider.label, ex))
+                failed = provider.label
                 if provider is not self.providers[-1]:
                     log.warning("%s failed (%s); trying %s", provider.label, ex, self.providers[self.providers.index(provider) + 1].label)
+                continue
+            observer(provider, purpose, time.monotonic() - started, completion=done, fell_back_from=failed)
+            return done
         raise LlmError(errors[0] if len(errors) == 1 else "; ".join(errors))
 
     def research(self, system, user, timeout=600.0):
         """(text, sources) from a provider that can search the web."""
         for provider in self.providers:
             if provider.searches_web:
-                return provider.research(system, user, timeout)
+                started = time.monotonic()
+                try:
+                    text, sources = provider.research(system, user, timeout)
+                except LlmError as ex:
+                    observer(provider, "company research", time.monotonic() - started, error=str(ex))
+                    raise
+                observer(provider, "company research", time.monotonic() - started)
+                return text, sources
         raise LlmError("The company research needs web search: add an Anthropic API key (Settings → AI).")
 
 

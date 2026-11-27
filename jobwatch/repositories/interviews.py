@@ -1,4 +1,5 @@
 """Interviews in the database."""
+from jobwatch.repositories.events import EventRepository
 from jobwatch.repositories.jobs import JobRepository
 from jobwatch.util.timeutil import now_iso
 
@@ -34,10 +35,13 @@ class InterviewRepository:
             (job_id, (company or "")[:120], (role or "")[:200], start.isoformat(timespec="minutes"), int(minutes or 60),
              (place or "")[:500], (people or "")[:500], (notes or "")[:4000], source, uid or "", msgid or "",
              now_iso(), now_iso()))
+        EventRepository(self.con).add("interview", "Interview added (%s): %s%s" % (source, company, (" – " + role) if role else ""),
+                                      job_id=job_id, interview_id=cur.lastrowid, starts=start.isoformat(timespec="minutes"),
+                                      place=place, source_of=source)
         if job_id:
             st = self.con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
             if st and st["status"] in ("new", "seen", "saved"):
-                JobRepository(self.con).set_status(job_id, "applied")
+                JobRepository(self.con).set_status(job_id, "applied", by="interview added")
         return cur.lastrowid
 
     def update(self, iid, **fields):

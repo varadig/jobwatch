@@ -50,7 +50,7 @@ function refreshCard(card, what) {
 var LABEL = {hidden: "hidden", seen: "marked seen", saved: "saved", applied: "marked applied", "new": "marked new"};
 function post(form, submitter) {
   var fd = new FormData(form, submitter);
-  return fetch(form.action, {method: "POST", body: new URLSearchParams(fd)}).then(function () { return fd; });
+  return fetch(form.action, {method: "POST", body: new URLSearchParams(fd), headers: {"X-Requested-With": "jobwatch"}}).then(function () { return fd; });
 }
 // buttons on the cards
 document.addEventListener("submit", function (ev) {

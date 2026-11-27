@@ -242,3 +242,11 @@ section.ui-section{scroll-margin-top:70px}
 .rc-alert{margin:10px 0 0 50px}
 @media (max-width:700px){.ui-grid,.ui-grid3{grid-template-columns:1fr}.rc-role,.rc-fields,.rc-actions,.rc-alert{margin-left:0}
   .rc-who .badges{display:none}.rc-sent .hide-sm{display:none}}
+.lg-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.lg td{font-size:13.5px}.lg td.when{white-space:nowrap;color:var(--muted);font-family:var(--font-mono,ui-monospace,monospace);font-size:12.5px}
+.lg tr.lg-warn td{background:var(--warn-soft)}.lg tr.lg-error td{background:var(--bad-soft)}
+.lg-job{margin-right:4px}.lg-det{margin-top:4px}.lg-det summary{cursor:pointer;color:var(--muted);font-size:12.5px}
+.lg-det pre{margin:6px 0 0;padding:8px 10px;background:var(--soft);border-radius:8px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+.lg-kinds{padding:0}.lg-kinds>summary{cursor:pointer;padding:14px 18px;font-weight:650}.lg-kinds ul{margin:0;padding:0 18px 16px 36px;list-style:disc;font-size:13.5px}
+.hist{margin:8px 0;padding:0;list-style:none;font-size:13px}.hist li{padding:3px 0;border-bottom:1px solid var(--line)}.hist .when{color:var(--muted);font-family:var(--font-mono,ui-monospace,monospace);font-size:12px;margin-right:6px}
+.ui .lg-filters select.select,.ui .lg-filters input.input{width:auto}

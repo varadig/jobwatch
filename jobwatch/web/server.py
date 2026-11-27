@@ -4,11 +4,16 @@ import base64
 import os
 import secrets
 import threading
+import traceback
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from jobwatch import llm
 from jobwatch.config import config_store
 from jobwatch.db import database
-from jobwatch.env import PORT, log
+from jobwatch.env import PORT, add_log_file, log
+from jobwatch.repositories.events import EventRepository
+from jobwatch.services.activity import model_call, record
 from jobwatch.services.documents import backfill_docs, restore_cv_jobs
 from jobwatch.services.interviews.loop import interview_loop
 from jobwatch.services.refresh import scheduler
@@ -51,10 +56,16 @@ def dispatch(req, router=ROUTER):
         return Response.html(page("Not found", "<p>404</p>"), 404)
     req.params = params
     try:
-        return route.action(req)
+        resp = route.action(req)
     except Exception as ex:
         log.exception("%s %s failed", req.method, req.path)
+        record("error", "%s %s failed: %s" % (req.method, req.path, ex), level="error", method=req.method, path=req.path,
+               error=str(ex), traceback=traceback.format_exc()[-3000:])
         return Response.html(page("Error", "<p class=err>%s</p>" % e(ex)), 500)
+    if req.method == "POST":   # what was changed from the pages (the path only, never what was typed)
+        record("post", "POST %s → %d" % (urllib.parse.unquote(req.path), resp.status), method="POST", path=req.path, status=resp.status,
+               fields=req.form_fields())
+    return resp
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -86,10 +97,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    add_log_file()
     database.init()
     database.migrate()
     restore_cv_jobs()
     threading.Thread(target=backfill_docs, daemon=True).start()
+    llm.observer = model_call   # every call to a language model goes to the activity log
+    with database.connect() as con:
+        pruned = EventRepository(con).prune()
+        if pruned:
+            log.info("Activity log: %d old event(s) deleted", pruned)
     with config_store.lock:
         cfg = config_store.load()
     log.info("jobwatch starting: port %d, ntfy topic: %s", PORT, cfg["ntfy"]["topic"])

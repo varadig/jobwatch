@@ -209,7 +209,7 @@ def cv_generate(jid, description):
             # documents made: you have (probably) applied
             r = con.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
             if r and (r["status"] or "new") in ("new", "seen"):
-                JobRepository(con).set_status(jid, "applied")
+                JobRepository(con).set_status(jid, "applied", by="the CV was generated")
     except Exception as ex:
         log.exception("CV generation error")
         with database.connect() as con:
@@ -312,7 +312,7 @@ class Applications:
             return "Sending error: %s" % ex
         with database.connect() as con:
             con.execute("UPDATE cvs SET sent_to=?, sent_at=? WHERE job_id=?", (to, now_iso(), jid))
-            JobRepository(con).set_status(jid, "applied")
+            JobRepository(con).set_status(jid, "applied", by="the CV was e-mailed")
             cvrow = con.execute("SELECT * FROM cvs WHERE job_id=?", (jid,)).fetchone()
         try:
             write_job_info(os.path.dirname(paths["cv"]), job, json.loads(cvrow["data"]), cvrow)

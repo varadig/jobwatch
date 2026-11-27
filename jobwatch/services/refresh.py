@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 
 from jobwatch.config import config_store
 from jobwatch.db import database
-from jobwatch.domain.identity import dup_key, url_key
+from jobwatch.domain.identity import dup_key, mark_keys, url_key
 from jobwatch.domain.scoring import score_job
 from jobwatch.domain.workmode import classify_mode_ex
 from jobwatch.env import log
+from jobwatch.repositories.events import EventRepository
 from jobwatch.repositories.jobs import JobRepository
+from jobwatch.services.activity import record
 from jobwatch.services.documents import restore_cv_jobs
 from jobwatch.services.enrich import enrich_pending_linkedin, enrich_work_modes
 from jobwatch.services.logos import fetch_logos, remember_logo
@@ -36,12 +38,16 @@ def clear_for_new_search():
     """Deletes the postings the old search found, except what you worked with, and forgets the source state
     (so the first run after it seeds without a flood of notifications). Returns how many were deleted."""
     with database.connect() as con:
+        marks = con.execute("SELECT COUNT(*) n FROM job_marks").fetchone()["n"]
         n = con.execute(
             "DELETE FROM jobs WHERE source NOT IN ('mail','manual') AND COALESCE(status,'new') IN ('new','seen') "
             "AND id NOT IN (SELECT job_id FROM cvs WHERE job_id IS NOT NULL) "
             "AND id NOT IN (SELECT job_id FROM outreach WHERE job_id IS NOT NULL)").rowcount
         con.execute("UPDATE jobs SET dup_of=NULL WHERE dup_of IS NOT NULL AND dup_of NOT IN (SELECT id FROM jobs)")
         con.execute("DELETE FROM source_state WHERE source NOT IN ('mail')")
+        kept = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
+        EventRepository(con).add("new_search", "The search settings changed: %d postings cleared, %d kept (%d remembered decisions stay)" % (
+            n, kept, marks), deleted=n, kept=kept, remembered_decisions=marks)
     return n
 
 
@@ -61,6 +67,11 @@ def reset_job_cache():
     """Deletes the found postings and the source status, and forgets which alert e-mails were read, so the
     next refresh reads those e-mails again (otherwise their postings would not come back)."""
     with database.connect() as con:
+        before = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
+        marks = con.execute("SELECT status, COUNT(*) n FROM job_marks GROUP BY status").fetchall()
+        EventRepository(con).add("cache_cleared", "The job cache was cleared: %d postings deleted; remembered decisions kept: %s" % (
+            before, ", ".join("%d %s" % (m["n"], m["status"]) for m in marks) or "none"), deleted=before,
+            remembered_decisions={m["status"]: m["n"] for m in marks})
         con.execute("DELETE FROM jobs")
         con.execute("DELETE FROM source_state")
         con.execute("DELETE FROM mail_seen")
@@ -89,11 +100,16 @@ class Refresher:
                 only = set(only or ()) | {"custom"}
             due = self.due(cfg, force, only)
             STATE["progress"] = {"total": len(due), "done": 0, "sources": {s.key: "fetching" for s, _ in due}}
-            to_notify = []
-            for source, seeded, items, err in self._fetch_all(cfg, due):
-                to_notify += self._save(cfg, source, seeded, items, err)
+            to_notify, started, totals = [], time.monotonic(), {"found": 0, "new": 0, "errors": 0}
+            for source, seeded, items, err, seconds in self._fetch_all(cfg, due):
+                to_notify += self._save(cfg, source, seeded, items, err, seconds, totals)
             self._notify(cfg, to_notify)
             self._follow_up(cfg, due)
+            if due:   # the scheduler asks every minute; only a refresh that fetched something is worth a line
+                record("refresh", "Refresh done: %d source(s), %d postings found, %d new, %d notified, %d error(s), %.0f s" % (
+                    len(due), totals["found"], totals["new"], len(to_notify), totals["errors"], time.monotonic() - started),
+                    level="warn" if totals["errors"] else "info", forced=bool(force or only is not None),
+                    sources=[s.key for s, _ in due], notified=len(to_notify), **totals)
         finally:
             STATE["running"] = False
             STATE["last_run"] = now_iso()
@@ -127,34 +143,41 @@ class Refresher:
         """Fetches the sources in parallel; yields (source, seeded, items, error) as each one finishes."""
         if not due:
             return
+        started = time.monotonic()
         pool = ThreadPoolExecutor(max_workers=len(due))
         futs = {pool.submit(source.fetch, cfg): (source, seeded) for source, seeded in due}
         pool.shutdown(wait=False)
         for fut in as_completed(futs):
             source, seeded = futs[fut]
+            seconds = time.monotonic() - started
             try:
-                yield source, seeded, fut.result(), None
+                yield source, seeded, fut.result(), None, seconds
             except Exception as ex:
                 log.exception("Source error: %s", source.key)
-                yield source, seeded, [], "%s: %s" % (type(ex).__name__, ex)
+                yield source, seeded, [], "%s: %s" % (type(ex).__name__, ex), seconds
 
-    def _save(self, cfg, source, seeded, items, err):
+    def _save(self, cfg, source, seeded, items, err, seconds=0.0, totals=None):
         """Saves one source's postings and its status. Returns the new postings to notify about."""
         ts = now_iso()
         keywords = source.search_filter(cfg)
-        new = skipped = 0
+        counts = {"new": 0, "known": 0, "duplicate": 0, "skipped": 0, "unusable": 0}
         to_notify = []
         with database.connect() as con:
             for it in items:
                 if not it.get("title") or not it.get("url", "").startswith("http"):
+                    counts["unusable"] += 1
                     continue
                 outcome = self._save_posting(con, cfg, source, seeded, it, ts, keywords)
-                if outcome == "skipped":
-                    skipped += 1
-                elif outcome:
-                    new += 1
-                    if isinstance(outcome, dict):
-                        to_notify.append(outcome)
+                if isinstance(outcome, dict):
+                    to_notify.append(outcome)
+                    outcome = "new"
+                counts[outcome] += 1
+            new, skipped = counts["new"], counts["skipped"]
+            EventRepository(con).add(
+                "source_run", "%s: %d found, %d new, %d already known, %d merged as duplicates, %d not matching the search%s" % (
+                    source.label, len(items), new, counts["known"], counts["duplicate"], skipped,
+                    (", ERROR: " + err) if err else ""), source=source.key, level="warn" if err else "info",
+                found=len(items), seconds=round(seconds, 1), error=err, filtered_by=keywords or None, **counts)
             con.execute(
                 "INSERT INTO source_state(source,last_run,last_ok,found,new,error,seeded) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(source) DO UPDATE SET last_run=excluded.last_run, "
@@ -168,12 +191,16 @@ class Refresher:
         prog["sources"][source.key] = ("error" if err else "done") + " (%d)" % len(items)
         log.info("%s: %d postings, %d new%s%s", source.key, len(items), new,
                  (", %d not matching the search" % skipped) if skipped else "", " ERROR: " + err if err else "")
+        if totals is not None:
+            totals["found"] += len(items)
+            totals["new"] += new
+            totals["errors"] += 1 if err else 0
         return to_notify
 
     @staticmethod
     def _save_posting(con, cfg, source, seeded, it, ts, keywords):
-        """Saves one posting. Returns None (already known, or a duplicate), "skipped" (not matching the search),
-        True (new) or, for a new one to notify about, its summary."""
+        """Saves one posting. Returns "known" (already in the list), "duplicate" (the same as one from another
+        source), "skipped" (not matching the search), "new" or, for a new one to notify about, its summary."""
         name = source.key
         jobs = JobRepository(con)
         jid = "%s:%s" % (name, it["ext_id"])
@@ -196,13 +223,13 @@ class Refresher:
                 con.execute("UPDATE jobs SET last_seen=? WHERE id=?", (ts, jid))
             if wm != "unknown" and (msrc == "source" or not keep) and (known["mode_src"] or "") != "manual":
                 con.execute("UPDATE jobs SET work_mode=?, mode_src=?, mode_note=? WHERE id=?", (wm, msrc, mnote, jid))
-            return None
+            return "known"
         if not source.keeps(keywords, it):
             return "skipped"   # this source lists everything: keep only what matches a search term
         same = jobs.find_duplicate(it["title"], it["company"], it["url"])
         if same:
             jobs.merge_into(same, name, it)   # already listed from another source
-            return None
+            return "duplicate"
         kept = jobs.remembered_status(jid, url_key(it["url"]), dup)   # hidden / saved / applied before
         hand = jobs.remembered_mode(jid, url_key(it["url"]), dup)     # a work mode you set by hand before
         if hand:
@@ -216,8 +243,21 @@ class Refresher:
             (jid, name, it["title"], it["company"], it["location"], it["url"], it["posted"],
              it.get("description", ""), sc, ", ".join(hits), dup, ts, ts, kept or "new", notified, wm,
              url_key(it["url"]), msrc, mnote))
+        keys = mark_keys(jid, url_key(it["url"]), dup)
+        jobs.events.add("job_new", "New from %s: %s%s (score %d)" % (source.label, it["title"], (" – " + it["company"]) if it.get("company") else "", sc),
+                        job_id=jid, ref=dup, source=name, title=it["title"], company=it.get("company"), url=it["url"], score=sc,
+                        status=kept or "new", work_mode=wm, notify=not notified, keys=keys)
+        if kept:
+            jobs.events.add("restored", "Came back as '%s' (you had decided this before): %s" % (kept, it["title"]), job_id=jid, ref=dup,
+                            source=name, status=kept, keys=keys)
+        else:
+            similar = jobs.similar_hidden(it["title"], it.get("company"))
+            if similar:   # the case to investigate: looks like one you hid, but no id, link or title + company matched
+                jobs.events.add("possible_repeat", "Looks like a posting you hid, but was not recognised: %s (%s)" % (
+                    it["title"], it.get("company") or "no company"), job_id=jid, ref=dup, source=name, level="warn",
+                    new_keys=keys, hidden_before=similar, url=it["url"])
         if notified:
-            return True
+            return "new"
         return dict(id=jid, source=name, score=sc, **{k: it[k] for k in ("title", "company", "location", "url")})
 
     @staticmethod

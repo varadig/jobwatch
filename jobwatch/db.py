@@ -65,7 +65,14 @@ class Database:
               research_at TEXT, research_error TEXT, created TEXT, updated TEXT);
             CREATE TABLE IF NOT EXISTS interview_mail_seen(
               msgid TEXT PRIMARY KEY, processed_at TEXT, found INTEGER);
-            CREATE TABLE IF NOT EXISTS source_state(
+            CREATE TABLE IF NOT EXISTS events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, kind TEXT, job_id TEXT, ref TEXT, source TEXT,
+          summary TEXT, detail TEXT);
+        CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+        CREATE INDEX IF NOT EXISTS events_job ON events(job_id);
+        CREATE INDEX IF NOT EXISTS events_ref ON events(ref);
+        CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
+        CREATE TABLE IF NOT EXISTS source_state(
               source TEXT PRIMARY KEY, last_run TEXT, last_ok TEXT, found INTEGER, new INTEGER,
               error TEXT, seeded INTEGER DEFAULT 0);
             """)

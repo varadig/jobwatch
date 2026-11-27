@@ -19,6 +19,7 @@ from jobwatch.util.timeutil import bucket_of, days_ago, fmt_dt, parse_dt, rel_da
 from jobwatch.web.components import (
     STATUS_BUTTONS, ic, logo_html, mode_picker, mode_quick, page, progress_html, script, wm_html
 )
+from jobwatch.web.views.log import history_html
 
 
 def jobs_page(q):
@@ -252,7 +253,7 @@ def job_detail_html(jid, back="/", modal=False):
     with database.connect() as con:
         r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         if r and r["status"] == "new":
-            JobRepository(con).set_status(jid, "seen")   # opened: seen (remembered)
+            JobRepository(con).set_status(jid, "seen", by="opened the details")   # opened: seen (remembered)
             r = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
         has_cv = bool(r and con.execute("SELECT 1 FROM cvs WHERE job_id=? AND status='done'", (jid,)).fetchone())
     if not r:
@@ -290,14 +291,14 @@ def job_detail_html(jid, back="/", modal=False):
             '<div class="jd-acts">%s<a class="btn btn-sm btn-outline" href="/open/%s" target="_blank" rel="noopener noreferrer">'
             'Open the original %s</a><form method="post" action="/job/%s" class="jd-status">'
             '<input type="hidden" name="next" value="%s">%s</form></div>'
-            '<details class="why"><summary>Why this score?</summary>%s</details></div></section>'
+            '<details class="why"><summary>Why this score?</summary>%s</details>%s</div></section>'
             '<section class="ui-section" aria-labelledby="jd-post-h"><header><div><h2 id="jd-post-h">The posting</h2>'
             '<p class="ui-desc" id="jd-src">%s</p></div></header><div class="ui-body"><div class="jd-text" id="jd-text"%s>%s</div>'
             '</div></section></div>') % (
         "" if modal else '<a class="btn btn-sm btn-ghost" href="%s">%s Back to the list</a>' % (e(back), ic("arrow_back")),
         logo_html(r["company"], logo_files(), 56), e(r["title"]), e(r["company"] or "?"),
         e(SOURCES_INFO.get(r["source"], (r["source"],))[0]), cls, sc, "".join(chips), cv_btn, qid, ic("open_in_new"), qid, e(back), acts,
-        e(r["matched"] or "-"),
+        e(r["matched"] or "-"), history_html(jid, r["dupkey"]),
         "Loading the full posting from its page…" if loading else "From the posting's own page.",
         ' data-preview="/job/%s/preview"' % qid if loading else "",
         text or '<p class="muted">No text stored for this posting yet.</p>')

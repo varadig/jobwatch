@@ -26,6 +26,11 @@ It is built on the Python standard library. CV PDFs need `reportlab`.
   (cheap: a tailored CV costs about a cent), Claude is the fallback, or the other way round. If the first one fails
   (no balance, a malformed answer), the other is asked. The company research for interviews needs web search, which
   only Claude has. "Save and test the AI connection" checks the keys at once.
+- **Log:** the Log tab shows what jobwatch did and why, kept for 90 days: every status change of a posting (and what
+  caused it), every refresh and source, every model call (which model answered, how long, tokens, errors, fallbacks),
+  notifications, interviews and errors. A posting's detail view has its own History. "possible_repeat" lines mark a new
+  posting that looks like one you hid but was not recognised as the same. Export gives the matching events as JSON lines;
+  `data/logs/jobwatch.log` is the same as plain text.
 - **Optional boards** (off until you switch them on in Settings): Remote OK, We Work Remotely, Himalayas,
   Jobicy, Working Nomads, Arbeitnow (EU, mostly Germany), and for games Remote Game Jobs and Work With Indies.
   The boards that list every trade keep only the postings that match a search term (a word of it in the title).

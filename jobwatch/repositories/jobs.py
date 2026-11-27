@@ -1,6 +1,9 @@
 """Postings in the database: your decisions on them (remembered across a cleared cache), and duplicates."""
+import re
+
 from jobwatch.domain.identity import dup_key, mark_keys, url_key
 from jobwatch.models import KEPT_STATUSES, SOURCES_INFO
+from jobwatch.repositories.events import EventRepository
 from jobwatch.util.timeutil import now_iso
 
 
@@ -13,6 +16,7 @@ class JobRepository:
 
     def __init__(self, con):
         self.con = con
+        self.events = EventRepository(con)
 
     def _keys_of(self, jid):
         r = self.con.execute("SELECT title, company, urlkey, dupkey FROM jobs WHERE id=?", (jid,)).fetchone()
@@ -25,9 +29,15 @@ class JobRepository:
             self.con.executemany("INSERT OR REPLACE INTO %s(k, %s, title, company, at) VALUES(?,?,?,?,?)" % (table, column),
                                  [(k, value, r["title"] if r else "", r["company"] if r else "", now_iso()) for k in keys])
             return
+        had = self.con.execute("SELECT COUNT(*) n FROM %s WHERE k IN (%s)" % (table, ",".join("?" * len(keys))), keys).fetchone()["n"] if keys else 0
         self.con.executemany("DELETE FROM %s WHERE k=?" % table, [(k,) for k in keys])
+        copies = 0
         if r and r["title"]:   # also the copies of the same posting from other sources
-            self.con.execute("DELETE FROM %s WHERE title=? AND COALESCE(company,'')=?" % table, (r["title"], r["company"] or ""))
+            copies = self.con.execute("DELETE FROM %s WHERE title=? AND COALESCE(company,'')=?" % table,
+                                      (r["title"], r["company"] or "")).rowcount
+        if had or copies:
+            self.events.add("mark_forgot", "Forgot the remembered %s of: %s" % (column, (r["title"] if r else "") or jid),
+                            job_id=jid, ref=r["dupkey"] if r else None, table=table, keys=keys, marks_deleted=had + copies)
 
     def _recall(self, table, column, jid, urlkey, dupkey):
         keys = mark_keys(jid, urlkey, dupkey)
@@ -37,10 +47,17 @@ class JobRepository:
             column, table, ",".join("?" * len(keys))), keys).fetchone()
         return r[column] if r else None
 
-    def set_status(self, jid, status):
-        """Sets a posting's status and remembers it (new / seen: forgets it)."""
+    def set_status(self, jid, status, by="you"):
+        """Sets a posting's status and remembers it (new / seen: forgets it). `by` says what caused it, for the log."""
+        before = self.con.execute("SELECT status, title, company, source, dupkey, urlkey FROM jobs WHERE id=?", (jid,)).fetchone()
         self.con.execute("UPDATE jobs SET status=? WHERE id=?", (status, jid))
         self._remember("job_marks", "status", jid, status if status in KEPT_STATUSES else None)
+        old = (before["status"] or "new") if before else None
+        if old != status:
+            title = before["title"] if before else ""
+            self.events.add("status", "%s → %s: %s%s" % (old or "?", status, title or jid, (" (%s)" % before["company"]) if before and before["company"] else ""),
+                            job_id=jid, ref=before["dupkey"] if before else None, source=before["source"] if before else None,
+                            **{"from": old, "to": status, "by": by, "keys": mark_keys(jid, before["urlkey"] if before else "", before["dupkey"] if before else "")})
 
     def remembered_status(self, jid, urlkey, dupkey):
         return self._recall("job_marks", "status", jid, urlkey, dupkey)
@@ -62,6 +79,9 @@ class JobRepository:
         also = [s for s in (row["also_sources"] or "").split(",") if s]
         if source != row["source"] and source not in also:
             also.append(source)
+        self.events.add("duplicate", "Also from %s, merged into the posting already listed (%s): %s" % (
+            SOURCES_INFO.get(source, (source,))[0], row["id"], it.get("title") or ""), job_id=row["id"], source=source,
+            kept_id=row["id"], kept_source=row["source"], title=it.get("title"), company=it.get("company"), url=it.get("url"))
         self.con.execute("UPDATE jobs SET also_sources=?, company=CASE WHEN COALESCE(company,'')='' THEN ? ELSE company END, "
                          "description=CASE WHEN COALESCE(description,'')='' THEN ? ELSE description END WHERE id=?",
                          (",".join(also), it.get("company") or "", it.get("description") or "", row["id"]))
@@ -99,4 +119,20 @@ class JobRepository:
                     also.append(m["source"])
             keep["also_sources"] = ",".join(also)
             self.con.execute("UPDATE jobs SET also_sources=? WHERE id=?", (keep["also_sources"], keep["id"]))
+        if hidden:
+            self.events.add("dedupe", "%d duplicate posting(s) in the list were hidden behind the ones you worked on" % hidden, count=hidden)
         return hidden
+
+    def similar_hidden(self, title, company):
+        """Hidden postings that look like this one (same company, nearly the same title): the marks a refresh did not
+        match by id, link or title + company. [{title, company, at, keys}]; used to log a possible repeat."""
+        words = lambda t: {w for w in re.findall(r"[a-z0-9#+.]+", (t or "").lower()) if len(w) > 2}
+        mine = words(title)
+        out = {}
+        for m in self.con.execute("SELECT k, title, company, at FROM job_marks WHERE status='hidden' AND lower(COALESCE(company,''))=lower(?)",
+                                  (company or "",)):
+            theirs = words(m["title"])
+            if mine and theirs and len(mine & theirs) / min(len(mine), len(theirs)) >= 0.8:
+                entry = out.setdefault((m["title"], m["company"]), {"title": m["title"], "company": m["company"], "at": m["at"], "keys": []})
+                entry["keys"].append(m["k"])
+        return list(out.values())

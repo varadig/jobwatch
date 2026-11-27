@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -2031,3 +2032,167 @@ class ModelRouter(unittest.TestCase):
         self.assertIn("Save and test the AI connection", settings_view.settings_page())
         out = llm.llm_for(dict(cfg, llm={"primary": "deepseek", "deepseek_model": "nonsense"}))
         self.assertEqual(out.providers[0].model, "deepseek-chat")   # an unknown model falls back to the default
+
+
+class ActivityLog(unittest.TestCase):
+    def setUp(self):
+        database.init()
+        database.migrate()
+        with database.connect() as con:
+            for t in ("events", "jobs", "job_marks", "source_state"):
+                con.execute("DELETE FROM %s" % t)
+
+    def events(self, **kw):
+        from jobwatch.repositories.events import EventRepository
+        with database.connect() as con:
+            return EventRepository(con).query(**kw)
+
+    def add_job(self, jid, title="Unity Developer", company="Acme", url="https://x.test/1", status="new"):
+        from jobwatch.domain.identity import dup_key, url_key
+        with database.connect() as con:
+            con.execute("INSERT INTO jobs(id,source,title,company,url,status,dupkey,urlkey,score) VALUES(?,?,?,?,?,?,?,?,5)",
+                        (jid, "rss", title, company, url, status, dup_key(title, company, url), url_key(url)))
+
+    def test_every_status_change_is_logged_with_its_cause(self):
+        self.add_job("rss:1")
+        with database.connect() as con:
+            JobRepository(con).set_status("rss:1", "hidden", by="you, on the page")
+            JobRepository(con).set_status("rss:1", "hidden", by="again")           # no change: no line
+            JobRepository(con).set_status("rss:1", "new", by="you")
+        kinds = [(e["kind"], json.loads(e["detail"]).get("to")) for e in reversed(self.events(job_id="rss:1"))]
+        self.assertEqual(kinds, [("status", "hidden"), ("mark_forgot", None), ("status", "new")])
+        first = json.loads(self.events(kind="status", job_id="rss:1")[-1]["detail"])
+        self.assertEqual((first["from"], first["to"], first["by"]), ("new", "hidden", "you, on the page"))
+        self.assertTrue(any(k.startswith("id:rss:1") for k in first["keys"]))
+
+    def test_a_refresh_explains_what_it_did_with_each_posting(self):
+        from jobwatch.sources.base import JobSource
+        added = lambda title, company, url, ext: {"ext_id": ext, "title": title, "company": company, "location": "Remote", "url": url,
+                                                    "posted": "", "description": "Unity"}
+
+        class Feed(JobSource):
+            key = "rss"
+            items = []
+
+            def fetch(self, cfg):
+                return [dict(i) for i in self.items]
+        feed = Feed()
+        feed.items = [added("Senior Unity Developer", "Acme", "https://a.test/1", "1")]
+        cfg = config_store.load()
+        cfg["sources"] = {"rss": True}
+        refresher = refresh.Refresher([feed])
+        with mock.patch.object(config_store, "load", lambda: cfg), mock.patch.object(refresh, "fetch_logos", lambda: None), \
+                mock.patch.object(refresh, "enrich_work_modes", lambda c: None), mock.patch.object(refresh, "enrich_pending_linkedin", lambda c: None):
+            refresher.run(force=True)
+            with database.connect() as con:
+                JobRepository(con).set_status("rss:1", "hidden")
+            # the same job comes back with another id and link, and a slightly different title: not recognised
+            feed.items = [added("Senior Unity Developer - Games", "Acme", "https://b.test/other", "9"),
+                          added("Senior Unity Developer", "Acme", "https://a.test/1", "1")]   # the hidden one itself: known
+            refresher.run(force=True)
+        by_kind = {}
+        for ev in self.events(limit=100):
+            by_kind.setdefault(ev["kind"], []).append(ev)
+        self.assertEqual(len(by_kind["job_new"]), 2)
+        self.assertEqual(len(by_kind["source_run"]), 2)
+        runs = [json.loads(e["detail"]) for e in reversed(by_kind["source_run"])]
+        self.assertEqual((runs[0]["new"], runs[0]["found"]), (1, 1))
+        self.assertEqual((runs[1]["new"], runs[1]["known"]), (1, 1))
+        repeat = by_kind["possible_repeat"][0]
+        self.assertEqual((repeat["level"], repeat["job_id"]), ("warn", "rss:9"))
+        self.assertEqual(json.loads(repeat["detail"])["hidden_before"][0]["title"], "Senior Unity Developer")
+        self.assertEqual(len(by_kind["refresh"]), 2)
+
+    def test_a_remembered_decision_is_logged_as_restored(self):
+        self.add_job("rss:1")
+        with database.connect() as con:
+            JobRepository(con).set_status("rss:1", "hidden")
+            con.execute("DELETE FROM jobs")
+        from jobwatch.sources.base import JobSource
+
+        class Feed(JobSource):
+            key = "rss"
+
+            def fetch(self, cfg):
+                return [{"ext_id": "1", "title": "Unity Developer", "company": "Acme", "location": "", "url": "https://x.test/1",
+                         "posted": "", "description": ""}]
+        cfg = config_store.load()
+        cfg["sources"] = {"rss": True}
+        with mock.patch.object(config_store, "load", lambda: cfg), mock.patch.object(refresh, "fetch_logos", lambda: None), \
+                mock.patch.object(refresh, "enrich_work_modes", lambda c: None):
+            refresh.Refresher([Feed()]).run(force=True)
+        restored = self.events(kind="restored")
+        self.assertEqual(len(restored), 1)
+        self.assertIn("hidden", restored[0]["summary"])
+        with database.connect() as con:
+            self.assertEqual(con.execute("SELECT status FROM jobs WHERE id='rss:1'").fetchone()["status"], "hidden")
+
+    def test_clearing_says_what_was_deleted_and_kept(self):
+        self.add_job("rss:1")
+        with database.connect() as con:
+            JobRepository(con).set_status("rss:1", "hidden")
+        refresh.reset_job_cache()
+        ev = self.events(kind="cache_cleared")[0]
+        self.assertIn("1 postings deleted", ev["summary"])
+        self.assertEqual(json.loads(ev["detail"])["remembered_decisions"], {"hidden": 3})
+
+    def test_the_log_never_breaks_the_caller_and_old_events_go(self):
+        from jobwatch.repositories.events import EventRepository
+        con = sqlite3.connect(":memory:")   # no events table
+        con.row_factory = sqlite3.Row
+        EventRepository(con).add("status", "x")   # must not raise
+        with database.connect() as con:
+            con.execute("INSERT INTO events(ts, level, kind, summary) VALUES('2020-01-01T00:00:00+00:00','info','status','old')")
+            self.assertEqual(EventRepository(con).prune(90), 1)
+
+    def test_models_report_each_call_and_the_fallback(self):
+        calls = []
+
+        class Fails(llm.Provider):
+            name, label = "deepseek", "DeepSeek"
+
+            def json(self, **kw):
+                raise llm.LlmError("no balance")
+
+        class Works(llm.Provider):
+            name, label = "anthropic", "Claude"
+
+            def json(self, **kw):
+                return llm.Completion({"mode": "a"}, "claude-x", "anthropic", 120, 30)
+        with mock.patch.object(llm, "observer", lambda provider, purpose, seconds, **kw: calls.append((provider.name, purpose, kw.get("error"), kw.get("fell_back_from")))):
+            llm.Llm([Fails(), Works()]).json(purpose="tailored CV", system="s", user="u", schema={})
+        self.assertEqual(calls, [("deepseek", "tailored CV", "no balance", None), ("anthropic", "tailored CV", None, "DeepSeek")])
+        from jobwatch.services import activity
+        activity.model_call(Works(), "tailored CV", 2.5, completion=llm.Completion({}, "claude-x", "anthropic", 120, 30), fell_back_from="DeepSeek")
+        ev = self.events(kind="llm")[0]
+        self.assertIn("120 in / 30 out tokens", ev["summary"])
+        self.assertIn("after DeepSeek failed", ev["summary"])
+
+    def test_log_page_export_and_the_postings_history(self):
+        from jobwatch.web.views import log as log_view
+        self.add_job("rss:1", title="Haxe Developer")
+        with database.connect() as con:
+            JobRepository(con).set_status("rss:1", "hidden")
+        html_ = log_view.log_page({"q": "Haxe"})
+        self.assertIn("Haxe Developer", html_)
+        self.assertIn("hidden: Haxe Developer", html_) if False else self.assertIn("new → hidden", html_)
+        self.assertIn("What the kinds mean", html_)
+        self.assertEqual(len(log_view.query_events({"kind": "status"})), 1)
+        req = Request("GET", "/log/export?kind=status", {}, lambda n: b"")
+        resp = server.dispatch(req)
+        line = json.loads(resp.body.decode().strip().splitlines()[0])
+        self.assertEqual((line["kind"], line["detail"]["to"]), ("status", "hidden"))
+        self.assertIn("jobwatch-log-", dict(resp.headers)["Content-Disposition"])
+        _, detail = jobs_view.job_detail_html("rss:1")
+        self.assertIn("History", detail)
+        self.assertIn("new → hidden", detail)
+        self.assertTrue(server.ROUTER.match("GET", "/log")[0])
+
+    def test_posting_a_form_is_logged_without_its_values(self):
+        req = Request("POST", "/preset", {}, lambda n: b"")
+        req._form = {"preset_do": "load", "anthropic_api_key": "sk-secret"}
+        server.dispatch(req)
+        ev = self.events(kind="post")[0]
+        self.assertIn("/preset", ev["summary"])
+        self.assertNotIn("sk-secret", json.dumps(ev))
+        self.assertIn("anthropic_api_key", ev["detail"])   # the name of the field, never its value

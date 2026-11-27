@@ -10,6 +10,7 @@ from jobwatch.db import database
 from jobwatch.env import log
 from jobwatch.llm import llm_for
 from jobwatch.repositories.interviews import InterviewRepository
+from jobwatch.services.activity import record
 from jobwatch.services.documents import load_profile
 from jobwatch.services.notify import notifier
 from jobwatch.util.timeutil import now_iso, to_local
@@ -135,6 +136,8 @@ class Reminders:
                 if kind == "soon":
                     fields["reminded_soon"] = now_iso()
                 InterviewRepository(con).update(r["id"], **fields)
+            record("interview", "Reminder sent (%s): %s" % ("on the day" if kind == "day" else "shortly before", r["company"] or "?"),
+                   interview_id=r["id"], reminder=kind)
             sent.append((r["id"], kind))
         return sent
 
