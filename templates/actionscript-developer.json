@@ -35,6 +35,12 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "actionscript / as3",
+      "flash",
+      "adobe air / harman air",
+      "html5 game / html5 games"
+    ],
     "interests": [
       "actionscript / as3",
       "flash",

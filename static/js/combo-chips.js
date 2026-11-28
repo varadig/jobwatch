@@ -1,6 +1,14 @@
 // Settings → Presets: the combined presets as chips. Pick one from the list to add it, × removes it.
 (function () {
 var box = document.getElementById("combo_chips"), add = document.getElementById("combo_add");
+// × on a saved preset deletes it; the first click only arms the button
+document.querySelectorAll("#saved_presets button[name=preset_del]").forEach(function (b) {
+  b.addEventListener("click", function (ev) {
+    if (b.dataset.armed) return;
+    ev.preventDefault(); b.dataset.armed = "1"; b.textContent = "delete?";
+    setTimeout(function () { delete b.dataset.armed; b.textContent = "×"; }, 3000);
+  });
+});
 if (!box || !add) return;
 function label(key) { return JSON.parse(box.dataset.labels)[key] || key; }
 function chip(key) {

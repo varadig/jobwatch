@@ -35,6 +35,16 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "game designer / game design",
+      "systems designer / system designer",
+      "level designer",
+      "content designer",
+      "economy designer",
+      "narrative designer",
+      "quest designer / mission designer",
+      "combat designer"
+    ],
     "interests": [
       "game designer",
       "systems designer / system designer",

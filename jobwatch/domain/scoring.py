@@ -6,6 +6,7 @@ from jobwatch.util.text import term_re
 # Scoring: what interests you, as chips. In the ordered lists the position is the score (first = most points);
 # the other lists give the same points to every chip. "unity / unity3d": words that count as one.
 SCORING_KINDS = {  # kind: (points by position, points after the table / for every chip)
+    "must": ((), 0),                                  # title or description: at least one must be there, or the posting is hidden
     "interests": ((6, 5, 4, 4, 3, 3, 2, 2, 2), 1),   # in the job title
     "desc": ((3, 2), 1),                              # in the description, at most DESC_MAX together
     "less": ((), -3),                                 # in the title: less relevant
@@ -16,6 +17,7 @@ SCORING_KINDS = {  # kind: (points by position, points after the table / for eve
 
 
 DESC_MAX = 4
+MUST_MISSING = -50   # no required keyword found: far below any minimum score, so the posting stays hidden
 
 
 def chip_points(kind, rank):
@@ -71,6 +73,9 @@ def _score_one(cfg, j):
     title = (j.get("title") or "").lower()
     body = " ".join([(j.get("description") or ""), (j.get("company") or "")]).lower()
     score, hits, seen = 0, [], set()
+    if rules["must"] and not any(_hit(alts, title + " " + body) for alts, _ in rules["must"]):
+        score += MUST_MISSING
+        hits.append("required keyword missing(%d)" % MUST_MISSING)
     for alts, w in rules["interests"]:
         a = _hit(alts, title)
         if a:

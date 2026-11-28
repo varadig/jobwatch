@@ -4,7 +4,7 @@ import json
 from jobwatch.config import config_store
 from jobwatch.domain.scoring import DESC_MAX, SCORING_KINDS
 from jobwatch.models import FETCHED_SOURCES, SOURCES_INFO, WORK_MODES
-from jobwatch.services.presets import NEW_PRESET, preset_label, template_presets
+from jobwatch.services.presets import preset_label, template_presets
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH
 from jobwatch.sources.registry import OPTIONAL_BOARDS, SEARCH_FILTERABLE
 from jobwatch.util.text import e
@@ -119,53 +119,33 @@ def settings_page(flash=""):
         test("mail", "Save and test e-mail alerts"))
     own += mail
 
-    mine, tpls, active = sorted(cfg.get("presets") or {}), template_presets(), cfg.get("active_preset") or ""
-    sel = lambda v: " selected" if v == active else ""
-    opts = (('<option value=""%s>None (custom settings)</option>' % ("" if active in mine or active[4:] in tpls else " selected"))
-            + ('<optgroup label="My presets">%s</optgroup>' % "".join('<option value="%s"%s>%s</option>' % (
-                e(n), sel(n), e(n)) for n in mine) if mine else "")
-            + '<optgroup label="Templates (read-only)">%s</optgroup>' % "".join(
-                '<option value="tpl:%s"%s>%s</option>' % (e(n), sel("tpl:" + n), e(n)) for n in tpls))
-    pdata = dict({n: (cfg.get("presets") or {})[n] for n in mine}, **{"tpl:" + n: t for n, t in tpls.items()})
-    pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
-                                       % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
-    combo = [k for k in cfg.get("combined_presets") or [] if k != active and (k in mine or k[4:] in tpls)]
+    mine, tpls = sorted(cfg.get("presets") or {}), template_presets()
     every = mine + ["tpl:" + n for n in tpls]
+    combo = [k for k in cfg.get("combined_presets") or [] if k in every]
     combo_chips = "".join('<span class="chip" role="listitem" data-key="%s"><input type="hidden" name="combo:%s" value="on">%s</span>' % (
         e(k), e(k), e(preset_label(k))) for k in combo)
-    combo_add = "".join('<option value="%s">%s</option>' % (e(k), e(preset_label(k))) for k in every if k not in combo and k != active)
-    combo_html = (
-        '<input type="hidden" name="combo_form" value="1"><div class="wide"><label for="combo_add">Also search with (combined)</label>'
-        '<div class="chips" id="combo_chips" role="list" data-labels="%s">%s<select class="select select-sm" id="combo_add" '
-        'aria-label="Add a preset to the combination"><option value="">Add preset…</option>%s</select></div>'
-        '<div class="ui-inline">%s</div><span class="help">The presets in the box are searched and scored alongside the one in '
-        'use, so more than one kind of posting shows up. Each posting is scored by every preset on its own and the best one '
-        'counts (the Jobs list shows which). Saving the settings stores them; the button applies them without saving the '
-        'rest.</span></div>' % (
+    combo_add = "".join('<option value="%s">%s</option>' % (e(k), e(preset_label(k))) for k in every if k not in combo)
+    saved = "".join('<span class="chip">%s<button type="submit" formaction="/preset" formnovalidate name="preset_del" value="%s" '
+                    'title="Delete this preset" aria-label="Delete preset %s">×</button></span>' % (e(n), e(n), e(n)) for n in mine)
+    pbtn = lambda act, label: ('<button class="btn btn-sm btn-outline" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
+                               % (act, " formnovalidate" if act != "save" else "", label))
+    presets = ui_sec("presets", "Presets", "A preset is a saved search: the search terms, locations, filters, the scoring "
+                     "chips and the minimum score. The current settings below always run; add presets to search and score "
+                     "more kinds of postings at once.",
+        '<input type="hidden" name="combo_form" value="1"><div class="ui-grid"><div class="wide"><label for="combo_add">'
+        'Also search with</label><div class="chips" id="combo_chips" role="list" data-labels="%s">%s<select class="select '
+        'select-sm" id="combo_add" aria-label="Add a preset"><option value="">Add preset…</option>%s</select></div>'
+        '<div class="ui-inline">%s</div><span class="help">Each posting is scored by the current settings and by every preset '
+        'here on its own, and the best one counts (the Jobs list shows which). Saving the settings stores the choice; the '
+        'button applies it without saving the rest.</span></div>'
+        '<div><label for="preset_name">Save the current search and scoring as a preset</label><input class="input" '
+        'id="preset_name" name="preset_name" maxlength="60" placeholder="Name"><div class="ui-inline">%s</div>'
+        '<span class="help">An existing name is overwritten. Saves the settings on this page first.</span></div>'
+        '<div><label>Saved presets</label><div class="chips" id="saved_presets">%s</div>'
+        '<span class="help">× deletes a preset (click twice).</span></div></div>' % (
             e(json.dumps({k: preset_label(k) for k in every}, ensure_ascii=False)), combo_chips, combo_add,
-            pbtn("combine", "Apply combination"))) + script("combo-chips")
-    presets = ui_sec("presets", "Presets", "A preset is what you are looking for: the search terms, locations, filters, the "
-                     "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
-                     "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
-                     "also updates the active preset.",
-        '<p class="ui-lead" id="preset_state" aria-live="polite">In use: <b>%s</b></p><div class="ui-grid"><div>'
-        '<label for="pp_btn">Preset</label><div class="pp" id="pp"><select class="pp-native" id="preset_pick" name="preset_pick" '
-        'tabindex="-1" aria-hidden="true">%s</select><button type="button" class="select pp-btn" id="pp_btn" aria-haspopup="listbox" '
-        'aria-expanded="false" aria-controls="pp_list"><span id="pp_label"></span></button>'
-        '<ul class="pp-list" id="pp_list" role="listbox" aria-label="Presets" tabindex="-1"></ul></div>'
-        '<input type="hidden" name="active_preset_set" id="active_preset_set" value="%s">'
-        '<div class="ui-inline">%s</div><span class="help">Picking one fills in Job search and Scoring below. Review it, '
-        'then Save changes; leaving without saving asks first.</span></div>'
-        '<div><label for="preset_name">Name for changed settings</label><input class="input" id="preset_name" '
-        'name="preset_name" maxlength="60" placeholder="%s"><div class="ui-inline">%s</div>'
-        '<span class="help">If you change the settings of a preset and save, they are kept as a new preset under this '
-        'name (empty: “%s”); the picked preset stays as it was. Type an existing name to update that one.</span></div></div>'
-        '<script type="application/json" id="preset_data">%s</script>' % (
-            (e(preset_label(active)) if active else "custom settings (no preset)") + "".join(
-                " + " + e(preset_label(k)) for k in combo if k != active and (k in mine or k[4:] in tpls)), opts, e(active),
-            "", e(NEW_PRESET),
-            pbtn("rename", "Rename the preset in use") if active in mine else "", e(NEW_PRESET),
-            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/")) + combo_html) + PRESET_PICKER_JS
+            pbtn("combine", "Apply combination"), pbtn("save", "Save as preset"),
+            saved or '<span class="help">None yet.</span>')) + script("combo-chips")
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
@@ -175,6 +155,8 @@ def settings_page(flash=""):
                      "Drag a chip or use its arrows to move it; Enter adds one. <code>unity / unity3d</code> counts as one "
                      "(words that mean the same). Saving re-scores every posting.",
         '<div class="ui-grid">'
+        + chips("must", "Must contain (title or description)", "At least one of these has to appear in the title or the "
+                "description, otherwise the posting is hidden. Empty: no requirement.")
         + chips("interests", "What interests me (job title)", "By position: +6, +5, +4, +4, +3, +3, +2, +2, +2, then +1 each.")
         + chips("desc", "Bonus if the description mentions it", "+3, +2, then +1 each; at most +%d together. Not counted "
                 "again when the title already has it." % DESC_MAX)
@@ -254,7 +236,5 @@ CHIPS_JS = script("scoring-chips")
 LEAVE_JS = script("settings-leave")
 
 
-# Settings → Presets: the preset list as a dropdown whose own presets have an ✕ to delete them (a second click confirms).
 # The hidden <select> stays the form field, so loading, saving and the unsaved-changes check work as before. Deleting is
 # a background request: the page is not reloaded, so unsaved settings are not lost.
-PRESET_PICKER_JS = script("preset-picker")

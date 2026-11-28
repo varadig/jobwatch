@@ -1202,20 +1202,15 @@ class Presets(unittest.TestCase):
         cfg = config_store.load()
         cfg["search_terms"] = ["unity developer"]
         cfg["scoring"]["interests"] = ["unity"]
-        cfg["presets"], cfg["active_preset"] = {}, ""
+        cfg["presets"] = {}
         config_store.save(cfg)
         self.assertIn("Saved", settings.preset_action({"preset_do": "save", "preset_name": "Unity"}))
         self.assertIn("game-designer", presets.template_presets())
-        self.assertIn("Switched", settings.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"}))
-        cfg = config_store.load()
-        self.assertIn("game designer", cfg["scoring"]["interests"])
-        self.assertEqual(cfg["active_preset"], "tpl:game-designer")   # the template stays selected
-        self.assertEqual(cfg["presets"]["Unity"]["search_terms"], ["unity developer"])  # the saved one is untouched
-        settings.preset_action({"preset_do": "load", "preset_pick": "Unity"})
-        cfg = config_store.load()
-        self.assertEqual((cfg["search_terms"], cfg["scoring"]["interests"], cfg["active_preset"]), (["unity developer"], ["unity"], "Unity"))
-        self.assertIn("deleted", settings.preset_action({"preset_do": "delete", "preset_pick": "Unity"}))
-        self.assertEqual(config_store.load()["active_preset"], "")
+        self.assertEqual(config_store.load()["presets"]["Unity"]["search_terms"], ["unity developer"])
+        settings.preset_action({"preset_do": "save", "preset_name": "Unity"})     # the same name overwrites
+        self.assertEqual(list(config_store.load()["presets"]), ["Unity"])
+        self.assertIn("deleted", settings.preset_action({"preset_del": "Unity"}))
+        self.assertEqual(config_store.load()["presets"], {})
 
 
 class CombinedPresets(unittest.TestCase):
@@ -1228,7 +1223,7 @@ class CombinedPresets(unittest.TestCase):
         cfg = config_store.load()
         self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))   # other tests expect the config as it was
         cfg.update(search_terms=["unity developer"], search_locations=["Hungary"], min_score=4,
-                   presets={}, active_preset="", combined_presets=[])
+                   presets={}, combined_presets=[])
         cfg["scoring"] = {"interests": ["unity", "developer"], "desc": [], "less": ["designer"], "never": [],
                           "loc_good": [], "loc_bad": []}
         config_store.save(cfg)
@@ -1250,20 +1245,64 @@ class CombinedPresets(unittest.TestCase):
         self.assertGreater(sc, alone)
         self.assertEqual(hits[0], "◆game-designer (template)")
         sc2, hits2 = score_job(cfg, {"title": "Unity Developer", "location": "", "description": ""})
-        self.assertEqual(hits2[0], "◆Unity")
+        self.assertEqual(hits2[0], "◆settings")   # a tie: the settings in use come first
 
     def test_signature_and_upkeep(self):
         from jobwatch.services.refresh import search_signature
+        before = search_signature(config_store.load())
+        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on", "combo:Unity": "on", "combo:gone": "on"})
         cfg = config_store.load()
-        before = search_signature(cfg)
+        self.assertEqual(cfg["combined_presets"], ["tpl:game-designer", "Unity"])   # unknown ones are dropped
+        self.assertNotEqual(search_signature(cfg), before)
+        self.assertIn("deleted", settings.preset_action({"preset_del": "Unity"}))
+        self.assertEqual(config_store.load()["combined_presets"], ["tpl:game-designer"])
+
+    def test_settings_page_shows_the_chips(self):
         settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"})
-        self.assertNotEqual(search_signature(config_store.load()), before)
-        settings.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"})
-        self.assertEqual(config_store.load()["combined_presets"], [])   # now the one in use
-        settings.preset_action({"preset_do": "load", "preset_pick": "Unity"})
-        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"})
-        settings.preset_action({"preset_do": "rename", "preset_name": "Unity2"})
-        self.assertEqual(config_store.load()["active_preset"], "Unity2")
+        h = settings_view.settings_page()
+        self.assertIn('name="combo:tpl:game-designer"', h)
+        self.assertIn('name="preset_del" value="Unity"', h)
+        self.assertNotIn("preset_pick", h)
+
+
+class RequiredKeywords(unittest.TestCase):
+    def cfg(self, must):
+        cfg = config_store.load()
+        cfg = dict(cfg, min_score=4, combined_presets=[], scoring={
+            "must": must, "interests": ["developer"], "desc": [], "less": [], "never": [], "loc_good": [], "loc_bad": []})
+        return cfg
+
+    def test_missing_keyword_hides_the_posting(self):
+        from jobwatch.domain.scoring import score_job
+        cfg = self.cfg(["unity / unity3d"])
+        sc, hits = score_job(cfg, {"title": "Data Developer", "description": "Databricks", "location": ""})
+        self.assertLessEqual(sc, 4 - 40)
+        self.assertTrue(any("required keyword missing" in h for h in hits))
+
+    def test_title_or_description_lets_it_through(self):
+        from jobwatch.domain.scoring import score_job
+        cfg = self.cfg(["unity / unity3d"])
+        self.assertGreaterEqual(score_job(cfg, {"title": "Unity Developer", "description": "", "location": ""})[0], 4)
+        self.assertGreaterEqual(score_job(cfg, {"title": "Game Developer", "description": "We use Unity.", "location": ""})[0], 4)
+
+    def test_empty_list_changes_nothing(self):
+        from jobwatch.domain.scoring import score_job
+        self.assertEqual(score_job(self.cfg([]), {"title": "Data Developer", "description": "", "location": ""})[0],
+                         score_job(self.cfg(["developer"]), {"title": "Data Developer", "description": "", "location": ""})[0])
+
+    def test_combined_the_passing_preset_wins(self):
+        from jobwatch.domain.scoring import score_job
+        cfg = self.cfg(["game designer"])
+        cfg["presets"] = {"Dev": {"scoring": {"must": ["unity"], "interests": ["unity"], "desc": [], "less": [], "never": [],
+                                              "loc_good": [], "loc_bad": []}}}
+        cfg["combined_presets"] = ["Dev"]
+        sc, hits = score_job(cfg, {"title": "Unity Developer", "description": "", "location": ""})
+        self.assertEqual(hits[0], "◆Dev")
+        self.assertGreaterEqual(sc, 4)
+
+    def test_every_template_has_required_keywords(self):
+        for name, t in presets.template_presets().items():
+            self.assertTrue(t["scoring"].get("must"), name)
 
 
 class NewSearch(unittest.TestCase):
@@ -1291,7 +1330,7 @@ class NewSearch(unittest.TestCase):
         database.init()
         cfg = config_store.load()
         self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))  # the other tests share this config
-        cfg["presets"], cfg["active_preset"] = {}, ""
+        cfg["presets"] = {}
         config_store.save(cfg)
         form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "search_locations": "European Union",
                 "sc_interests": "unity", "min_score": "4", "src_linkedin": "on"}
@@ -1308,63 +1347,6 @@ class NewSearch(unittest.TestCase):
         h = settings_view.settings_page()
         self.assertIn('id="leave_dlg"', h)
         self.assertIn('id="settings_next"', h)
-
-
-class PresetPickedInTheForm(unittest.TestCase):
-    def setUp(self):
-        from unittest import mock
-        database.init()
-        cfg = config_store.load()
-        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))
-        p = mock.patch.object(settings, "search_again", lambda: 0)
-        p.start()
-        self.addCleanup(p.stop)
-        self.unity = {"search_terms": ["unity"], "scoring": {"interests": ["unity"]}}
-        cfg["presets"], cfg["active_preset"] = {"Unity": self.unity}, "Unity"
-        presets.apply_preset(cfg, self.unity)
-        config_store.save(cfg)
-        self.form = {"ntfy_server": "https://ntfy.sh", "interval": "60", "search_terms": "unity", "sc_interests": "unity",
-                     "min_score": "4", "active_preset_set": "Unity", "preset_name": ""}
-
-    def test_unchanged_keeps_the_preset(self):
-        res = settings.save_settings(self.form)
-        cfg = config_store.load()
-        self.assertEqual((cfg["active_preset"], list(cfg["presets"]), res.preset_note), ("Unity", ["Unity"], ""))
-
-    def test_changed_becomes_a_new_preset(self):
-        res = settings.save_settings(dict(self.form, sc_interests="unity\ngame"))
-        cfg = config_store.load()
-        self.assertEqual(cfg["active_preset"], "New preset")
-        self.assertEqual(cfg["presets"]["Unity"], self.unity)                 # the picked one stays as it was
-        self.assertEqual(cfg["presets"]["New preset"]["scoring"]["interests"], ["unity", "game"])
-        self.assertIn("New preset", res.preset_note)
-        settings.save_settings(dict(self.form, active_preset_set="New preset", sc_interests="unity\nc#"))
-        self.assertEqual(config_store.load()["active_preset"], "New preset 2")
-        settings.save_settings(dict(self.form, active_preset_set="Unity", sc_interests="c#", preset_name="Unity"))  # named: updated
-        cfg = config_store.load()
-        self.assertEqual((cfg["active_preset"], cfg["presets"]["Unity"]["scoring"]["interests"]), ("Unity", ["c#"]))
-
-    def test_a_picked_template_stays_selected(self):
-        tpl = presets.template_presets()["game-designer"]
-        form = dict(self.form, active_preset_set="tpl:game-designer", search_terms="\n".join(tpl["search_terms"]),
-                    search_locations="\n".join(tpl["search_locations"]), min_score=str(tpl["min_score"]),
-                    **{"sc_" + k: "\n".join(v) for k, v in tpl["scoring"].items()},
-                    **{"sf_" + k: "on" for k, v in tpl["search_filter"].items() if v})
-        settings.save_settings(form)
-        cfg = config_store.load()
-        self.assertEqual(cfg["active_preset"], "tpl:game-designer")
-        self.assertIn('value="tpl:game-designer" selected', settings_view.settings_page())
-
-    def test_rename(self):
-        self.assertIn("renamed", settings.preset_action({"preset_do": "rename", "preset_name": "Unity dev"}))
-        cfg = config_store.load()
-        self.assertEqual((cfg["active_preset"], list(cfg["presets"])), ("Unity dev", ["Unity dev"]))
-
-    def test_page_carries_the_presets_for_the_form(self):
-        h = settings_view.settings_page()
-        self.assertIn('id="preset_data"', h)
-        self.assertIn('"tpl:game-designer"', h)
-        self.assertNotIn('value="load"', h)   # no server-side switch button any more
 
 
 class CvPostingsStay(unittest.TestCase):

@@ -1,13 +1,10 @@
 """Saving the Settings form."""
-import copy
 import re
 
 from jobwatch.config import config_store
 from jobwatch.domain.scoring import SCORING_KINDS, parse_chips
 from jobwatch.models import FETCHED_SOURCES, WORK_MODES
-from jobwatch.services.presets import (
-    apply_preset, clean_preset_name, free_preset_name, preset_by_key, preset_of, same_as_preset, template_presets
-)
+from jobwatch.services.presets import preset_by_key, preset_of
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH, rescore_all, search_again, search_signature
 from jobwatch.sources.custom import parse_custom_sources
 from jobwatch.sources.registry import SEARCH_FILTERABLE
@@ -15,88 +12,39 @@ from jobwatch.sources.registry import SEARCH_FILTERABLE
 
 class SaveResult:
     """What saving the settings did: truthy when the search changed."""
-    def __init__(self, search_changed, preset_note=""):
-        self.search_changed, self.preset_note = search_changed, preset_note
+    def __init__(self, search_changed):
+        self.search_changed = search_changed
 
     def __bool__(self):
         return self.search_changed
 
 
 def preset_action(f):
-    """Settings → Presets buttons. Returns the message to show."""
-    act, pick = f.get("preset_do", ""), f.get("preset_pick", "")
+    """Settings → Presets buttons (save, delete, combine). Returns the message to show."""
+    act = f.get("preset_do", "")
+    if f.get("preset_del"):
+        name = f["preset_del"]
+        with config_store.lock:
+            cfg = config_store.load()
+            if name not in (cfg.get("presets") or {}):
+                return "No such preset."
+            del cfg["presets"][name]
+            cfg["combined_presets"] = [k for k in cfg.get("combined_presets") or [] if k != name]
+            config_store.save(cfg)
+        return "Preset “%s” deleted; the current settings did not change." % name
     if act == "save":
         name = re.sub(r"\s+", " ", f.get("preset_name", "")).strip()[:60]
-        if not name:
+        if not name or name.startswith("tpl:"):
             return "Give the preset a name."
         changed = False
         if "ntfy_server" in f:  # sent with the settings form: what is on the screen counts
-            with config_store.lock:
-                old = config_store.load()
             changed = save_settings(f)
         with config_store.lock:
             cfg = config_store.load()
-            if "ntfy_server" in f and old.get("active_preset") in (old.get("presets") or {}) and old["active_preset"] != name:
-                cfg["presets"][old["active_preset"]] = old["presets"][old["active_preset"]]  # the edits go to the new one only
             cfg.setdefault("presets", {})[name] = preset_of(cfg)
-            cfg["active_preset"] = name
             config_store.save(cfg)
         return "Saved as preset “%s”." % name + (" The search changed, so the postings found so far were cleared (%s) and "
                                                  "a new search started." % KEPT_ON_NEW_SEARCH if changed else "")
-    if act == "load":
-        pre = ""
-        if f.get("save_first") and "ntfy_server" in f:  # "Save, then switch" from the unsaved-changes dialog
-            save_settings(f)
-            pre = "Your changes were saved. "
-        if pick.startswith("tpl:"):
-            preset, name = template_presets().get(pick[4:]), "%s (template)" % pick[4:]
-        else:
-            with config_store.lock:
-                preset, name = (config_store.load().get("presets") or {}).get(pick), pick
-        if not preset:
-            return "Pick a preset first."
-        with config_store.lock:
-            cfg = config_store.load()
-            before = search_signature(cfg)
-            apply_preset(cfg, preset)
-            cfg["active_preset"] = pick
-            cfg["combined_presets"] = [k for k in cfg.get("combined_presets") or [] if k != pick]
-            config_store.save(cfg)
-            changed = search_signature(cfg) != before
-        rescore_all()
-        if changed:
-            search_again()
-        return (pre + "Switched to “%s”. " % name
-                + ("The search changed, so the postings found so far were cleared (%s) and a new search started." % KEPT_ON_NEW_SEARCH
-                   if changed else "Postings re-scored.")
-                )
-    if act == "rename":
-        new = clean_preset_name(f.get("preset_name"))
-        with config_store.lock:
-            cfg = config_store.load()
-            old = cfg.get("active_preset") or ""
-            if old not in (cfg.get("presets") or {}):
-                return "Only your own presets can be renamed (pick or save one first)."
-            if not new or new.startswith("tpl:"):
-                return "Type the new name in the name field."
-            if new != old and new in cfg["presets"]:
-                return "There is already a preset called “%s”." % new
-            cfg["presets"] = {(new if k == old else k): v for k, v in cfg["presets"].items()}
-            cfg["combined_presets"] = [new if k == old else k for k in cfg.get("combined_presets") or []]
-            cfg["active_preset"] = new
-            config_store.save(cfg)
-        return "Preset “%s” renamed to “%s”." % (old, new)
-    if act == "delete":
-        with config_store.lock:
-            cfg = config_store.load()
-            if pick not in (cfg.get("presets") or {}):
-                return "Pick one of your presets to delete (templates cannot be deleted)."
-            del cfg["presets"][pick]
-            cfg["combined_presets"] = [k for k in cfg.get("combined_presets") or [] if k != pick]
-            if cfg.get("active_preset") == pick:
-                cfg["active_preset"] = ""
-            config_store.save(cfg)
-        return "Preset “%s” deleted; the current settings did not change." % pick
     if act == "combine":
         with config_store.lock:
             cfg = config_store.load()
@@ -108,25 +56,22 @@ def preset_action(f):
         if changed:
             search_again()
         n = len(cfg["combined_presets"])
-        return ("Searching and scoring with %d more preset%s alongside the one in use." % (n, "" if n == 1 else "s") if n
-                else "No combined presets: only the one in use.") + (
+        return ("Searching and scoring with %d preset%s alongside the current settings." % (n, "" if n == 1 else "s") if n
+                else "No combined presets: only the current settings.") + (
             " The search changed, so the postings found so far were cleared (%s) and a new search started." % KEPT_ON_NEW_SEARCH
             if changed else " Postings re-scored.")
     return ""
 
 
 def combo_keys(f, cfg):
-    """The ticked "Also search with" presets (fields combo:<key>), without the one in use and without unknown ones."""
-    active = cfg.get("active_preset") or ""
-    keys = [k[6:] for k in f if k.startswith("combo:")]
-    return [k for k in keys if k != active and preset_by_key(cfg, k)]
+    """The "Also search with" presets (fields combo:<key>), without unknown ones."""
+    return [k for k in (k[6:] for k in f if k.startswith("combo:")) if preset_by_key(cfg, k)]
 
 
 def save_settings(f):
     g = lambda k, d="": f.get(k, d)
     with config_store.lock:
         cfg = config_store.load()
-        old_cfg = copy.deepcopy(cfg)
         before = search_signature(cfg)
         cfg["ntfy"].update(enabled="ntfy_enabled" in f, server=g("ntfy_server", "https://ntfy.sh").strip() or "https://ntfy.sh",
                            topic=re.sub(r"[^A-Za-z0-9_-]", "", g("ntfy_topic")) or cfg["ntfy"]["topic"])
@@ -171,23 +116,6 @@ def save_settings(f):
                 ms["password"] = ""  # no own login: the e-mail account's is used
         if "sc_interests" in f:
             cfg["scoring"] = {k: parse_chips(g("sc_" + k)) for k in SCORING_KINDS}
-        note = ""
-        if "sc_interests" in f:  # the whole form: decide which preset these settings are
-            pick = g("active_preset_set", cfg.get("active_preset") or "")
-            base = preset_by_key(cfg, pick)
-            if same_as_preset(cfg, base):
-                cfg["active_preset"] = pick                      # exactly the picked preset or template
-            elif base is None and not pick and same_as_preset(cfg, preset_of(old_cfg)):
-                pass                                             # no preset yet and the search did not change
-            else:  # changed: saved as a preset of its own, never over the picked one unless you name it
-                name = clean_preset_name(g("preset_name"))
-                if not name or name.startswith("tpl:") or name == pick and pick.startswith("tpl:"):
-                    name = free_preset_name(cfg)
-                existed = name in (cfg.get("presets") or {})
-                cfg.setdefault("presets", {})[name] = preset_of(cfg)
-                cfg["active_preset"] = name
-                note = ("Preset “%s” updated." if existed else
-                        "Your changes were saved as a new preset: “%s” (rename it under Presets).") % name
         if "combo_form" in f:   # the "Also search with" boxes are part of the form
             cfg["combined_presets"] = combo_keys(f, cfg)
         config_store.save(cfg)
@@ -195,10 +123,9 @@ def save_settings(f):
     rescore_all()
     if changed:
         search_again()
-    return SaveResult(changed, note)
+    return SaveResult(changed)
 
 
 def saved_message(res):
     return (("Saved. The search changed, so the postings found so far were cleared (%s) and a new search started: "
-             "the list fills up again in a few minutes." % KEPT_ON_NEW_SEARCH) if res else "Saved, postings re-scored.") + (
-        " " + res.preset_note if getattr(res, "preset_note", "") else "")
+             "the list fills up again in a few minutes." % KEPT_ON_NEW_SEARCH) if res else "Saved, postings re-scored.")

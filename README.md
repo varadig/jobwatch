@@ -92,8 +92,8 @@ Claude turns it into the profile structure and shows the result in the editor. C
 then press Save. Your full CV text, contact details included, is sent to the Anthropic API for this step.
 A scanned PDF with no text layer cannot be read; paste the text instead. The API key is set in Settings.
 
-To change what a profile searches for, edit the Settings page (Job search → What to search for: one list for every source; Scoring: ordered chips, the order is the score; Presets: save and switch whole searches), or the `search_terms`,
-`search_locations`, `search_filter`, `scoring` and `presets` in its `config.json`. The templates in the table above are also offered as presets.
+To change what a profile searches for, edit the Settings page (Job search → What to search for: one list for every source; Scoring: ordered chips, the order is the score; Presets: save searches and combine them), or the `search_terms`,
+`search_locations`, `search_filter`, `scoring` and `presets` in its `config.json`. The templates in the table above are also offered as presets. The current settings always run; under Presets → “Also search with” you add saved presets or templates as chips to search and score several kinds of postings at once (each posting is scored by every one, the best score counts). “Must contain” (Scoring) lists keywords of which at least one has to be in the title or description, otherwise the posting is hidden.
 
 ## Running and settings
 

@@ -35,6 +35,9 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "unity / unity3d"
+    ],
     "interests": [
       "unity",
       "unity3d",

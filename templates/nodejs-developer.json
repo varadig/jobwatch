@@ -35,6 +35,9 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "node.js / nodejs / node js"
+    ],
     "interests": [
       "node.js / nodejs / node js",
       "backend / back-end",

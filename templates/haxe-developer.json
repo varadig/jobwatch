@@ -35,6 +35,11 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "haxe",
+      "openfl / haxeflixel / heaps / kha",
+      "html5 game / html5 games"
+    ],
     "interests": [
       "haxe",
       "openfl / haxeflixel / heaps / kha",

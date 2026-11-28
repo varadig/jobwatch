@@ -35,6 +35,15 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "graphic designer / graphic design",
+      "visual designer",
+      "ui artist / game ui artist",
+      "ui designer",
+      "2d artist",
+      "motion designer",
+      "illustrator"
+    ],
     "interests": [
       "graphic designer",
       "visual designer",

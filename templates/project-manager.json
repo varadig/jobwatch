@@ -33,6 +33,13 @@
     "custom": false
   },
   "scoring": {
+    "must": [
+      "project manager",
+      "programme manager / program manager",
+      "product owner",
+      "scrum master",
+      "delivery manager"
+    ],
     "interests": [
       "project manager",
       "programme manager",

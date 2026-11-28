@@ -33,7 +33,9 @@ document.querySelectorAll("textarea.chips-src").forEach(function (ta) {
     items.forEach(function (t, i) {
       var c = document.createElement("span"), p = pts(k, i), b = document.createElement("b");
       c.className = "chip" + (p < 0 ? " neg" : ""); c.setAttribute("role", "listitem"); c.draggable = true;
-      b.className = "pts"; b.textContent = fmt(p); c.append(b, document.createTextNode(t));
+      b.className = "pts"; b.textContent = fmt(p);
+      if (k !== "must") c.append(b);   // required keywords carry no points
+      c.append(document.createTextNode(t));
       if (ordered) {
         if (i > 0) c.append(button("Move " + t + " up", "‹", function () {
           items.splice(i - 1, 0, items.splice(i, 1)[0]); sync(".chip:nth-child(" + i + ") button"); }));
