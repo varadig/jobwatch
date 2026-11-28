@@ -48,6 +48,25 @@ def _hit(alts, text):
 
 
 def score_job(cfg, j):
+    """(score, hits). With combined presets every profile scores the posting on its own and the best one counts: its
+    score relative to its own minimum, shown on the scale of the settings in use (so the list filter and the
+    notifications keep working), and its name as the first hit."""
+    from jobwatch.services.presets import search_profiles   # late: presets reads the config, which reads this module
+    profiles = search_profiles(cfg) if cfg.get("combined_presets") else []
+    if len(profiles) < 2:
+        return _score_one(cfg, j)
+    base = cfg.get("min_score", 4)
+    best = None
+    for label, p in profiles:
+        sc, hits = _score_one(p, j)
+        rel = sc - p.get("min_score", base)
+        if best is None or rel > best[0]:
+            best = (rel, label, sc, hits)
+    rel, label, sc, hits = best
+    return rel + base, ["◆" + label] + hits
+
+
+def _score_one(cfg, j):
     rules = scoring_rules(cfg)
     title = (j.get("title") or "").lower()
     body = " ".join([(j.get("description") or ""), (j.get("company") or "")]).lower()

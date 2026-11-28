@@ -129,6 +129,18 @@ def settings_page(flash=""):
     pdata = dict({n: (cfg.get("presets") or {})[n] for n in mine}, **{"tpl:" + n: t for n, t in tpls.items()})
     pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
                                        % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
+    combo = cfg.get("combined_presets") or []
+    combo_boxes = "".join(
+        '<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="combo:%s"%s%s> %s</label>' % (
+            e(k), " checked" if k in combo else "", " disabled" if k == active else "", e(preset_label(k)))
+        for k in mine + ["tpl:" + n for n in tpls])
+    combo_html = (
+        '<input type="hidden" name="combo_form" value="1"><div class="wide"><label>Also search with (combined)</label>'
+        '<div class="ui-inline">%s</div><div class="ui-inline">%s</div><span class="help">Ticked presets are searched and '
+        'scored alongside the one in use, so more than one kind of posting shows up. Each posting is scored by every '
+        'preset on its own and the best one counts (the Jobs list shows which). Saving the settings stores the ticks; '
+        'the button applies them without saving the rest.</span></div>' % (
+            combo_boxes, pbtn("combine", "Apply combination")))
     presets = ui_sec("presets", "Presets", "A preset is what you are looking for: the search terms, locations, filters, the "
                      "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
                      "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
@@ -146,10 +158,11 @@ def settings_page(flash=""):
         '<span class="help">If you change the settings of a preset and save, they are kept as a new preset under this '
         'name (empty: “%s”); the picked preset stays as it was. Type an existing name to update that one.</span></div></div>'
         '<script type="application/json" id="preset_data">%s</script>' % (
-            e(preset_label(active)) if active else "custom settings (no preset)", opts, e(active),
+            (e(preset_label(active)) if active else "custom settings (no preset)") + "".join(
+                " + " + e(preset_label(k)) for k in combo if k != active and (k in mine or k[4:] in tpls)), opts, e(active),
             "", e(NEW_PRESET),
             pbtn("rename", "Rename the preset in use") if active in mine else "", e(NEW_PRESET),
-            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/"))) + PRESET_PICKER_JS
+            json.dumps(pdata, ensure_ascii=False).replace("</", "<\\/")) + combo_html) + PRESET_PICKER_JS
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '

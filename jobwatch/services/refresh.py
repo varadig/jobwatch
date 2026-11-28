@@ -18,6 +18,7 @@ from jobwatch.services.documents import restore_cv_jobs
 from jobwatch.services.enrich import enrich_pending_linkedin, enrich_work_modes
 from jobwatch.services.logos import fetch_logos, remember_logo
 from jobwatch.services.notify import notifier
+from jobwatch.services.presets import search_profiles
 from jobwatch.services.state import RUN_LOCK, STATE
 from jobwatch.sources.mail import mark_mails_done
 from jobwatch.sources.registry import SOURCES
@@ -31,7 +32,10 @@ KEPT_ON_NEW_SEARCH = "kept: saved, applied and hidden postings, the ones with a 
 
 
 def search_signature(cfg):
-    return json.dumps({k: cfg.get(k) for k in SEARCH_SETTINGS}, sort_keys=True, ensure_ascii=False)
+    d = {k: cfg.get(k) for k in SEARCH_SETTINGS}
+    d["combined"] = [{k: p.get(k) for k in ("search_terms", "search_locations", "search_filter")}
+                     for _, p in search_profiles(cfg)[1:]]
+    return json.dumps(d, sort_keys=True, ensure_ascii=False)
 
 
 def clear_for_new_search():

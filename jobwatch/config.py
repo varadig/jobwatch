@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "search_terms": [],        # e.g. "project manager | Hungary"
     "search_locations": ["European Union"],  # LinkedIn locations for the terms without their own
     "search_filter": {"meetfrank": True, "4dayweek": True, "studios": False, "rss": False, "custom": False},
+    "combined_presets": [],    # presets searched and scored alongside the settings in use (own names or "tpl:<template>")
     "rss_feeds": [],
     "custom_sources": [],      # own sources from Settings, see CUSTOM_TYPES
     "studios": [],            # "rendszer | azonosito | nev", pl. "ashby | acme | Acme"

@@ -33,6 +33,9 @@ def why_chips(matched):
         return '<div class="why-hits"><span class="hit none" title="Nothing in the posting matched your scoring chips">no matching terms</span></div>'
     out = []
     for h in hits:
+        if h.startswith("◆"):
+            out.append('<span class="hit preset" title="Scored by this combined preset">%s%s</span>' % (ic("tune"), e(h[1:])))
+            continue
         loc = h.startswith("📍")
         if loc:
             h = h[1:]

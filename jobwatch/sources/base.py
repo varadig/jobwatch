@@ -4,6 +4,7 @@ from enum import Enum
 
 from jobwatch.models import SOURCES_INFO
 from jobwatch.search import matches_search, search_keywords
+from jobwatch.services.presets import search_profiles
 
 
 class Filtering(Enum):
@@ -41,7 +42,8 @@ class JobSource(ABC):
     def search_filter(self, cfg):
         """The search keywords this source's postings must match, or [] to keep them all."""
         on = self.filtering in (Filtering.ALWAYS, Filtering.TITLE) or (
-            self.filtering is Filtering.OPTIONAL and (cfg.get("search_filter") or {}).get(self.key))
+            self.filtering is Filtering.OPTIONAL and any(
+                (p.get("search_filter") or {}).get(self.key) for _, p in search_profiles(cfg)))
         return search_keywords(cfg) if on else []
 
     def keeps(self, keywords, posting):

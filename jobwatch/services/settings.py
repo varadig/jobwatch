@@ -60,6 +60,7 @@ def preset_action(f):
             before = search_signature(cfg)
             apply_preset(cfg, preset)
             cfg["active_preset"] = pick
+            cfg["combined_presets"] = [k for k in cfg.get("combined_presets") or [] if k != pick]
             config_store.save(cfg)
             changed = search_signature(cfg) != before
         rescore_all()
@@ -81,6 +82,7 @@ def preset_action(f):
             if new != old and new in cfg["presets"]:
                 return "There is already a preset called “%s”." % new
             cfg["presets"] = {(new if k == old else k): v for k, v in cfg["presets"].items()}
+            cfg["combined_presets"] = [new if k == old else k for k in cfg.get("combined_presets") or []]
             cfg["active_preset"] = new
             config_store.save(cfg)
         return "Preset “%s” renamed to “%s”." % (old, new)
@@ -90,11 +92,34 @@ def preset_action(f):
             if pick not in (cfg.get("presets") or {}):
                 return "Pick one of your presets to delete (templates cannot be deleted)."
             del cfg["presets"][pick]
+            cfg["combined_presets"] = [k for k in cfg.get("combined_presets") or [] if k != pick]
             if cfg.get("active_preset") == pick:
                 cfg["active_preset"] = ""
             config_store.save(cfg)
         return "Preset “%s” deleted; the current settings did not change." % pick
+    if act == "combine":
+        with config_store.lock:
+            cfg = config_store.load()
+            before = search_signature(cfg)
+            cfg["combined_presets"] = combo_keys(f, cfg)
+            config_store.save(cfg)
+            changed = search_signature(cfg) != before
+        rescore_all()
+        if changed:
+            search_again()
+        n = len(cfg["combined_presets"])
+        return ("Searching and scoring with %d more preset%s alongside the one in use." % (n, "" if n == 1 else "s") if n
+                else "No combined presets: only the one in use.") + (
+            " The search changed, so the postings found so far were cleared (%s) and a new search started." % KEPT_ON_NEW_SEARCH
+            if changed else " Postings re-scored.")
     return ""
+
+
+def combo_keys(f, cfg):
+    """The ticked "Also search with" presets (fields combo:<key>), without the one in use and without unknown ones."""
+    active = cfg.get("active_preset") or ""
+    keys = [k[6:] for k in f if k.startswith("combo:")]
+    return [k for k in keys if k != active and preset_by_key(cfg, k)]
 
 
 def save_settings(f):
@@ -163,6 +188,8 @@ def save_settings(f):
                 cfg["active_preset"] = name
                 note = ("Preset “%s” updated." if existed else
                         "Your changes were saved as a new preset: “%s” (rename it under Presets).") % name
+        if "combo_form" in f:   # the "Also search with" boxes are part of the form
+            cfg["combined_presets"] = combo_keys(f, cfg)
         config_store.save(cfg)
         changed = search_signature(cfg) != before
     rescore_all()

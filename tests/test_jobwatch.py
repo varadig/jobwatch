@@ -1218,6 +1218,54 @@ class Presets(unittest.TestCase):
         self.assertEqual(config_store.load()["active_preset"], "")
 
 
+class CombinedPresets(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        database.init()
+        patcher = mock.patch.object(settings, "search_again", lambda: 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        cfg = config_store.load()
+        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))   # other tests expect the config as it was
+        cfg.update(search_terms=["unity developer"], search_locations=["Hungary"], min_score=4,
+                   presets={}, active_preset="", combined_presets=[])
+        cfg["scoring"] = {"interests": ["unity", "developer"], "desc": [], "less": ["designer"], "never": [],
+                          "loc_good": [], "loc_bad": []}
+        config_store.save(cfg)
+        settings.preset_action({"preset_do": "save", "preset_name": "Unity"})
+
+    def test_search_and_score_with_both(self):
+        from jobwatch.domain.scoring import score_job
+        from jobwatch.search import linkedin_plan
+        cfg = config_store.load()
+        job = {"title": "Senior Game Designer", "location": "", "description": ""}
+        alone = score_job(cfg, job)[0]
+        self.assertIn("Combination", settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"}) + "Combination")
+        cfg = config_store.load()
+        self.assertEqual(cfg["combined_presets"], ["tpl:game-designer"])
+        terms = [kw for kw, _ in linkedin_plan(cfg)]
+        self.assertIn("unity developer", terms)
+        self.assertIn("game designer", terms)
+        sc, hits = score_job(cfg, job)
+        self.assertGreater(sc, alone)
+        self.assertEqual(hits[0], "◆game-designer (template)")
+        sc2, hits2 = score_job(cfg, {"title": "Unity Developer", "location": "", "description": ""})
+        self.assertEqual(hits2[0], "◆Unity")
+
+    def test_signature_and_upkeep(self):
+        from jobwatch.services.refresh import search_signature
+        cfg = config_store.load()
+        before = search_signature(cfg)
+        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"})
+        self.assertNotEqual(search_signature(config_store.load()), before)
+        settings.preset_action({"preset_do": "load", "preset_pick": "tpl:game-designer"})
+        self.assertEqual(config_store.load()["combined_presets"], [])   # now the one in use
+        settings.preset_action({"preset_do": "load", "preset_pick": "Unity"})
+        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"})
+        settings.preset_action({"preset_do": "rename", "preset_name": "Unity2"})
+        self.assertEqual(config_store.load()["active_preset"], "Unity2")
+
+
 class NewSearch(unittest.TestCase):
     def test_clear_keeps_what_you_worked_with(self):
         database.init()

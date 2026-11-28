@@ -11,10 +11,21 @@ from jobwatch.env import TEMPLATE_DIR
 PRESET_KEYS = ("search_terms", "search_locations", "search_filter", "scoring", "min_score")
 
 
+_TEMPLATE_CACHE = {}
+
+
 def template_presets():
-    """{name: preset} from templates/*.json (the job-type templates, read-only)."""
+    """{name: preset} from templates/*.json (the job-type templates, read-only). Cached until a file changes."""
+    names = sorted(os.listdir(TEMPLATE_DIR)) if os.path.isdir(TEMPLATE_DIR) else []
+    stamp = tuple((fn, os.path.getmtime(os.path.join(TEMPLATE_DIR, fn))) for fn in names)
+    if _TEMPLATE_CACHE.get("stamp") != stamp:
+        _TEMPLATE_CACHE.update(stamp=stamp, value=_read_templates(names))
+    return copy.deepcopy(_TEMPLATE_CACHE["value"])
+
+
+def _read_templates(names):
     out = {}
-    for fn in sorted(os.listdir(TEMPLATE_DIR)) if os.path.isdir(TEMPLATE_DIR) else []:
+    for fn in names:
         if not fn.endswith(".json") or fn.startswith("profile"):
             continue
         try:
@@ -79,3 +90,19 @@ def free_preset_name(cfg, base=NEW_PRESET):
 
 def preset_label(key):
     return "%s (template)" % key[4:] if (key or "").startswith("tpl:") else key
+
+
+def search_profiles(cfg):
+    """[(label, profile)]: the settings in use first, then the combined presets that run alongside. A posting is
+    found by every profile's search and scored by each one's own scoring (the best counts)."""
+    active = cfg.get("active_preset") or ""
+    out = [(preset_label(active).replace(", ", " ") if active else "settings", cfg)]
+    seen = {active}
+    for key in cfg.get("combined_presets") or []:
+        if key in seen:
+            continue
+        seen.add(key)
+        preset = preset_by_key(cfg, key)
+        if preset:
+            out.append((preset_label(key).replace(", ", " "), preset))
+    return out

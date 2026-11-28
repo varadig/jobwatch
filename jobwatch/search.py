@@ -1,16 +1,21 @@
 """What is searched for: the search terms, their keywords and locations, and matching a posting."""
 
+from jobwatch.services.presets import search_profiles
 from jobwatch.util.text import term_re
 
 
-def search_entries(cfg):
-    """[(keywords, location or "")] from the search terms."""
+def _entries(profile):
     out = []
-    for line in cfg.get("search_terms") or []:
+    for line in profile.get("search_terms") or []:
         parts = [x.strip() for x in line.split("|")]
         if parts[0]:
             out.append((parts[0], parts[1] if len(parts) > 1 else ""))
     return out
+
+
+def search_entries(cfg):
+    """[(keywords, location or "")] from the search terms of the settings and of the combined presets."""
+    return [e for _, p in search_profiles(cfg) for e in _entries(p)]
 
 
 def search_keywords(cfg):
@@ -25,13 +30,14 @@ def search_keywords(cfg):
 
 def linkedin_plan(cfg):
     """[(keywords, location)]: a term with its own location is searched there, the others in each default location."""
-    locs = [l.strip() for l in cfg.get("search_locations") or [] if l.strip()] or ["European Union"]
     out, seen = [], set()
-    for kw, loc in search_entries(cfg):
-        for l in ([loc] if loc else locs):
-            if (kw.lower(), l.lower()) not in seen:
-                seen.add((kw.lower(), l.lower()))
-                out.append((kw, l))
+    for _, p in search_profiles(cfg):
+        locs = [l.strip() for l in p.get("search_locations") or [] if l.strip()] or ["European Union"]
+        for kw, loc in _entries(p):
+            for l in ([loc] if loc else locs):
+                if (kw.lower(), l.lower()) not in seen:
+                    seen.add((kw.lower(), l.lower()))
+                    out.append((kw, l))
     return out
 
 
