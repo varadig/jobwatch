@@ -2,7 +2,7 @@
 (function () {
 var form = document.getElementById("settings"), dlg = document.getElementById("leave_dlg");
 if (!form || !dlg) return;
-var SEARCH = ["search", "own"], SKIP = /^(preset_name|preset_do|preset_del|what|next|save_first)$/;
+var SEARCH = ["search", "own"], SKIP = /^(preset_name|preset_do|preset_del|preset_add|what|next|save_first)$/;
 function snap() {
   var out = {};
   form.querySelectorAll("section.ui-section").forEach(function (sec) {

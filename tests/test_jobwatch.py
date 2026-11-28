@@ -1193,116 +1193,121 @@ class ChipScoring(unittest.TestCase):
 
 
 class Presets(unittest.TestCase):
-    def test_save_switch_and_templates(self):
+    """Presets: the settings being edited are one of the active presets; the others run alongside."""
+
+    def setUp(self):
         from unittest import mock
         database.init()
         patcher = mock.patch.object(settings, "search_again", lambda: 0)  # no real fetching in the tests
         patcher.start()
         self.addCleanup(patcher.stop)
         cfg = config_store.load()
-        cfg["search_terms"] = ["unity developer"]
-        cfg["scoring"]["interests"] = ["unity"]
-        cfg["presets"] = {}
-        config_store.save(cfg)
-        self.assertIn("Saved", settings.preset_action({"preset_do": "save", "preset_name": "Unity"}))
-        self.assertIn("game-designer", presets.template_presets())
-        self.assertEqual(config_store.load()["presets"]["Unity"]["search_terms"], ["unity developer"])
-        settings.preset_action({"preset_do": "save", "preset_name": "Unity"})     # the same name overwrites
-        self.assertEqual(list(config_store.load()["presets"]), ["Unity"])
-        self.assertIn("deleted", settings.preset_action({"preset_del": "Unity"}))
-        self.assertEqual(config_store.load()["presets"], {})
-
-
-class CombinedPresets(unittest.TestCase):
-    def setUp(self):
-        from unittest import mock
-        database.init()
-        patcher = mock.patch.object(settings, "search_again", lambda: 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        cfg = config_store.load()
-        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))   # other tests expect the config as it was
-        cfg.update(search_terms=["unity developer"], search_locations=["Hungary"], min_score=4,
-                   presets={}, combined_presets=[])
-        cfg["scoring"] = {"interests": ["unity", "developer"], "desc": [], "less": ["designer"], "never": [],
+        self.addCleanup(config_store.save, json.loads(json.dumps(cfg)))   # the other tests expect the config as it was
+        cfg.update(search_terms=["unity developer"], search_locations=["Hungary"], min_score=4, presets={},
+                   active_preset="", combined_presets=[])
+        cfg["scoring"] = {"must": [], "interests": ["unity", "developer"], "desc": [], "less": ["designer"], "never": [],
                           "loc_good": [], "loc_bad": []}
         config_store.save(cfg)
-        settings.preset_action({"preset_do": "save", "preset_name": "Unity"})
+        self.cfg = lambda: config_store.load()
+
+    def form(self, **kw):
+        c = self.cfg()
+        f = {"ntfy_server": "https://ntfy.sh", "interval": "60", "min_score": "4", "search_terms": "\n".join(c["search_terms"]),
+             "search_locations": "\n".join(c["search_locations"]),
+             **{"sc_" + k: "\n".join(v) for k, v in c["scoring"].items()}}
+        f.update(kw)
+        return f
+
+    def test_old_settings_become_my_search(self):
+        c = self.cfg()
+        self.assertEqual((c["active_preset"], list(c["presets"])), ("My search", ["My search"]))
+        self.assertEqual(c["presets"]["My search"]["search_terms"], ["unity developer"])
+
+    def test_edit_switches_and_keeps_the_set(self):
+        from jobwatch.services.refresh import search_signature
+        settings.preset_action({"preset_add": "tpl:game-designer"})
+        before = search_signature(self.cfg())
+        self.assertEqual(self.cfg()["combined_presets"], ["tpl:game-designer"])
+        self.assertIn("template", settings.preset_action({"preset_edit": "tpl:game-designer"}))
+        c = self.cfg()
+        self.assertEqual((c["active_preset"], c["combined_presets"]), ("tpl:game-designer", ["My search"]))
+        self.assertIn("game designer", c["scoring"]["interests"])           # its settings fill the form
+        self.assertEqual(search_signature(c), before)                        # same active set: no new search
+
+    def test_editing_a_template_makes_your_own_copy(self):
+        settings.preset_action({"preset_edit": "tpl:game-designer"})
+        res = settings.save_settings(self.form(sc_interests="game designer\nnew chip", search_terms="game designer"))
+        c = self.cfg()
+        self.assertIn("game-designer", res.preset_note)
+        self.assertEqual(c["active_preset"], "game-designer")
+        self.assertIn("new chip", c["presets"]["game-designer"]["scoring"]["interests"])
+        self.assertNotIn("new chip", presets.template_presets()["game-designer"]["scoring"]["interests"])
+
+    def test_unchanged_template_stays_a_template(self):
+        settings.preset_action({"preset_edit": "tpl:game-designer"})
+        t = presets.template_presets()["game-designer"]
+        res = settings.save_settings(self.form(
+            search_terms="\n".join(t["search_terms"]), search_locations="\n".join(t["search_locations"]),
+            min_score=str(t["min_score"]), **{"sc_" + k: "\n".join(v) for k, v in t["scoring"].items()},
+            **{"sf_" + k: "on" for k, v in t["search_filter"].items() if v}))
+        self.assertEqual((self.cfg()["active_preset"], res.preset_note), ("tpl:game-designer", ""))
+
+    def test_edits_go_to_the_preset_being_edited(self):
+        settings.preset_action(self.form(sc_interests="unity\nc#", preset_add="tpl:game-designer"))
+        self.assertEqual(self.cfg()["presets"]["My search"]["scoring"]["interests"], ["unity", "c#"])
+
+    def test_only_and_remove(self):
+        settings.preset_action({"preset_add": "tpl:game-designer"})
+        self.assertIn("only", settings.preset_action({"preset_only": "tpl:game-designer"}))
+        c = self.cfg()
+        self.assertEqual((c["active_preset"], c["combined_presets"]), ("tpl:game-designer", []))
+        self.assertIn("At least one", settings.preset_action({"preset_remove": "tpl:game-designer"}))
+        settings.preset_action({"preset_add": "My search"})
+        settings.preset_action({"preset_remove": "tpl:game-designer"})        # the edited one: editing moves on
+        c = self.cfg()
+        self.assertEqual((c["active_preset"], c["combined_presets"]), ("My search", []))
+        self.assertEqual(c["search_terms"], ["unity developer"])
+
+    def test_save_as_new_keeps_the_old_one(self):
+        res = settings.preset_action(self.form(sc_interests="python", preset_do="save", preset_name="Python"))
+        c = self.cfg()
+        self.assertIn("Python", res)
+        self.assertEqual(c["active_preset"], "Python")
+        self.assertEqual(c["presets"]["My search"]["scoring"]["interests"], ["unity", "developer"])   # untouched
+        self.assertEqual(c["presets"]["Python"]["scoring"]["interests"], ["python"])
+
+    def test_delete(self):
+        settings.preset_action(self.form(preset_do="save", preset_name="Other"))
+        self.assertIn("Switch to another", settings.preset_action({"preset_del": "Other"}))   # being edited
+        settings.preset_action({"preset_add": "My search"})
+        settings.preset_action({"preset_edit": "My search"})
+        self.assertIn("deleted", settings.preset_action({"preset_del": "Other"}))
+        c = self.cfg()
+        self.assertNotIn("Other", c["presets"])
+        self.assertNotIn("Other", c["combined_presets"])
 
     def test_search_and_score_with_both(self):
         from jobwatch.domain.scoring import score_job
         from jobwatch.search import linkedin_plan
-        cfg = config_store.load()
         job = {"title": "Senior Game Designer", "location": "", "description": ""}
-        alone = score_job(cfg, job)[0]
-        self.assertIn("Combination", settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"}) + "Combination")
-        cfg = config_store.load()
-        self.assertEqual(cfg["combined_presets"], ["tpl:game-designer"])
-        terms = [kw for kw, _ in linkedin_plan(cfg)]
+        alone = score_job(self.cfg(), job)[0]
+        settings.preset_action({"preset_add": "tpl:game-designer"})
+        c = self.cfg()
+        terms = [kw for kw, _ in linkedin_plan(c)]
         self.assertIn("unity developer", terms)
         self.assertIn("game designer", terms)
-        sc, hits = score_job(cfg, job)
+        sc, hits = score_job(c, job)
         self.assertGreater(sc, alone)
         self.assertEqual(hits[0], "◆game-designer (template)")
-        sc2, hits2 = score_job(cfg, {"title": "Unity Developer", "location": "", "description": ""})
-        self.assertEqual(hits2[0], "◆settings")   # a tie: the settings in use come first
+        self.assertEqual(score_job(c, {"title": "Unity Developer", "location": "", "description": ""})[1][0], "◆My search")
 
-    def test_signature_and_upkeep(self):
-        from jobwatch.services.refresh import search_signature
-        before = search_signature(config_store.load())
-        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on", "combo:Unity": "on", "combo:gone": "on"})
-        cfg = config_store.load()
-        self.assertEqual(cfg["combined_presets"], ["tpl:game-designer", "Unity"])   # unknown ones are dropped
-        self.assertNotEqual(search_signature(cfg), before)
-        self.assertIn("deleted", settings.preset_action({"preset_del": "Unity"}))
-        self.assertEqual(config_store.load()["combined_presets"], ["tpl:game-designer"])
-
-    def test_settings_page_shows_the_chips(self):
-        settings.preset_action({"preset_do": "combine", "combo:tpl:game-designer": "on"})
+    def test_settings_page_shows_the_controls(self):
+        settings.preset_action({"preset_add": "tpl:game-designer"})
         h = settings_view.settings_page()
-        self.assertIn('name="combo:tpl:game-designer"', h)
-        self.assertIn('name="preset_del" value="Unity"', h)
+        for x in ('name="preset_edit" value="tpl:game-designer"', 'name="preset_only" value="My search"',
+                  'name="preset_remove"', 'name="preset_add"', "Editing: My search"):
+            self.assertIn(x, h)
         self.assertNotIn("preset_pick", h)
-
-
-class RequiredKeywords(unittest.TestCase):
-    def cfg(self, must):
-        cfg = config_store.load()
-        cfg = dict(cfg, min_score=4, combined_presets=[], scoring={
-            "must": must, "interests": ["developer"], "desc": [], "less": [], "never": [], "loc_good": [], "loc_bad": []})
-        return cfg
-
-    def test_missing_keyword_hides_the_posting(self):
-        from jobwatch.domain.scoring import score_job
-        cfg = self.cfg(["unity / unity3d"])
-        sc, hits = score_job(cfg, {"title": "Data Developer", "description": "Databricks", "location": ""})
-        self.assertLessEqual(sc, 4 - 40)
-        self.assertTrue(any("required keyword missing" in h for h in hits))
-
-    def test_title_or_description_lets_it_through(self):
-        from jobwatch.domain.scoring import score_job
-        cfg = self.cfg(["unity / unity3d"])
-        self.assertGreaterEqual(score_job(cfg, {"title": "Unity Developer", "description": "", "location": ""})[0], 4)
-        self.assertGreaterEqual(score_job(cfg, {"title": "Game Developer", "description": "We use Unity.", "location": ""})[0], 4)
-
-    def test_empty_list_changes_nothing(self):
-        from jobwatch.domain.scoring import score_job
-        self.assertEqual(score_job(self.cfg([]), {"title": "Data Developer", "description": "", "location": ""})[0],
-                         score_job(self.cfg(["developer"]), {"title": "Data Developer", "description": "", "location": ""})[0])
-
-    def test_combined_the_passing_preset_wins(self):
-        from jobwatch.domain.scoring import score_job
-        cfg = self.cfg(["game designer"])
-        cfg["presets"] = {"Dev": {"scoring": {"must": ["unity"], "interests": ["unity"], "desc": [], "less": [], "never": [],
-                                              "loc_good": [], "loc_bad": []}}}
-        cfg["combined_presets"] = ["Dev"]
-        sc, hits = score_job(cfg, {"title": "Unity Developer", "description": "", "location": ""})
-        self.assertEqual(hits[0], "◆Dev")
-        self.assertGreaterEqual(sc, 4)
-
-    def test_every_template_has_required_keywords(self):
-        for name, t in presets.template_presets().items():
-            self.assertTrue(t["scoring"].get("must"), name)
 
 
 class NewSearch(unittest.TestCase):

@@ -25,16 +25,17 @@ from jobwatch.sources.registry import SOURCES
 from jobwatch.util.timeutil import now_iso
 
 # Settings that decide WHAT is fetched. When one changes, the postings found so far are cleared and fetched again.
-SEARCH_SETTINGS = ("sources", "search_terms", "search_locations", "search_filter", "studios", "rss_feeds", "custom_sources")
+SEARCH_SETTINGS = ("sources", "studios", "rss_feeds", "custom_sources")
+PROFILE_SEARCH = ("search_terms", "search_locations", "search_filter")   # what a preset searches for
 
 
 KEPT_ON_NEW_SEARCH = "kept: saved, applied and hidden postings, the ones with a CV or a recruiter message, e-mail alerts and the ones added by hand"
 
 
 def search_signature(cfg):
-    d = {k: cfg.get(k) for k in SEARCH_SETTINGS}
-    d["combined"] = [{k: p.get(k) for k in ("search_terms", "search_locations", "search_filter")}
-                     for _, p in search_profiles(cfg)[1:]]
+    d = {k: cfg.get(k) for k in SEARCH_SETTINGS}   # the order of the active presets does not matter
+    d["profiles"] = sorted(json.dumps({k: p.get(k) for k in PROFILE_SEARCH}, sort_keys=True, ensure_ascii=False)
+                           for _, p in search_profiles(cfg))
     return json.dumps(d, sort_keys=True, ensure_ascii=False)
 
 

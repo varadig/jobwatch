@@ -35,7 +35,8 @@ DEFAULT_CONFIG = {
     "search_terms": [],        # e.g. "project manager | Hungary"
     "search_locations": ["European Union"],  # LinkedIn locations for the terms without their own
     "search_filter": {"meetfrank": True, "4dayweek": True, "studios": False, "rss": False, "custom": False},
-    "combined_presets": [],    # presets searched and scored alongside the settings in use (own names or "tpl:<template>")
+    "active_preset": "",       # the preset being edited: its search and scoring are the settings above (see ensure_active)
+    "combined_presets": [],    # the other active presets, searched and scored alongside (own names or "tpl:<template>")
     "rss_feeds": [],
     "custom_sources": [],      # own sources from Settings, see CUSTOM_TYPES
     "studios": [],            # "rendszer | azonosito | nev", pl. "ashby | acme | Acme"
@@ -67,6 +68,8 @@ class ConfigStore:
                     cfg[k] = v
         changed = migrate_search(cfg)
         changed = migrate_scoring(cfg, saved) or changed
+        from jobwatch.services.presets import ensure_active   # late: presets import this module
+        changed = ensure_active(cfg) or changed
         if not cfg["ntfy"].get("topic"):
             cfg["ntfy"]["topic"] = "jobwatch-" + secrets.token_hex(6)
             changed = True

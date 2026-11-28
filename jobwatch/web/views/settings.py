@@ -4,7 +4,7 @@ import json
 from jobwatch.config import config_store
 from jobwatch.domain.scoring import DESC_MAX, SCORING_KINDS
 from jobwatch.models import FETCHED_SOURCES, SOURCES_INFO, WORK_MODES
-from jobwatch.services.presets import preset_label, template_presets
+from jobwatch.services.presets import active_set, preset_label, template_presets
 from jobwatch.services.refresh import KEPT_ON_NEW_SEARCH
 from jobwatch.sources.registry import OPTIONAL_BOARDS, SEARCH_FILTERABLE
 from jobwatch.util.text import e
@@ -19,6 +19,9 @@ def settings_page(flash=""):
     with config_store.lock:
         cfg = config_store.load()
     n, m = cfg["ntfy"], cfg["email"]
+    active = cfg.get("active_preset") or ""
+    editing = ('<b>Editing: %s</b>%s. ' % (e(preset_label(active)), " (template: saving makes your own copy)"
+                                           if active.startswith("tpl:") else "")) if active else ""
     chk = lambda b: " checked" if b else ""
     sub = "%s/%s" % (n["server"].rstrip("/"), n["topic"])
     box = lambda k: '<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="src_%s"%s> %s</label>' % (
@@ -67,7 +70,7 @@ def settings_page(flash=""):
           '<span class="help">No notification for the unticked ones.</span></div></div>' % modes,
         test("ntfy", "Save and send a test push") + test("email", "Save and send a test e-mail"))
 
-    search = ui_sec("search", "Job search", "Which sites are searched, and how often.",
+    search = ui_sec("search", "Job search", editing + "Which sites are searched, and how often.",
         '<div class="ui-grid"><div class="wide"><label>Sources</label><div class="ui-checks">%s</div></div>' % src_boxes
         + ('<div class="wide"><label>Optional boards</label><div class="ui-checks">%s</div><span class="help">Free public job boards, '
            'switch on the ones you want. Those that list every trade keep only the postings matching a search term '
@@ -121,37 +124,46 @@ def settings_page(flash=""):
 
     mine, tpls = sorted(cfg.get("presets") or {}), template_presets()
     every = mine + ["tpl:" + n for n in tpls]
-    combo = [k for k in cfg.get("combined_presets") or [] if k in every]
-    combo_chips = "".join('<span class="chip" role="listitem" data-key="%s"><input type="hidden" name="combo:%s" value="on">%s</span>' % (
-        e(k), e(k), e(preset_label(k))) for k in combo)
-    combo_add = "".join('<option value="%s">%s</option>' % (e(k), e(preset_label(k))) for k in every if k not in combo)
-    saved = "".join('<span class="chip">%s<button type="submit" formaction="/preset" formnovalidate name="preset_del" value="%s" '
-                    'title="Delete this preset" aria-label="Delete preset %s">×</button></span>' % (e(n), e(n), e(n)) for n in mine)
-    pbtn = lambda act, label: ('<button class="btn btn-sm btn-outline" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
-                               % (act, " formnovalidate" if act != "save" else "", label))
+    act_set = active_set(cfg)
+    pb = lambda name, key, label, title, cls="": ('<button type="submit" class="%s" formaction="/preset" formnovalidate name="%s" '
+                                                  'value="%s" title="%s" aria-label="%s">%s</button>' % (
+        cls, name, e(key), e(title), e(title), label))
+    chips_active = "".join(
+        '<span class="chip%s" role="listitem">%s%s%s</span>' % (
+            " editing" if k == active else "",
+            pb("preset_edit", k, e(preset_label(k)), "Edit “%s”: its settings fill the form below" % preset_label(k), "chip-name"),
+            pb("preset_only", k, "⊙", "Search with only “%s”" % preset_label(k)) if len(act_set) > 1 else "",
+            pb("preset_remove", k, "×", "Do not search with “%s”" % preset_label(k)) if len(act_set) > 1 else "")
+        for k in act_set)
+    add_opts = "".join('<option value="%s">%s</option>' % (e(k), e(preset_label(k))) for k in every if k not in act_set)
+    saved = "".join('<span class="chip">%s%s</span>' % (e(n), "" if n == active else
+                    '<button type="submit" formaction="/preset" formnovalidate name="preset_del" value="%s" '
+                    'title="Delete this preset" aria-label="Delete preset %s">×</button>' % (e(n), e(n))) for n in mine)
+    pbtn = lambda act, label: ('<button class="btn btn-sm btn-outline" formaction="/preset" name="preset_do" value="%s" '
+                               'formnovalidate>%s</button>' % (act, label))
     presets = ui_sec("presets", "Presets", "A preset is a saved search: the search terms, locations, filters, the scoring "
-                     "chips and the minimum score. The current settings below always run; add presets to search and score "
-                     "more kinds of postings at once.",
-        '<input type="hidden" name="combo_form" value="1"><div class="ui-grid"><div class="wide"><label for="combo_add">'
-        'Also search with</label><div class="chips" id="combo_chips" role="list" data-labels="%s">%s<select class="select '
-        'select-sm" id="combo_add" aria-label="Add a preset"><option value="">Add preset…</option>%s</select></div>'
-        '<div class="ui-inline">%s</div><span class="help">Each posting is scored by the current settings and by every preset '
-        'here on its own, and the best one counts (the Jobs list shows which). Saving the settings stores the choice; the '
-        'button applies it without saving the rest.</span></div>'
-        '<div><label for="preset_name">Save the current search and scoring as a preset</label><input class="input" '
+                     "chips and the minimum score. The active presets are searched and scored together: each posting is "
+                     "scored by every one on its own and the best counts (the Jobs list shows which).",
+        '<div class="ui-grid"><div class="wide"><label for="combo_add">Active presets</label>'
+        '<div class="chips" id="active_presets" role="list">%s<select class="select select-sm" id="combo_add" name="preset_add" '
+        'aria-label="Add a preset"%s><option value="">Add preset…</option>%s</select>'
+        '<button type="submit" hidden id="combo_add_btn" formaction="/preset" formnovalidate name="preset_do" value="add"></button></div>'
+        '<span class="help">Click a name to edit that preset: its settings fill Job search and Scoring below. ⊙ keeps only that '
+        'preset, × stops searching with it. The settings on this page are saved first.</span></div>'
+        '<div><label for="preset_name">Save the current settings as a new preset</label><input class="input" '
         'id="preset_name" name="preset_name" maxlength="60" placeholder="Name"><div class="ui-inline">%s</div>'
-        '<span class="help">An existing name is overwritten. Saves the settings on this page first.</span></div>'
+        '<span class="help">Becomes the one being edited; the previous one keeps its last saved settings. An existing '
+        'name is overwritten.</span></div>'
         '<div><label>Saved presets</label><div class="chips" id="saved_presets">%s</div>'
-        '<span class="help">× deletes a preset (click twice).</span></div></div>' % (
-            e(json.dumps({k: preset_label(k) for k in every}, ensure_ascii=False)), combo_chips, combo_add,
-            pbtn("combine", "Apply combination"), pbtn("save", "Save as preset"),
+        '<span class="help">× deletes a preset (click twice). Templates are always offered under “Add preset…”.</span></div></div>' % (
+            chips_active, "" if add_opts else " hidden", add_opts, pbtn("save", "Save as new preset"),
             saved or '<span class="help">None yet.</span>')) + script("combo-chips")
     sc = cfg.get("scoring") or {}
     chips = lambda kind, label, help_: (
         '<div class="wide"><label for="sc_%s">%s</label><textarea class="textarea ui-mono chips-src" id="sc_%s" name="sc_%s" '
         'rows="4" data-kind="%s">%s</textarea><span class="help">%s</span></div>' % (
             kind, label, kind, kind, kind, e("\n".join(sc.get(kind) or [])), help_))
-    scoring = ui_sec("scoring", "Scoring", "Tell jobwatch what interests you, most important first: the order is the score. "
+    scoring = ui_sec("scoring", "Scoring", editing + "Tell jobwatch what interests you, most important first: the order is the score. "
                      "Drag a chip or use its arrows to move it; Enter adds one. <code>unity / unity3d</code> counts as one "
                      "(words that mean the same). Saving re-scores every posting.",
         '<div class="ui-grid">'

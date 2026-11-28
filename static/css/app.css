@@ -149,7 +149,8 @@ details.wm-pick>summary::-webkit-details-marker{display:none}
 .chip button{border:0;background:none;padding:0 5px;border-radius:99px;cursor:pointer;color:var(--muted);font-size:15px;line-height:20px}
 .chip button:hover,.chip button:focus-visible{background:var(--line);color:var(--fg)}.chip.dragging{opacity:.4}
 .chip.over{outline:2px solid var(--acc)}
-#combo_chips .chip{cursor:default;padding-left:9px}#combo_chips select{border:0;background:transparent;max-width:200px}
+#active_presets .chip,#saved_presets .chip{cursor:default}#active_presets select{border:0;background:transparent;max-width:200px}
+.chip .chip-name{font-size:13px;padding:0 4px 0 0;color:inherit}.chip.editing{background:var(--acc-soft);border-color:var(--acc);color:var(--acc);font-weight:600}
 article.job[data-href]{cursor:pointer;transition:box-shadow .12s}
 article.job[data-href]:hover{box-shadow:0 0 0 1px color-mix(in oklab,var(--acc) 50%,transparent),0 3px 12px rgba(0,0,0,.10)}
 .jt a.ext{font-weight:400;color:var(--muted);margin-left:4px;font-size:14px}.jt a.ext:hover{color:var(--acc);text-decoration:none}
