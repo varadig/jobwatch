@@ -129,18 +129,21 @@ def settings_page(flash=""):
     pdata = dict({n: (cfg.get("presets") or {})[n] for n in mine}, **{"tpl:" + n: t for n, t in tpls.items()})
     pbtn = lambda act, label, cls="": ('<button class="btn btn-sm %s" formaction="/preset" name="preset_do" value="%s"%s>%s</button>'
                                        % (cls or "btn-outline", act, " formnovalidate" if act != "save" else "", label))
-    combo = cfg.get("combined_presets") or []
-    combo_boxes = "".join(
-        '<label><input type="checkbox" class="checkbox checkbox-sm checkbox-primary" name="combo:%s"%s%s> %s</label>' % (
-            e(k), " checked" if k in combo else "", " disabled" if k == active else "", e(preset_label(k)))
-        for k in mine + ["tpl:" + n for n in tpls])
+    combo = [k for k in cfg.get("combined_presets") or [] if k != active and (k in mine or k[4:] in tpls)]
+    every = mine + ["tpl:" + n for n in tpls]
+    combo_chips = "".join('<span class="chip" role="listitem" data-key="%s"><input type="hidden" name="combo:%s" value="on">%s</span>' % (
+        e(k), e(k), e(preset_label(k))) for k in combo)
+    combo_add = "".join('<option value="%s">%s</option>' % (e(k), e(preset_label(k))) for k in every if k not in combo and k != active)
     combo_html = (
-        '<input type="hidden" name="combo_form" value="1"><div class="wide"><label>Also search with (combined)</label>'
-        '<div class="ui-inline">%s</div><div class="ui-inline">%s</div><span class="help">Ticked presets are searched and '
-        'scored alongside the one in use, so more than one kind of posting shows up. Each posting is scored by every '
-        'preset on its own and the best one counts (the Jobs list shows which). Saving the settings stores the ticks; '
-        'the button applies them without saving the rest.</span></div>' % (
-            combo_boxes, pbtn("combine", "Apply combination")))
+        '<input type="hidden" name="combo_form" value="1"><div class="wide"><label for="combo_add">Also search with (combined)</label>'
+        '<div class="chips" id="combo_chips" role="list" data-labels="%s">%s<select class="select select-sm" id="combo_add" '
+        'aria-label="Add a preset to the combination"><option value="">Add preset…</option>%s</select></div>'
+        '<div class="ui-inline">%s</div><span class="help">The presets in the box are searched and scored alongside the one in '
+        'use, so more than one kind of posting shows up. Each posting is scored by every preset on its own and the best one '
+        'counts (the Jobs list shows which). Saving the settings stores them; the button applies them without saving the '
+        'rest.</span></div>' % (
+            e(json.dumps({k: preset_label(k) for k in every}, ensure_ascii=False)), combo_chips, combo_add,
+            pbtn("combine", "Apply combination"))) + script("combo-chips")
     presets = ui_sec("presets", "Presets", "A preset is what you are looking for: the search terms, locations, filters, the "
                      "scoring chips and the minimum score, saved under a name, e.g. to try game designer or other roles. "
                      "Picking one only fills in the settings below; nothing changes until you save. Saving the settings "
